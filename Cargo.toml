@@ -1,0 +1,56 @@
+[package]
+name = "brooklet"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "GPL-3.0-or-later"
+description = "An opinionated, offline-first Miniflux client for GNOME"
+repository = "https://github.com/nedrichards/brooklet-linux"
+build = "build.rs"
+exclude = ["build/**", "_build/**", "target/**", ".flatpak-builder/**"]
+
+[features]
+default = []
+gui = ["dep:adw", "dep:gtk", "dep:glycin"]
+
+[[bin]]
+name = "brooklet"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[dependencies]
+async-trait = "0.1.89"
+ego-tree = "0.10.0"
+jiff = "0.2.15"
+reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+scraper = "0.24.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+thiserror = "2.0.17"
+tokio = { version = "1.53.0", features = ["rt-multi-thread", "sync", "net"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", default-features = false, features = ["fmt", "std"] }
+url = { version = "2.5.7", features = ["serde"] }
+oo7 = "0.6.0"
+glycin = { version = "4.0.0", default-features = false, features = ["gdk4", "tokio"], optional = true }
+
+[dependencies.gtk]
+package = "gtk4"
+version = "0.11.5"
+features = ["v4_24"]
+optional = true
+
+[dependencies.adw]
+package = "libadwaita"
+version = "0.9.2"
+features = ["v1_10"]
+optional = true
+
+[dev-dependencies]
+tempfile = "3.23.0"
+tokio = { version = "1.53.0", features = ["macros", "rt-multi-thread"] }
+
+[profile.release]
+lto = "thin"
+strip = "debuginfo"

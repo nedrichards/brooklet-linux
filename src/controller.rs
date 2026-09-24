@@ -1,0 +1,304 @@
+use std::{
+    sync::{Arc, mpsc},
+    time::Duration,
+};
+
+use adw::glib;
+
+use crate::{
+    error::BrookletError,
+    model::{
+        Account, Category, Entry, EntryId, Feed, KarakeepConfig, ReaderPosition, StoragePolicy,
+        SyncStatus,
+    },
+    setup::{SetupRequest, SetupService},
+    sync::{SyncResult, SyncService},
+};
+
+pub struct AppController {
+    runtime: tokio::runtime::Runtime,
+    setup_service: Arc<dyn SetupService>,
+    sync_service: Arc<dyn SyncService>,
+}
+
+impl AppController {
+    pub fn backend_handle(&self) -> tokio::runtime::Handle {
+        self.runtime.handle().clone()
+    }
+    pub fn new(
+        setup_service: Arc<dyn SetupService>,
+        sync_service: Arc<dyn SyncService>,
+    ) -> Result<Self, std::io::Error> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("brooklet-backend")
+            .enable_all()
+            .build()?;
+        Ok(Self {
+            runtime,
+            setup_service,
+            sync_service,
+        })
+    }
+
+    pub fn existing_account(
+        &self,
+        callback: impl FnOnce(Result<Option<Account>, BrookletError>) + 'static,
+    ) {
+        let service = self.setup_service.clone();
+        self.dispatch(async move { service.existing_account().await }, callback);
+    }
+
+    pub fn configure(
+        &self,
+        request: SetupRequest,
+        callback: impl FnOnce(Result<Account, BrookletError>) + 'static,
+    ) {
+        let service = self.setup_service.clone();
+        self.dispatch(async move { service.configure(request).await }, callback);
+    }
+
+    pub fn cached_inbox(&self, callback: impl FnOnce(Result<Vec<Entry>, BrookletError>) + 'static) {
+        let service = self.sync_service.clone();
+        self.dispatch(async move { service.cached_inbox().await }, callback);
+    }
+
+    pub fn set_read_local(
+        &self,
+        entry_id: EntryId,
+        read: bool,
+        callback: impl FnOnce(Result<(), BrookletError>) + 'static,
+    ) {
+        let service = self.sync_service.clone();
+        self.dispatch(
+            async move { service.set_read_local(entry_id, read).await },
+            callback,
+        );
+    }
+
+    pub fn sync(&self, callback: impl FnOnce(Result<SyncResult, BrookletError>) + 'static) {
+        let service = self.sync_service.clone();
+        self.dispatch(async move { service.sync().await }, callback);
+    }
+
+    pub fn disconnect(&self, callback: impl FnOnce(Result<(), BrookletError>) + 'static) {
+        let service = self.sync_service.clone();
+        self.dispatch(async move { service.disconnect().await }, callback);
+    }
+
+    pub fn entries_for_view(
+        &self,
+        view: String,
+        callback: impl FnOnce(Result<Vec<Entry>, BrookletError>) + 'static,
+    ) {
+        let service = self.sync_service.clone();
+        self.dispatch(
+            async move { service.entries_for_view(&view).await },
+            callback,
+        );
+    }
+
+    pub fn search_entries(
+        &self,
+        query: String,
+        feed_id: Option<i64>,
+        category_id: Option<i64>,
+        read: Option<bool>,
+        callback: impl FnOnce(Result<Vec<Entry>, BrookletError>) + 'static,
+    ) {
+        let service = self.sync_service.clone();
+        self.dispatch(
+            async move {
+                service
+                    .search_entries(&query, feed_id, category_id, read)
+                    .await
+            },
+            callback,
+        );
+    }
+
+    pub fn categories_cached(
+        &self,
+        callback: impl FnOnce(Result<Vec<Category>, BrookletError>) + 'static,
+    ) {
+        let service = self.sync_service.clone();
+        self.dispatch(async move { service.categories_cached().await }, callback);
+    }
+
+    pub fn feeds_cached(
+        &self,
+        category_id: Option<i64>,
+        callback: impl FnOnce(Result<Vec<Feed>, BrookletError>) + 'static,
+    ) {
+        let service = self.sync_service.clone();
+        self.dispatch(
+            async move { service.feeds_cached(category_id).await },
+            callback,
+        );
+    }
+
+    pub fn set_read_many_local(
+        &self,
+        entry_ids: Vec<EntryId>,
+        read: bool,
+        callback: impl FnOnce(Result<(), BrookletError>) + 'static,
+    ) {
+        let service = self.sync_service.clone();
+        self.dispatch(
+            async move { service.set_read_many_local(&entry_ids, read).await },
+            callback,
+        );
+    }
+
+    pub fn set_starred_local(
+        &self,
+        entry_id: EntryId,
+        starred: bool,
+        callback: impl FnOnce(Result<(), BrookletError>) + 'static,
+    ) {
+        let service = self.sync_service.clone();
+        self.dispatch(
+            async move { service.set_starred_local(entry_id, starred).await },
+            callback,
+        );
+    }
+
+    pub fn reader_position(
+        &self,
+        entry_id: EntryId,
+        callback: impl FnOnce(Result<Option<ReaderPosition>, BrookletError>) + 'static,
+    ) {
+        let service = self.sync_service.clone();
+        self.dispatch(
+            async move { service.reader_position(entry_id).await },
+            callback,
+        );
+    }
+
+    pub fn save_reader_position(
+        &self,
+        position: ReaderPosition,
+        callback: impl FnOnce(Result<(), BrookletError>) + 'static,
+    ) {
+        let service = self.sync_service.clone();
+        self.dispatch(
+            async move { service.save_reader_position(&position).await },
+            callback,
+        );
+    }
+
+    pub fn queue_karakeep(
+        &self,
+        entry: Entry,
+        callback: impl FnOnce(Result<(), BrookletError>) + 'static,
+    ) {
+        let service = self.sync_service.clone();
+        self.dispatch(
+            async move { service.queue_karakeep(&entry).await },
+            callback,
+        );
+    }
+
+    pub fn karakeep_config(
+        &self,
+        callback: impl FnOnce(Result<Option<KarakeepConfig>, BrookletError>) + 'static,
+    ) {
+        let service = self.sync_service.clone();
+        self.dispatch(async move { service.karakeep_config().await }, callback);
+    }
+
+    pub fn save_karakeep_config(
+        &self,
+        config: KarakeepConfig,
+        key: Option<String>,
+        callback: impl FnOnce(Result<(), BrookletError>) + 'static,
+    ) {
+        let service = self.sync_service.clone();
+        self.dispatch(
+            async move { service.save_karakeep_config(&config, key).await },
+            callback,
+        );
+    }
+
+    pub fn storage_policy(
+        &self,
+        callback: impl FnOnce(Result<StoragePolicy, BrookletError>) + 'static,
+    ) {
+        let service = self.sync_service.clone();
+        self.dispatch(async move { service.storage_policy().await }, callback);
+    }
+
+    pub fn save_storage_policy(
+        &self,
+        policy: StoragePolicy,
+        callback: impl FnOnce(Result<(), BrookletError>) + 'static,
+    ) {
+        let service = self.sync_service.clone();
+        self.dispatch(
+            async move { service.save_storage_policy(&policy).await },
+            callback,
+        );
+    }
+
+    pub fn sync_status(&self, callback: impl FnOnce(Result<SyncStatus, BrookletError>) + 'static) {
+        let service = self.sync_service.clone();
+        self.dispatch(async move { service.sync_status().await }, callback);
+    }
+
+    pub fn refresh_feeds(
+        &self,
+        callback: impl FnOnce(Result<SyncResult, BrookletError>) + 'static,
+    ) {
+        let service = self.sync_service.clone();
+        self.dispatch(async move { service.refresh_feeds().await }, callback);
+    }
+
+    pub fn subscribe(
+        &self,
+        feed_url: String,
+        category_id: Option<i64>,
+        callback: impl FnOnce(Result<(), BrookletError>) + 'static,
+    ) {
+        let service = self.sync_service.clone();
+        self.dispatch(
+            async move { service.subscribe(&feed_url, category_id).await },
+            callback,
+        );
+    }
+
+    pub fn fetch_image(
+        &self,
+        url: String,
+        callback: impl FnOnce(Result<Vec<u8>, BrookletError>) + 'static,
+    ) {
+        self.dispatch(
+            async move {
+                let client = crate::services::url_policy::image_client()?;
+                crate::services::url_policy::fetch_article_image(&client, &url).await
+            },
+            callback,
+        );
+    }
+
+    fn dispatch<T: Send + 'static>(
+        &self,
+        future: impl Future<Output = Result<T, BrookletError>> + Send + 'static,
+        callback: impl FnOnce(Result<T, BrookletError>) + 'static,
+    ) {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        self.runtime.spawn(async move {
+            let _ = sender.send(future.await);
+        });
+        let mut callback = Some(callback);
+        glib::timeout_add_local(Duration::from_millis(25), move || {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    callback.take().expect("callback is called once")(result);
+                    glib::ControlFlow::Break
+                }
+                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+            }
+        });
+    }
+}

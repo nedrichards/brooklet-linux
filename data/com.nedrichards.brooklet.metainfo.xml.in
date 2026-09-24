@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 Nick Richards -->
+<component type="desktop-application">
+  <id>@APP_ID@</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Brooklet</name>
+  <summary>Read your feeds offline</summary>
+  <description>
+    <p>
+      Connect Brooklet to your Miniflux account to catch up on new articles,
+      save favourites, and browse your feeds and categories. A Miniflux server
+      running version 2.3.2 or newer and an API token are required for setup.
+    </p>
+    <p>
+      Cached articles, search, and read and star actions work offline. Your
+      changes synchronise with Miniflux when you reconnect. You can also send
+      articles to Karakeep if you use it.
+    </p>
+    <p>
+      The interface adapts from a side-by-side list and reader on wide screens
+      to page navigation on smaller screens, with keyboard, mouse, and touch
+      controls.
+    </p>
+  </description>
+  <launchable type="desktop-id">@APP_ID@.desktop</launchable>
+  <translation type="gettext">brooklet</translation>
+  <developer id="com.nedrichards">
+    <name translate="no">Nick Richards</name>
+  </developer>
+  <url type="homepage">https://github.com/nedrichards/brooklet-linux</url>
+  <url type="bugtracker">https://github.com/nedrichards/brooklet-linux/issues</url>
+  <url type="vcs-browser">https://github.com/nedrichards/brooklet-linux</url>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/nedrichards/brooklet-linux/main/data/screenshots/inbox-screenshot.png</image>
+      <caption>Catch up on articles in the Inbox and read them side by side</caption>
+    </screenshot>
+  </screenshots>
+  <branding>
+    <color type="primary" scheme_preference="light">#b9ded2</color>
+    <color type="primary" scheme_preference="dark">#305548</color>
+  </branding>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+    <control>touch</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <releases>
+    <release version="0.1.0" date="2026-09-20">
+      <description>
+        <p>Read and search cached Miniflux articles, browse feeds, and keep read and starred changes in sync.</p>
+        <p>Navigate between the Inbox, Saved, and Library views on wide and narrow screens.</p>
+      </description>
+    </release>
+  </releases>
+</component>

@@ -1,0 +1,183 @@
+using Gtk 4.0;
+using Adw 1;
+
+Adw.Dialog setup_dialog {
+  title: _("Connect to Miniflux");
+  content-width: 520;
+  content-height: 640;
+
+  child: Adw.ToolbarView {
+    [top]
+    Adw.HeaderBar {}
+
+    content: Gtk.ScrolledWindow {
+      hscrollbar-policy: never;
+
+      child: Adw.Clamp {
+        maximum-size: 520;
+        tightening-threshold: 420;
+
+        child: Gtk.Box {
+          orientation: vertical;
+
+          Gtk.Box form_content {
+            orientation: vertical;
+            spacing: 20;
+            margin-top: 32;
+            margin-bottom: 32;
+            margin-start: 24;
+            margin-end: 24;
+            valign: start;
+
+            Gtk.Image {
+              icon-name: "mail-unread-symbolic";
+              pixel-size: 64;
+              halign: center;
+              styles ["accent"]
+            }
+
+            Gtk.Box {
+              orientation: vertical;
+              spacing: 8;
+
+              Gtk.Label {
+                label: _("Welcome to Brooklet");
+                halign: center;
+                justify: center;
+                wrap: true;
+                styles ["title-1"]
+              }
+
+              Gtk.Label {
+                label: _("Bring your Miniflux inbox offline and read it in a comfortable native reader.");
+                halign: center;
+                justify: center;
+                wrap: true;
+                max-width-chars: 48;
+                styles ["dim-label"]
+              }
+            }
+
+            Adw.PreferencesGroup {
+              title: _("Miniflux account");
+              description: _("Enter the public address of your Miniflux server and an API token.");
+
+              Adw.EntryRow server_entry {
+                title: _("Server address");
+                input-purpose: url;
+                show-apply-button: false;
+              }
+
+              Adw.PasswordEntryRow token_entry {
+                title: _("API token");
+                show-apply-button: false;
+              }
+            }
+
+            Gtk.Revealer error_revealer {
+              transition-type: slide_down;
+              reveal-child: false;
+
+              child: Gtk.Box {
+                orientation: horizontal;
+                spacing: 10;
+                accessible-role: alert;
+                styles ["setup-error"]
+
+                Gtk.Image {
+                  icon-name: "dialog-error-symbolic";
+                  valign: start;
+                }
+
+                Gtk.Label error_label {
+                  wrap: true;
+                  xalign: 0;
+                  hexpand: true;
+                  selectable: true;
+                }
+              };
+            }
+
+            Gtk.Button connect_button {
+              label: _("Connect");
+              sensitive: false;
+              halign: center;
+              styles ["suggested-action", "pill"]
+            }
+
+            Gtk.Box progress_box {
+              orientation: horizontal;
+              spacing: 10;
+              halign: center;
+              visible: false;
+
+              Adw.Spinner setup_spinner {}
+
+              Gtk.Label {
+                label: _("Checking your account…");
+                styles ["dim-label"]
+              }
+            }
+
+            Gtk.Label {
+              label: _("Requires Miniflux 2.3.2 or newer. Your token is stored securely and is never written to Brooklet’s database or logs.");
+              wrap: true;
+              justify: center;
+              max-width-chars: 52;
+              halign: center;
+              styles ["dim-label", "caption"]
+            }
+          }
+
+          Gtk.Box success_content {
+            orientation: vertical;
+            spacing: 18;
+            margin-top: 56;
+            margin-bottom: 40;
+            margin-start: 32;
+            margin-end: 32;
+            visible: false;
+            valign: start;
+
+            Gtk.Image {
+              icon-name: "object-select-symbolic";
+              pixel-size: 64;
+              halign: center;
+              styles ["success"]
+            }
+
+            Gtk.Label success_title {
+              label: _("Account connected");
+              halign: center;
+              justify: center;
+              wrap: true;
+              styles ["title-1"]
+            }
+
+            Gtk.Label success_detail {
+              halign: center;
+              justify: center;
+              wrap: true;
+              selectable: true;
+              styles ["dim-label"]
+            }
+
+            Gtk.Label {
+              label: _("Brooklet is ready to synchronise your Inbox. Cached articles will remain available when you are offline.");
+              halign: center;
+              justify: center;
+              wrap: true;
+              max-width-chars: 48;
+            }
+
+            Gtk.Button continue_button {
+              label: _("Start Using Brooklet");
+              halign: center;
+              styles ["suggested-action", "pill"]
+            }
+          }
+        };
+      };
+    };
+  };
+}

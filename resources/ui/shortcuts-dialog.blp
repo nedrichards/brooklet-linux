@@ -1,0 +1,98 @@
+using Gtk 4.0;
+using Adw 1;
+
+Adw.ShortcutsDialog shortcuts_dialog {
+  Adw.ShortcutsSection {
+    title: _("General");
+
+    Adw.ShortcutsItem {
+      title: _("Sync articles");
+      action-name: "app.sync";
+      accelerator: "<Control>r";
+    }
+
+    Adw.ShortcutsItem {
+      title: _("Search Library");
+      action-name: "app.search";
+      accelerator: "<Control>f";
+    }
+
+    Adw.ShortcutsItem {
+      title: _("Undo Mark Read");
+      action-name: "win.undo";
+      accelerator: "<Control>z";
+    }
+
+    Adw.ShortcutsItem {
+      title: _("Show keyboard shortcuts");
+      action-name: "win.show-shortcuts";
+      accelerator: "F1";
+    }
+
+    Adw.ShortcutsItem {
+      title: _("Show keyboard shortcuts");
+      action-name: "win.show-shortcuts";
+      accelerator: "<Control>question";
+    }
+
+    Adw.ShortcutsItem {
+      title: _("Quit Brooklet");
+      action-name: "app.quit";
+      accelerator: "<Control>q";
+    }
+  }
+
+  Adw.ShortcutsSection {
+    title: _("Article lists");
+
+    Adw.ShortcutsItem {
+      title: _("Move to next article");
+      accelerator: "j";
+      subtitle: _("From the main window or an article list");
+    }
+
+    Adw.ShortcutsItem {
+      title: _("Move to next article");
+      accelerator: "Down";
+    }
+
+    Adw.ShortcutsItem {
+      title: _("Move to previous article");
+      accelerator: "k";
+      subtitle: _("From the main window or an article list");
+    }
+
+    Adw.ShortcutsItem {
+      title: _("Move to previous article");
+      accelerator: "Up";
+    }
+
+    Adw.ShortcutsItem {
+      title: _("Open selected article");
+      accelerator: "Return";
+      subtitle: _("Selection alone does not mark it read");
+    }
+  }
+
+  Adw.ShortcutsSection {
+    title: _("Navigation");
+
+    Adw.ShortcutsItem {
+      title: _("Keep current article unread");
+      action-name: "win.keep-unread";
+      accelerator: "u";
+    }
+
+    Adw.ShortcutsItem {
+      title: _("Go back");
+      action-name: "win.back";
+      accelerator: "<Alt>Left";
+    }
+
+    Adw.ShortcutsItem {
+      title: _("Go back or dismiss search");
+      action-name: "win.back";
+      accelerator: "Escape";
+    }
+  }
+}

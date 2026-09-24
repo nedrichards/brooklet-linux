@@ -1,0 +1,17 @@
+.git
+.github
+.flatpak-builder
+build
+build-dir
+_build
+target
+.codex
+.agents
+.vscode
+.idea
+__pycache__
+*.pyc
+.env
+.env.*
+*.flatpak
+*.log

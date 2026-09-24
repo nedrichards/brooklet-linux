@@ -1,0 +1,17 @@
+/build/
+/build-dir/
+/_build/
+/target/
+/.flatpak-builder/
+/.agents/
+/.codex/
+__pycache__/
+*.pyc
+/.vscode/
+/.idea/
+*.flatpak
+*.flatpak-builder
+*.log
+.env
+.env.*
+!.env.example

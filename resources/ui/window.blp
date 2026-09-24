@@ -1,0 +1,388 @@
+using Gtk 4.0;
+using Adw 1;
+
+Adw.ApplicationWindow window {
+  title: _("Brooklet");
+  default-width: 1080;
+  default-height: 720;
+  width-request: 360;
+  height-request: 480;
+
+  Adw.Breakpoint {
+    condition ("max-width: 800sp")
+    setters {
+      inbox_split.collapsed: true;
+    }
+  }
+
+  Adw.Breakpoint {
+    condition ("max-width: 550sp")
+    setters {
+      previous_article_button.visible: false;
+      next_article_button.visible: false;
+    }
+  }
+
+  content: Adw.ToastOverlay toast_overlay {
+    child: Adw.NavigationSplitView inbox_split {
+      min-sidebar-width: 300;
+      max-sidebar-width: 420;
+      sidebar-width-fraction: 0.34;
+
+      sidebar: Adw.NavigationPage {
+        title: _("Brooklet");
+        child: Adw.ToolbarView {
+          [bottom]
+          Adw.ViewSwitcherBar destination_switcher {
+            stack: destinations;
+            reveal: true;
+          }
+
+          content: Adw.ViewStack destinations {
+            Adw.ViewStackPage {
+              name: "inbox";
+              title: _("Inbox");
+              icon-name: "mail-unread-symbolic";
+              child: Adw.ToolbarView {
+                [top]
+                Adw.HeaderBar {
+                  title-widget: Adw.WindowTitle sidebar_title {
+                    title: _("Inbox");
+                  };
+
+                  [end]
+                  Gtk.Box {
+                    spacing: 6;
+
+                    Adw.Spinner sync_spinner {
+                      visible: false;
+                      tooltip-text: _("Synchronising");
+                    }
+
+                    Gtk.Button sync_button {
+                      icon-name: "view-refresh-symbolic";
+                      action-name: "app.sync";
+                      tooltip-text: _("Sync");
+                      accessibility { label: _("Sync"); }
+                    }
+                    Gtk.MenuButton app_menu {
+                      icon-name: "open-menu-symbolic";
+                      tooltip-text: _("Main Menu");
+                      accessibility { label: _("Main Menu"); }
+                    }
+                  }
+                }
+
+                content: Gtk.Box {
+                  orientation: vertical;
+
+                  Gtk.Button new_articles_button {
+                    visible: false;
+                    label: _("New articles");
+                    tooltip-text: _("Show newest articles");
+                    styles ["suggested-action", "flat"]
+                  }
+
+                  Adw.StatusPage inbox_status {
+                    vexpand: true;
+                    icon-name: "mail-unread-symbolic";
+                    title: _("Your Inbox");
+                    description: _("Connect Brooklet to Miniflux to begin.");
+                    child: Gtk.Button setup_button {
+                      label: _("Connect to Miniflux");
+                      action-name: "win.setup";
+                      halign: center;
+                      styles ["suggested-action", "pill"]
+                    };
+                  }
+
+                  Gtk.ScrolledWindow inbox_scroller {
+                    visible: false;
+                    vexpand: true;
+                    hscrollbar-policy: never;
+                    child: Gtk.ListView inbox_list {
+                      show-separators: true;
+                      accessible-role: list;
+                    };
+                  }
+                };
+              };
+            }
+
+            Adw.ViewStackPage {
+              name: "saved";
+              title: _("Saved");
+              icon-name: "starred-symbolic";
+              child: Adw.ToolbarView {
+                [top]
+                Adw.HeaderBar {
+                  title-widget: Adw.WindowTitle {
+                    title: _("Saved");
+                    subtitle: _("Starred in Miniflux");
+                  };
+                }
+                content: Gtk.Box {
+                  orientation: vertical;
+                  Adw.StatusPage saved_status {
+                    vexpand: true;
+                    icon-name: "starred-symbolic";
+                    title: _("No saved articles yet");
+                    description: _("Star an article to keep it here.");
+                  }
+                  Gtk.ScrolledWindow saved_scroller {
+                    visible: false;
+                    vexpand: true;
+                    hscrollbar-policy: never;
+                    child: Gtk.ListView saved_list { show-separators: true; };
+                  }
+                };
+              };
+            }
+
+            Adw.ViewStackPage {
+              name: "library";
+              title: _("Library");
+              icon-name: "folder-documents-symbolic";
+              child: Adw.NavigationView library_navigation {
+                Adw.NavigationPage {
+                  title: _("Library");
+                  tag: "library-root";
+                  child: Adw.ToolbarView {
+                    [top]
+                    Adw.HeaderBar {
+                      [end]
+                      Gtk.Button {
+                        icon-name: "system-search-symbolic";
+                        action-name: "app.search";
+                        tooltip-text: _("Search Library");
+                        accessibility { label: _("Search Library"); }
+                      }
+                    }
+                    content: Gtk.ScrolledWindow {
+                      hscrollbar-policy: never;
+                      child: Gtk.ListBox {
+                        selection-mode: none;
+                        margin-top: 12;
+                        margin-bottom: 12;
+                        margin-start: 12;
+                        margin-end: 12;
+                        styles ["boxed-list"]
+
+                        Adw.ActionRow {
+                          title: _("All articles");
+                          subtitle: _("Everything retained locally");
+                          activatable: true;
+                          action-name: "win.library-all";
+                          [suffix]
+                          Gtk.Image { icon-name: "go-next-symbolic"; }
+                        }
+
+                        Adw.ActionRow {
+                          title: _("Unread");
+                          subtitle: _("Still waiting for you");
+                          activatable: true;
+                          action-name: "win.library-unread";
+                          [suffix]
+                          Gtk.Image { icon-name: "go-next-symbolic"; }
+                        }
+
+                        Adw.ActionRow {
+                          title: _("Read");
+                          subtitle: _("Already opened");
+                          activatable: true;
+                          action-name: "win.library-read";
+                          [suffix]
+                          Gtk.Image { icon-name: "go-next-symbolic"; }
+                        }
+
+                        Adw.ActionRow {
+                          title: _("Categories");
+                          subtitle: _("Browse categories and feeds");
+                          activatable: true;
+                          action-name: "win.library-categories";
+                          [suffix]
+                          Gtk.Image { icon-name: "go-next-symbolic"; }
+                        }
+                      };
+                    };
+                  };
+                }
+
+                Adw.NavigationPage {
+                  title: _("All articles");
+                  tag: "library-all";
+                  child: Adw.ToolbarView {
+                    [top]
+                    Adw.HeaderBar {}
+                    content: Gtk.Box {
+                      orientation: vertical;
+                      Adw.StatusPage library_all_status {
+                        vexpand: true;
+                        icon-name: "folder-documents-symbolic";
+                        title: _("No articles yet");
+                        description: _("Sync Miniflux to fill your Library.");
+                      }
+                      Gtk.ScrolledWindow library_all_scroller {
+                        visible: false;
+                        vexpand: true;
+                        hscrollbar-policy: never;
+                        child: Gtk.ListView library_all_list { show-separators: true; };
+                      }
+                    };
+                  };
+                }
+
+                Adw.NavigationPage {
+                  title: _("Unread");
+                  tag: "library-unread";
+                  child: Adw.ToolbarView {
+                    [top]
+                    Adw.HeaderBar {}
+                    content: Gtk.Box {
+                      orientation: vertical;
+                      Adw.StatusPage library_unread_status {
+                        vexpand: true;
+                        icon-name: "mail-unread-symbolic";
+                        title: _("All caught up");
+                        description: _("There are no unread articles in your Library.");
+                      }
+                      Gtk.ScrolledWindow library_unread_scroller {
+                        visible: false;
+                        vexpand: true;
+                        hscrollbar-policy: never;
+                        child: Gtk.ListView library_unread_list { show-separators: true; };
+                      }
+                    };
+                  };
+                }
+
+                Adw.NavigationPage {
+                  title: _("Read");
+                  tag: "library-read";
+                  child: Adw.ToolbarView {
+                    [top]
+                    Adw.HeaderBar {}
+                    content: Gtk.Box {
+                      orientation: vertical;
+                      Adw.StatusPage library_read_status {
+                        vexpand: true;
+                        icon-name: "mail-read-symbolic";
+                        title: _("No read articles yet");
+                        description: _("Articles you open will appear here.");
+                      }
+                      Gtk.ScrolledWindow library_read_scroller {
+                        visible: false;
+                        vexpand: true;
+                        hscrollbar-policy: never;
+                        child: Gtk.ListView library_read_list { show-separators: true; };
+                      }
+                    };
+                  };
+                }
+
+                Adw.NavigationPage {
+                  title: _("Categories");
+                  tag: "library-categories";
+                  child: Adw.ToolbarView {
+                    [top]
+                    Adw.HeaderBar {}
+                    content: Gtk.Box {
+                      orientation: vertical;
+                      Adw.StatusPage library_categories_status {
+                        vexpand: true;
+                        icon-name: "folder-symbolic";
+                        title: _("No categories yet");
+                        description: _("Categories from Miniflux will appear after sync.");
+                      }
+                      Gtk.ScrolledWindow library_categories_scroller {
+                        visible: false;
+                        vexpand: true;
+                        hscrollbar-policy: never;
+                        child: Gtk.ListBox library_categories_list {
+                          selection-mode: none;
+                          margin-top: 12;
+                          margin-bottom: 12;
+                          margin-start: 12;
+                          margin-end: 12;
+                          styles ["boxed-list"]
+                        };
+                      }
+                    };
+                  };
+                }
+              };
+            }
+          };
+        };
+      };
+
+      content: Adw.NavigationPage {
+        title: _("Reader");
+        child: Adw.ToolbarView {
+          [top]
+          Adw.HeaderBar {
+            title-widget: Adw.WindowTitle reader_title {
+              title: _("Reader");
+            };
+            [end]
+            Gtk.Button {
+              icon-name: "mail-unread-symbolic";
+              action-name: "win.keep-unread";
+              tooltip-text: _("Keep Unread");
+              accessibility { label: _("Keep Unread"); }
+            }
+            [end]
+            Gtk.Button previous_article_button {
+              icon-name: "go-up-symbolic";
+              action-name: "win.previous-article";
+              tooltip-text: _("Previous Article");
+              accessibility { label: _("Previous Article"); }
+            }
+            [end]
+            Gtk.Button next_article_button {
+              icon-name: "go-down-symbolic";
+              action-name: "win.next-article";
+              tooltip-text: _("Next Article");
+              accessibility { label: _("Next Article"); }
+            }
+            [end]
+            Gtk.MenuButton reader_menu {
+              icon-name: "view-more-symbolic";
+              tooltip-text: _("Article actions");
+              accessibility { label: _("Article actions"); }
+            }
+          }
+          content: Gtk.Box {
+            orientation: vertical;
+
+            Adw.StatusPage reader_placeholder {
+              vexpand: true;
+              styles ["reader-placeholder"]
+              icon-name: "x-office-document-symbolic";
+              title: _("Choose an article");
+              description: _("Selection moves through the list; activation opens an article.");
+            }
+
+            Gtk.ScrolledWindow reader_scroller {
+              visible: false;
+              vexpand: true;
+              hscrollbar-policy: never;
+              child: Adw.Clamp {
+                maximum-size: 760;
+                tightening-threshold: 560;
+                child: Gtk.Box reader_content {
+                  orientation: vertical;
+                  spacing: 18;
+                  margin-top: 32;
+                  margin-bottom: 48;
+                  margin-start: 24;
+                  margin-end: 24;
+                };
+              };
+            }
+          };
+        };
+      };
+    };
+  };
+}

@@ -1,0 +1,57 @@
+[
+  {
+    "name": "entities decode exactly once",
+    "html": "<p>Today&apos;s &amp; Phoronix &#34;Sched&#x5f;ext&#34; &amp;#34; &#x1F680;</p>",
+    "base_url": "https://example.com/news/story",
+    "text_contains": ["Today's & Phoronix \"Sched_ext\" &#34; 🚀"],
+    "image_urls": [],
+    "links": [],
+    "ordinals": [],
+    "caption": null,
+    "table_rows": 0
+  },
+  {
+    "name": "nested and lazy images with quoted and unquoted attributes",
+    "html": "<p>Before <img src='/photo.jpg' alt='A view'> after</p><img data-src=https://example.com/lazy.jpg alt=Lazy>",
+    "base_url": "https://example.com/news/story",
+    "text_contains": ["Before after"],
+    "image_urls": ["https://example.com/photo.jpg", "https://example.com/lazy.jpg"],
+    "links": [],
+    "ordinals": [],
+    "caption": null,
+    "table_rows": 0
+  },
+  {
+    "name": "Phoronix-style loose prose retains relative and absolute links",
+    "html": "<a href=https://example.com/article><img src=https://example.com/article.jpg></a><br>Among the changes, the <a href=https://example.com/driver>LED driver</a> powers <a href=/review/mini-pc>a Linux mini PC</a>.<br>More details.",
+    "base_url": "https://example.com/news/story",
+    "text_contains": ["Among the changes, the LED driver powers a Linux mini PC .", "More details."],
+    "image_urls": ["https://example.com/article.jpg"],
+    "links": ["https://example.com/driver", "https://example.com/review/mini-pc"],
+    "ordinals": [],
+    "caption": null,
+    "table_rows": 0
+  },
+  {
+    "name": "inline emphasis code and ordered list controls",
+    "html": "<p><strong>Bold</strong>, <em>emphasised</em>, and <code>code</code>.</p><ol start=3><li>Three</li><li value='7'><a href='/seven'>Seven</a></li><li>Eight</li></ol><ul><li>Bullet</li></ul>",
+    "base_url": "https://example.com/story",
+    "text_contains": ["Bold , emphasised , and code .", "Three", "Seven", "Eight", "Bullet"],
+    "image_urls": [],
+    "links": ["https://example.com/seven"],
+    "ordinals": [3, 7, 8],
+    "caption": null,
+    "table_rows": 0
+  },
+  {
+    "name": "figures captions and basic tables",
+    "html": "<figure><img src='https://example.com/chart.png' alt='A chart'><figcaption>A <em>useful</em> chart</figcaption></figure><table><tr><th>Version</th><th>Status</th></tr><tr><td>1</td><td>Ready</td></tr></table>",
+    "base_url": "https://example.com/story",
+    "text_contains": ["A useful chart"],
+    "image_urls": ["https://example.com/chart.png"],
+    "links": [],
+    "ordinals": [],
+    "caption": "A useful chart",
+    "table_rows": 2
+  }
+]

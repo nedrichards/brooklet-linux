@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Brooklet
+Comment=Read Miniflux comfortably and offline
+Exec=brooklet
+Icon=@APP_ID@
+Terminal=false
+Type=Application
+Categories=GNOME;GTK;Network;News;
+Keywords=RSS;Feed;Miniflux;Reader;
+StartupNotify=true
+DBusActivatable=false

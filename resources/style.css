@@ -1,0 +1,28 @@
+.article-list {
+  min-width: 16rem;
+}
+
+.reader-placeholder {
+  padding: 24px;
+}
+
+.reader-quote {
+  border-left: 3px solid color-mix(in srgb, var(--accent-color) 55%, transparent);
+  color: var(--window-fg-color);
+  padding: 6px 0 6px 16px;
+}
+
+.reader-code,
+.reader-table,
+.reader-image-placeholder {
+  background: color-mix(in srgb, currentColor 7%, transparent);
+  border-radius: 12px;
+  padding: 14px;
+}
+
+.setup-error {
+  background: color-mix(in srgb, var(--error-bg-color) 35%, transparent);
+  border-radius: 12px;
+  color: var(--error-color);
+  padding: 12px;
+}

@@ -1,0 +1,61 @@
+{
+  "app-id": "com.nedrichards.brooklet.Devel",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "51",
+  "sdk": "org.gnome.Sdk",
+  "sdk-extensions": [
+    "org.freedesktop.Sdk.Extension.rust-stable"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/rust-stable/bin",
+    "env": {
+      "CARGO_HOME": "/app/share/brooklet/cargo",
+      "CARGO_NET_OFFLINE": "true"
+    }
+  },
+  "command": "brooklet",
+  "finish-args": [
+    "--share=network",
+    "--share=ipc",
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--device=dri"
+  ],
+  "cleanup": [
+    "/include",
+    "/lib/pkgconfig",
+    "/share/pkgconfig",
+    "/share/aclocal",
+    "/share/man",
+    "/share/brooklet/cargo"
+  ],
+  "modules": [
+    {
+      "name": "cargo-dependencies",
+      "buildsystem": "simple",
+      "build-commands": [
+        "mkdir -p /app/share/brooklet/cargo",
+        "cp -a cargo/vendor /app/share/brooklet/cargo/",
+        "install -Dm644 cargo/config /app/share/brooklet/cargo/config.toml"
+      ],
+      "sources": [
+        "cargo-sources.json"
+      ]
+    },
+    {
+      "name": "brooklet",
+      "buildsystem": "meson",
+      "config-opts": [
+        "--buildtype=debugoptimized",
+        "-Dprofile=development"
+      ],
+      "run-tests": true,
+      "sources": [
+        {
+          "type": "dir",
+          "path": ".."
+        }
+      ]
+    }
+  ]
+}

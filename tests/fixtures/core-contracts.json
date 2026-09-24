@@ -1,0 +1,19 @@
+{
+  "canonical_urls": [
+    {
+      "input": "HTTPS://Example.COM:443/story/?a=1#comments",
+      "expected": "https://example.com/story?a=1"
+    },
+    {
+      "input": "http://Example.COM:80/",
+      "expected": "http://example.com/"
+    }
+  ],
+  "cursor_overlap": [
+    { "cursor": 1000, "expected": 940 },
+    { "cursor": 30, "expected": 0 }
+  ],
+  "retryable_statuses": [408, 429, 500, 503],
+  "authentication_statuses": [401, 403],
+  "malformed_statuses": [400, 404, 422]
+}
