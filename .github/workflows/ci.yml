@@ -18,7 +18,7 @@ jobs:
     name: Rust
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.93"
@@ -32,7 +32,7 @@ jobs:
     name: GNOME 51 Flatpak
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install Flatpak builder
         run: |
           sudo apt-get update
