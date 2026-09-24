@@ -8,6 +8,8 @@ There is also a separately developed Android application with the same vibe,
 but a totally different implementation. I hope you enjoy either, neither or
 both.
 
+![Brooklet showing the Inbox and article reader](data/screenshots/inbox-screenshot.png)
+
 ## Development status
 
 The GNOME 51 application now includes setup, incremental offline-first sync,
