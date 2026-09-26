@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Regenerate Flatpak's offline Cargo sources from the checked-in lockfile."""
 
+import argparse
 import json
 import pathlib
 import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-packages = tomllib.loads((ROOT / "Cargo.lock").read_text())["package"]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("lockfile", nargs="?", type=pathlib.Path, default=ROOT / "Cargo.lock")
+parser.add_argument("--output", type=pathlib.Path, default=ROOT / "flatpak/cargo-sources.json")
+args = parser.parse_args()
+packages = tomllib.loads(args.lockfile.read_text())["package"]
 sources = []
 
 for package in sorted(packages, key=lambda value: (value["name"], value["version"])):
@@ -37,4 +42,4 @@ sources.append({
     "dest-filename": "config",
 })
 
-(ROOT / "flatpak/cargo-sources.json").write_text(json.dumps(sources, indent=4) + "\n")
+args.output.write_text(json.dumps(sources, indent=4) + "\n")

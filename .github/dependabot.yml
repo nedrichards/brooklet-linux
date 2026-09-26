@@ -4,6 +4,12 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      # The parser uses ego-tree types exposed by scraper; versions must match.
+      html-parser:
+        patterns:
+          - scraper
+          - ego-tree
   - package-ecosystem: github-actions
     directory: /
     schedule:

@@ -1,0 +1,60 @@
+name: Dependabot Cargo sources
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-cargo-sources-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
+jobs:
+  regenerate:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      startsWith(github.event.workflow_run.head_branch, 'dependabot/cargo/')
+    permissions:
+      actions: write
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out trusted generator
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.repository.default_branch }}
+          persist-credentials: false
+          path: trusted
+
+      - name: Check out Dependabot update
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          path: update
+
+      - name: Regenerate Flatpak Cargo sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          python3 trusted/build-aux/generate-cargo-sources.py \
+            update/Cargo.lock \
+            --output update/flatpak/cargo-sources.json
+
+          if git -C update diff --quiet -- flatpak/cargo-sources.json; then
+            exit 0
+          fi
+
+          git -C update diff --check
+          git -C update config user.name 'github-actions[bot]'
+          git -C update config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C update add -- flatpak/cargo-sources.json
+          git -C update commit -m 'chore(deps): regenerate Flatpak Cargo sources'
+          git -C update push origin "HEAD:${TARGET_BRANCH}"
+          gh workflow run ci.yml --ref "${TARGET_BRANCH}"
