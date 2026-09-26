@@ -20,11 +20,11 @@ required-features = ["gui"]
 
 [dependencies]
 async-trait = "0.1.89"
-ego-tree = "0.10.0"
+ego-tree = "0.11.0"
 jiff = "0.2.15"
 reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls"] }
-rusqlite = { version = "0.37.0", features = ["bundled"] }
-scraper = "0.24.0"
+rusqlite = { version = "0.40.2", features = ["bundled", "fallible_uint"] }
+scraper = "0.27.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 thiserror = "2.0.17"
