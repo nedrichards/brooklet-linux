@@ -57,4 +57,4 @@ jobs:
           git -C update add -- flatpak/cargo-sources.json
           git -C update commit -m 'chore(deps): regenerate Flatpak Cargo sources'
           git -C update push origin "HEAD:${TARGET_BRANCH}"
-          gh workflow run ci.yml --ref "${TARGET_BRANCH}"
+          gh workflow run ci.yml --repo "${GITHUB_REPOSITORY}" --ref "${TARGET_BRANCH}"
