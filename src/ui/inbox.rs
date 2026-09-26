@@ -79,6 +79,7 @@ pub fn configure_with_action(list: &gtk::ListView, mark_read_action: bool) -> In
             .downcast_ref::<gtk::ListItem>()
             .expect("factory item must be a GtkListItem");
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        row.add_css_class("article-row");
         row.set_margin_top(6);
         row.set_margin_bottom(6);
         row.set_margin_start(12);
@@ -158,6 +159,7 @@ pub fn configure_with_action(list: &gtk::ListView, mark_read_action: bool) -> In
             .child()
             .and_downcast::<gtk::Box>()
             .expect("factory child must be a GtkBox");
+        row.set_widget_name(&format!("article-{}", entry.entry().id));
         let content = row
             .first_child()
             .and_downcast::<gtk::Box>()
@@ -199,6 +201,14 @@ pub fn configure_with_action(list: &gtk::ListView, mark_read_action: bool) -> In
         move |_, key, _, modifiers| {
             if !modifiers.is_empty() {
                 return glib::Propagation::Proceed;
+            }
+            if (key == gtk::gdk::Key::Return || key == gtk::gdk::Key::KP_Enter)
+                && list.has_focus()
+                && let Some(selection) = list.model().and_downcast::<gtk::SingleSelection>()
+                && selection.selected() != gtk::INVALID_LIST_POSITION
+            {
+                list.emit_by_name::<()>("activate", &[&selection.selected()]);
+                return glib::Propagation::Stop;
             }
             let Some(direction) = cursor_direction(key) else {
                 return glib::Propagation::Proceed;
@@ -325,7 +335,7 @@ pub fn move_cursor(list: &gtk::ListView, direction: i32) -> bool {
     true
 }
 
-fn position_of_id(list: &gtk::ListView, entry_id: i64) -> Option<u32> {
+pub fn position_of_id(list: &gtk::ListView, entry_id: i64) -> Option<u32> {
     let selection = list.model().and_downcast::<gtk::SingleSelection>()?;
     (0..selection.n_items()).find(|position| {
         selection

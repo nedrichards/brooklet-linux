@@ -25,14 +25,16 @@ Adw.ShortcutsDialog shortcuts_dialog {
 
     Adw.ShortcutsItem {
       title: _("Show keyboard shortcuts");
-      action-name: "win.show-shortcuts";
+      action-name: "app.show-shortcuts";
       accelerator: "F1";
+      subtitle: _("Anywhere in Brooklet");
     }
 
     Adw.ShortcutsItem {
       title: _("Show keyboard shortcuts");
-      action-name: "win.show-shortcuts";
+      action-name: "app.show-shortcuts";
       accelerator: "<Control>question";
+      subtitle: _("Anywhere in Brooklet");
     }
 
     Adw.ShortcutsItem {
@@ -48,23 +50,25 @@ Adw.ShortcutsDialog shortcuts_dialog {
     Adw.ShortcutsItem {
       title: _("Move to next article");
       accelerator: "j";
-      subtitle: _("From the main window or an article list");
+      subtitle: _("At startup or with an article list focused");
     }
 
     Adw.ShortcutsItem {
       title: _("Move to next article");
       accelerator: "Down";
+      subtitle: _("At startup or with an article list focused");
     }
 
     Adw.ShortcutsItem {
       title: _("Move to previous article");
       accelerator: "k";
-      subtitle: _("From the main window or an article list");
+      subtitle: _("At startup or with an article list focused");
     }
 
     Adw.ShortcutsItem {
       title: _("Move to previous article");
       accelerator: "Up";
+      subtitle: _("At startup or with an article list focused");
     }
 
     Adw.ShortcutsItem {
@@ -75,22 +79,40 @@ Adw.ShortcutsDialog shortcuts_dialog {
   }
 
   Adw.ShortcutsSection {
+    title: _("Reader");
+
+    Adw.ShortcutsItem {
+      title: _("Scroll article down");
+      accelerator: "j";
+      subtitle: _("When the reader has focus");
+    }
+
+    Adw.ShortcutsItem {
+      title: _("Scroll article up");
+      accelerator: "k";
+      subtitle: _("When the reader has focus");
+    }
+  }
+
+  Adw.ShortcutsSection {
     title: _("Navigation");
 
     Adw.ShortcutsItem {
       title: _("Keep current article unread");
       action-name: "win.keep-unread";
       accelerator: "u";
+      subtitle: _("While reading, outside text fields");
     }
 
     Adw.ShortcutsItem {
       title: _("Go back");
       action-name: "win.back";
       accelerator: "<Alt>Left";
+      subtitle: _("Dismiss a dialog or return to the previous view");
     }
 
     Adw.ShortcutsItem {
-      title: _("Go back or dismiss search");
+      title: _("Dismiss a dialog or go back");
       action-name: "win.back";
       accelerator: "Escape";
     }

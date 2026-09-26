@@ -78,8 +78,8 @@ Adw.ApplicationWindow window {
 
                   Gtk.Button new_articles_button {
                     visible: false;
-                    label: _("New articles");
-                    tooltip-text: _("Show newest articles");
+                    label: _("Apply inbox updates");
+                    tooltip-text: _("Update the inbox and keep your place");
                     styles ["suggested-action", "flat"]
                   }
 
@@ -316,7 +316,7 @@ Adw.ApplicationWindow window {
         };
       };
 
-      content: Adw.NavigationPage {
+      content: Adw.NavigationPage reader_page {
         title: _("Reader");
         child: Adw.ToolbarView {
           [top]
