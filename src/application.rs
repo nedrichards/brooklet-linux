@@ -1084,7 +1084,7 @@ fn install_article_cursor_keys(
                 }
                 if let Some(list) = focused_article_list(&window) {
                     if let Some(entry) = ui::inbox::selected_from_list(&list) {
-                        toggle_read(read_context.clone(), entry, Some(list));
+                        toggle_read(read_context.clone(), entry, Some(list), None);
                         return adw::glib::Propagation::Stop;
                     }
                 } else if reader_scroller.is_mapped()
@@ -1094,7 +1094,53 @@ fn install_article_cursor_keys(
                     })
                 {
                     if let Some(entry) = read_context.current.borrow().clone() {
-                        toggle_read(read_context.clone(), entry, None);
+                        let entry_id = entry.id;
+                        let reader = read_context.reader.clone();
+                        let inbox_list = read_context.inbox.list.clone();
+                        let destinations = destinations.downgrade();
+                        let window = window.downgrade();
+                        let cursor_mode = cursor_mode.clone();
+                        let focus_returned = Rc::new(Cell::new(false));
+                        let return_to_list = Rc::new(move || {
+                            if focus_returned.get() {
+                                return;
+                            }
+                            if reader.split.is_collapsed() {
+                                reader.split.set_show_content(false);
+                            }
+                            let destinations = destinations.clone();
+                            let inbox_list = inbox_list.clone();
+                            let window = window.clone();
+                            let cursor_mode = cursor_mode.clone();
+                            let focus_returned = focus_returned.clone();
+                            adw::glib::idle_add_local_once(move || {
+                                if focus_returned.get() {
+                                    return;
+                                }
+                                let list = destinations
+                                    .upgrade()
+                                    .and_then(|destinations| destinations.visible_child())
+                                    .and_then(|child| mapped_article_list(&child))
+                                    .unwrap_or(inbox_list);
+                                if list.is_mapped() {
+                                    list.grab_focus();
+                                    ui::inbox::select_id(&list, entry_id);
+                                    let focused = window.upgrade().is_some_and(|window| {
+                                        gtk::prelude::GtkWindowExt::focus(&window).is_some_and(
+                                            |focus| {
+                                                focus == list.clone().upcast::<gtk::Widget>()
+                                                    || focus.is_ancestor(&list)
+                                            },
+                                        )
+                                    });
+                                    if focused {
+                                        cursor_mode.set(true);
+                                        focus_returned.set(true);
+                                    }
+                                }
+                            });
+                        });
+                        toggle_read(read_context.clone(), entry, None, Some(return_to_list));
                         return adw::glib::Propagation::Stop;
                     }
                 } else if let Some(list) = destinations
@@ -1102,7 +1148,7 @@ fn install_article_cursor_keys(
                     .and_then(|child| mapped_article_list(&child))
                     && let Some(entry) = ui::inbox::selected_from_list(&list)
                 {
-                    toggle_read(read_context.clone(), entry, Some(list));
+                    toggle_read(read_context.clone(), entry, Some(list), None);
                     return adw::glib::Propagation::Stop;
                 }
             }
@@ -1538,7 +1584,12 @@ fn update_source_read_state(list: Option<&gtk::ListView>, entry: &Entry, read: b
     }
 }
 
-fn toggle_read(context: ReadContext, entry: Entry, source: Option<gtk::ListView>) {
+fn toggle_read(
+    context: ReadContext,
+    entry: Entry,
+    source: Option<gtk::ListView>,
+    return_to_list: Option<Rc<dyn Fn()>>,
+) {
     let read = context
         .current
         .borrow()
@@ -1562,7 +1613,11 @@ fn toggle_read(context: ReadContext, entry: Entry, source: Option<gtk::ListView>
     let source = if inbox_source { None } else { source };
     let read_in_flight = context.inbox.read_in_flight.borrow().contains(&entry.id);
     if entry.read || read_in_flight {
-        mark_unread_from(context, entry, source);
+        let return_now = return_to_list.clone();
+        mark_unread_from(context, entry, source, return_to_list);
+        if let Some(return_now) = return_now {
+            return_now();
+        }
     } else {
         let retain = inbox_source && !context.reader.split.is_collapsed();
         mark_read_from(context, entry, retain, true, source);
@@ -1631,10 +1686,16 @@ fn mark_unread(
         },
         entry,
         None,
+        None,
     );
 }
 
-fn mark_unread_from(context: ReadContext, entry: Entry, source: Option<gtk::ListView>) {
+fn mark_unread_from(
+    context: ReadContext,
+    entry: Entry,
+    source: Option<gtk::ListView>,
+    return_to_list: Option<Rc<dyn Fn()>>,
+) {
     let ReadContext {
         controller,
         inbox,
@@ -1666,6 +1727,9 @@ fn mark_unread_from(context: ReadContext, entry: Entry, source: Option<gtk::List
             dismiss_undo_toast(&inbox);
         }
         toast.add_toast(adw::Toast::new("Kept unread"));
+        if let Some(return_to_list) = return_to_list {
+            return_to_list();
+        }
         return;
     }
     controller.set_read_local(entry_id, false, move |result| match result {
@@ -1688,6 +1752,9 @@ fn mark_unread_from(context: ReadContext, entry: Entry, source: Option<gtk::List
                 dismiss_undo_toast(&inbox);
             }
             toast.add_toast(adw::Toast::new("Kept unread"));
+            if let Some(return_to_list) = return_to_list {
+                return_to_list();
+            }
         }
         Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
     });
