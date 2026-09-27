@@ -470,7 +470,7 @@ impl BrookletApplication {
                             set_reader_origin(&reader_ui, &model, entry.id, false);
                             open_article(&reader_ui, &inbox_ui, &entry);
                             if !entry.read {
-                                mark_read(
+                                mark_read_from(
                                     ReadContext {
                                         controller: controller.clone(),
                                         inbox: inbox_ui.clone(),
@@ -482,6 +482,7 @@ impl BrookletApplication {
                                     entry,
                                     false,
                                     false,
+                                    Some(list.clone()),
                                 );
                             }
                         }
@@ -641,7 +642,36 @@ impl BrookletApplication {
             install_window_tools(&window, application, &builder, tools);
             let destinations: adw::ViewStack =
                 builder.object("destinations").expect("destinations");
-            install_article_cursor_keys(&window, &destinations, &reader_page, &reader_ui.scroller);
+            install_article_cursor_keys(
+                &window,
+                &destinations,
+                &reader_page,
+                &reader_ui.scroller,
+                ReadContext {
+                    controller: controller.clone(),
+                    inbox: inbox_ui.clone(),
+                    toast: toast_overlay.clone(),
+                    undo: undo_entry.clone(),
+                    reader: reader_ui.clone(),
+                    current: current_entry.clone(),
+                },
+            );
+            window.connect_close_request({
+                let reader = reader_ui.clone();
+                move |_| {
+                    if let Some(entry_id) = reader.active_id.get()
+                        && !reader.restoring.get()
+                    {
+                        let position = reader_position_from_offset(
+                            &reader.content,
+                            entry_id,
+                            reader.scroller.vadjustment().value() as i32,
+                        );
+                        reader.controller.save_reader_position(position, |_| {});
+                    }
+                    adw::glib::Propagation::Proceed
+                }
+            });
             for (name, tag) in [
                 ("library-all", "library-all"),
                 ("library-unread", "library-unread"),
@@ -992,6 +1022,7 @@ fn install_article_cursor_keys(
     destinations: &adw::ViewStack,
     reader_page: &adw::NavigationPage,
     reader_scroller: &gtk::ScrolledWindow,
+    read_context: ReadContext,
 ) {
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -1002,6 +1033,7 @@ fn install_article_cursor_keys(
         let reader_page = reader_page.downgrade();
         let reader_scroller = reader_scroller.downgrade();
         let cursor_mode = cursor_mode.clone();
+        let read_context = read_context.clone();
         move |_, key, _, modifiers| {
             let (Some(window), Some(destinations), Some(reader_page), Some(reader_scroller)) = (
                 window.upgrade(),
@@ -1034,6 +1066,45 @@ fn install_article_cursor_keys(
             }
             if !modifiers.is_empty() {
                 return adw::glib::Propagation::Proceed;
+            }
+            if key == gtk::gdk::Key::r {
+                let mut focus = gtk::prelude::GtkWindowExt::focus(&window);
+                while let Some(widget) = focus.clone() {
+                    if widget.is::<gtk::Editable>()
+                        || widget.is::<gtk::TextView>()
+                        || widget.is::<gtk::DropDown>()
+                        || widget.is::<gtk::Popover>()
+                    {
+                        return adw::glib::Propagation::Proceed;
+                    }
+                    if widget.is::<adw::Dialog>() && focused_article_list(&window).is_none() {
+                        return adw::glib::Propagation::Proceed;
+                    }
+                    focus = widget.parent();
+                }
+                if let Some(list) = focused_article_list(&window) {
+                    if let Some(entry) = ui::inbox::selected_from_list(&list) {
+                        toggle_read(read_context.clone(), entry, Some(list));
+                        return adw::glib::Propagation::Stop;
+                    }
+                } else if reader_scroller.is_mapped()
+                    && gtk::prelude::GtkWindowExt::focus(&window).is_some_and(|focus| {
+                        focus == reader_page.clone().upcast::<gtk::Widget>()
+                            || reader_page.is_ancestor(&focus)
+                    })
+                {
+                    if let Some(entry) = read_context.current.borrow().clone() {
+                        toggle_read(read_context.clone(), entry, None);
+                        return adw::glib::Propagation::Stop;
+                    }
+                } else if let Some(list) = destinations
+                    .visible_child()
+                    .and_then(|child| mapped_article_list(&child))
+                    && let Some(entry) = ui::inbox::selected_from_list(&list)
+                {
+                    toggle_read(read_context.clone(), entry, Some(list));
+                    return adw::glib::Propagation::Stop;
+                }
             }
             if key == gtk::gdk::Key::u && reader_scroller.is_visible() {
                 let mut focus = gtk::prelude::GtkWindowExt::focus(&window);
@@ -1443,6 +1514,61 @@ fn update_reader_read_state(
     }
 }
 
+fn update_source_read_state(list: Option<&gtk::ListView>, entry: &Entry, read: bool) {
+    let Some(list) = list else {
+        return;
+    };
+    let Some(selection) = list.model().and_downcast::<gtk::SingleSelection>() else {
+        return;
+    };
+    let Some(store) = selection.model().and_downcast::<gio::ListStore>() else {
+        return;
+    };
+    let model = ui::inbox::InboxModel { store, selection };
+    let selected_id = ui::inbox::selected_id(list);
+    ui::inbox::update_entry(
+        &model,
+        Entry {
+            read,
+            ..entry.clone()
+        },
+    );
+    if let Some(selected_id) = selected_id {
+        ui::inbox::select_id(list, selected_id);
+    }
+}
+
+fn toggle_read(context: ReadContext, entry: Entry, source: Option<gtk::ListView>) {
+    let read = context
+        .current
+        .borrow()
+        .as_ref()
+        .filter(|current| current.id == entry.id)
+        .map(|current| current.read)
+        .or_else(|| {
+            context
+                .reader
+                .origin_set
+                .borrow()
+                .iter()
+                .find(|origin| origin.id == entry.id)
+                .map(|origin| origin.read)
+        })
+        .unwrap_or(entry.read);
+    let entry = Entry { read, ..entry };
+    let inbox_source = source
+        .as_ref()
+        .is_some_and(|list| *list == context.inbox.list);
+    let source = if inbox_source { None } else { source };
+    let read_in_flight = context.inbox.read_in_flight.borrow().contains(&entry.id);
+    if entry.read || read_in_flight {
+        mark_unread_from(context, entry, source);
+    } else {
+        let retain = inbox_source && !context.reader.split.is_collapsed();
+        mark_read_from(context, entry, retain, true, source);
+    }
+}
+
 fn dismiss_undo_toast(inbox: &InboxUi) {
     if let Some(notification) = inbox.undo_toast.borrow_mut().take() {
         notification.dismiss();
@@ -1494,18 +1620,42 @@ fn mark_unread(
     toast: adw::ToastOverlay,
     entry: Entry,
 ) {
+    mark_unread_from(
+        ReadContext {
+            controller,
+            inbox,
+            toast,
+            undo,
+            reader,
+            current,
+        },
+        entry,
+        None,
+    );
+}
+
+fn mark_unread_from(context: ReadContext, entry: Entry, source: Option<gtk::ListView>) {
+    let ReadContext {
+        controller,
+        inbox,
+        toast,
+        undo,
+        reader,
+        current,
+    } = context;
     let entry_id = entry.id;
     if !entry.read && !inbox.read_in_flight.borrow().contains(&entry_id) {
         return;
     }
     if inbox.read_in_flight.borrow().contains(&entry_id) {
         inbox.suppress_read.borrow_mut().insert(entry_id);
-        restore_unread_row(&inbox, entry);
+        restore_unread_row(&inbox, entry.clone());
         if ui::inbox::selected_id(&inbox.list).is_none() && reader.active_id.get() == Some(entry_id)
         {
             ui::inbox::select_id(&inbox.list, entry_id);
         }
         update_reader_read_state(&reader, &current, entry_id, false);
+        update_source_read_state(source.as_ref(), &entry, false);
         let removed_from_undo = {
             let mut pending = undo.borrow_mut();
             let before = pending.len();
@@ -1520,13 +1670,14 @@ fn mark_unread(
     }
     controller.set_read_local(entry_id, false, move |result| match result {
         Ok(()) => {
-            restore_unread_row(&inbox, entry);
+            restore_unread_row(&inbox, entry.clone());
             if ui::inbox::selected_id(&inbox.list).is_none()
                 && reader.active_id.get() == Some(entry_id)
             {
                 ui::inbox::select_id(&inbox.list, entry_id);
             }
             update_reader_read_state(&reader, &current, entry_id, false);
+            update_source_read_state(source.as_ref(), &entry, false);
             let removed_from_undo = {
                 let mut pending = undo.borrow_mut();
                 let before = pending.len();
@@ -1543,6 +1694,16 @@ fn mark_unread(
 }
 
 fn mark_read(context: ReadContext, entry: Entry, retain_current: bool, show_toast: bool) {
+    mark_read_from(context, entry, retain_current, show_toast, None);
+}
+
+fn mark_read_from(
+    context: ReadContext,
+    entry: Entry,
+    retain_current: bool,
+    show_toast: bool,
+    source: Option<gtk::ListView>,
+) {
     let ReadContext {
         controller,
         inbox,
@@ -1574,6 +1735,7 @@ fn mark_read(context: ReadContext, entry: Entry, retain_current: bool, show_toas
         match result {
             Ok(()) => {
                 update_reader_read_state(&reader, &current, entry_id, true);
+                update_source_read_state(source.as_ref(), &entry, true);
                 dismiss_undo_toast(&inbox);
                 if retain_current
                     && ui::inbox::selected_id(&inbox.list) == Some(entry_id)
