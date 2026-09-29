@@ -41,5 +41,5 @@ jobs:
           flatpak install --user --noninteractive flathub org.gnome.Platform//51 org.gnome.Sdk//51 org.freedesktop.Sdk.Extension.rust-stable//26.08
       - name: Configure, build, test, and validate
         run: flatpak-builder --user --disable-rofiles-fuse --force-clean build-dir flatpak/com.nedrichards.brooklet.Devel.json
-      - name: GTK launch smoke test
+      - name: Required GTK keyboard, reader, and launch regression checks
         run: xvfb-run -a flatpak-builder --run build-dir flatpak/com.nedrichards.brooklet.Devel.json brooklet --smoke-test

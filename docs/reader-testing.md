@@ -102,3 +102,10 @@ teardown with weak-widget checks. It decodes generated PNGs from an isolated
 temporary cache to check viewport loading and session release. It neither
 accesses the installed account nor fetches remote images. Development Glycin
 sandbox limitations described above still apply.
+
+The same required CI command tests the real window capture key controller after
+delayed Inbox loading. It checks initial list focus, Up/Down and J/K with lock
+modifiers, navigation from header controls, boundary behavior, return-to-list
+focus, and that arrows neither activate nor mark articles read. Modified arrows
+and dialog editing must remain untouched. Any failed keyboard assertion makes
+`brooklet --smoke-test` exit unsuccessfully and fails the Flatpak CI job.

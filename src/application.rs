@@ -1338,11 +1338,17 @@ fn focus_inbox_when_ready(
             };
             let focus = gtk::prelude::GtkWindowExt::focus(&window);
             // Do not steal focus from a control the user moved to during loading.
-            if focus.as_ref().is_some_and(|focus| {
-                Some(focus) != initial_focus.as_ref()
-                    && focus != list.upcast_ref::<gtk::Widget>()
-                    && !focus.is_ancestor(list)
-            }) {
+            // Hiding the initial setup control on account discovery can move
+            // focus automatically; that must not prevent focusing the inbox.
+            if initial_focus
+                .as_ref()
+                .is_some_and(|initial| initial.is_mapped())
+                && focus.as_ref().is_some_and(|focus| {
+                    Some(focus) != initial_focus.as_ref()
+                        && focus != list.upcast_ref::<gtk::Widget>()
+                        && !focus.is_ancestor(list)
+                })
+            {
                 return adw::glib::ControlFlow::Break;
             }
             if selection.n_items() > 0 {
@@ -1362,6 +1368,7 @@ fn article_key_focus(
     reader_page: &adw::NavigationPage,
     reader_scroller: &gtk::ScrolledWindow,
     destinations: &adw::ViewStack,
+    cursor_key: bool,
 ) -> ArticleKeyFocus {
     let mut current = gtk::prelude::GtkWindowExt::focus(window);
     let no_focus = current.is_none();
@@ -1384,7 +1391,9 @@ fn article_key_focus(
         }
         current = widget.parent();
     }
-    if no_focus
+    // Navigation remains a window-level shortcut when header chrome has focus.
+    // Editable controls, dialogs, and the reader were excluded above.
+    if (no_focus || cursor_key)
         && let Some(list) = destinations
             .visible_child()
             .and_then(|child| mapped_article_list(&child))
@@ -1435,7 +1444,7 @@ fn install_article_cursor_keys(
     reader_page: &adw::NavigationPage,
     reader_scroller: &gtk::ScrolledWindow,
     read_context: ReadContext,
-) {
+) -> gtk::EventControllerKey {
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     keys.connect_key_pressed({
@@ -1465,10 +1474,23 @@ fn install_article_cursor_keys(
                     adw::glib::Propagation::Proceed
                 };
             }
-            if !modifiers.is_empty() {
+            if modifiers.intersects(
+                gtk::gdk::ModifierType::SHIFT_MASK
+                    | gtk::gdk::ModifierType::CONTROL_MASK
+                    | gtk::gdk::ModifierType::ALT_MASK
+                    | gtk::gdk::ModifierType::SUPER_MASK
+                    | gtk::gdk::ModifierType::HYPER_MASK
+                    | gtk::gdk::ModifierType::META_MASK,
+            ) {
                 return adw::glib::Propagation::Proceed;
             }
-            let scope = article_key_focus(&window, &reader_page, &reader_scroller, &destinations);
+            let scope = article_key_focus(
+                &window,
+                &reader_page,
+                &reader_scroller,
+                &destinations,
+                ui::inbox::cursor_direction(key).is_some(),
+            );
             if key == gtk::gdk::Key::r {
                 match &scope {
                     ArticleKeyFocus::List(list) => {
@@ -1554,7 +1576,8 @@ fn install_article_cursor_keys(
             adw::glib::Propagation::Proceed
         }
     });
-    window.add_controller(keys);
+    window.add_controller(keys.clone());
+    keys
 }
 
 fn focused_dialog(window: &gtk::Window) -> Option<adw::Dialog> {
@@ -3435,6 +3458,185 @@ fn smoke_test_image_anchor() -> Result<(), adw::glib::BoolError> {
     }
 }
 
+/// Exercise the installed window capture controller, not just cursor arithmetic.
+fn smoke_test_article_keyboard(
+    window: &adw::ApplicationWindow,
+    builder: &gtk::Builder,
+    inbox: &InboxUi,
+    reader: &ReaderUi,
+    entries: Vec<Entry>,
+) -> Result<(), adw::glib::BoolError> {
+    fn layout(window: &adw::ApplicationWindow) {
+        let main_loop = adw::glib::MainLoop::new(None, false);
+        window.add_tick_callback({
+            let main_loop = main_loop.clone();
+            let frames = Cell::new(0);
+            move |_, _| {
+                frames.set(frames.get() + 1);
+                if frames.get() < 3 {
+                    return adw::glib::ControlFlow::Continue;
+                }
+                main_loop.quit();
+                adw::glib::ControlFlow::Break
+            }
+        });
+        let expired = Rc::new(Cell::new(false));
+        let deadline = adw::glib::timeout_add_local_once(Duration::from_secs(3), {
+            let main_loop = main_loop.clone();
+            let expired = expired.clone();
+            move || {
+                expired.set(true);
+                main_loop.quit();
+            }
+        });
+        main_loop.run();
+        if !expired.get() {
+            deadline.remove();
+        }
+    }
+    let destinations: adw::ViewStack = builder.object("destinations").unwrap();
+    let reader_page: adw::NavigationPage = builder.object("reader_page").unwrap();
+    let keys = install_article_cursor_keys(
+        window,
+        &destinations,
+        &reader_page,
+        &reader.scroller,
+        ReadContext {
+            controller: reader.controller.clone(),
+            reader: reader.clone(),
+            inbox: inbox.clone(),
+            current: Rc::new(RefCell::new(None)),
+            toast: builder.object("toast_overlay").unwrap(),
+            undo: Rc::new(RefCell::new(Vec::new())),
+        },
+    );
+    if keys.propagation_phase() != gtk::PropagationPhase::Capture
+        || keys.widget().as_ref() != Some(window.upcast_ref::<gtk::Widget>())
+    {
+        return Err(adw::glib::bool_error!("Article keys lost window capture"));
+    }
+    let activations = Rc::new(Cell::new(0));
+    let activation_signal = inbox.list.connect_activate({
+        let activations = activations.clone();
+        move |_, _| activations.set(activations.get() + 1)
+    });
+    // Match startup: setup is initially focused, then account discovery hides
+    // it before the asynchronous cached inbox arrives and maps its rows.
+    let setup: gtk::Button = builder.object("setup_button").unwrap();
+    let header: gtk::Button = builder.object("sync_button").unwrap();
+    // This isolated window has no app actions. Keep the controls enabled as
+    // in the configured application so focus assertions cannot pass vacuously.
+    setup.set_action_name(None);
+    header.set_action_name(None);
+    setup.set_sensitive(true);
+    header.set_sensitive(true);
+    window.present();
+    layout(window);
+    if !setup.grab_focus() {
+        return Err(adw::glib::bool_error!(
+            "Setup focus fixture was unavailable"
+        ));
+    }
+    focus_inbox_when_ready(window, &inbox.list, &inbox.model.selection);
+    show_account(&inbox.status, &setup);
+    layout(window);
+    show_entries(inbox, entries);
+    layout(window);
+    if !gtk::prelude::GtkWindowExt::focus(window).is_some_and(|focus| {
+        focus == inbox.list.clone().upcast::<gtk::Widget>() || focus.is_ancestor(&inbox.list)
+    }) || inbox.model.selection.selected() != 0
+    {
+        return Err(adw::glib::bool_error!(
+            "Delayed inbox loading did not restore launch focus"
+        ));
+    }
+    let press = |key: gtk::gdk::Key, modifiers: gtk::gdk::ModifierType| {
+        keys.emit_by_name::<bool>("key-pressed", &[&key, &0_u32, &modifiers])
+    };
+    use gtk::gdk::{Key, ModifierType as Modifiers};
+    for (key, modifiers, expected) in [
+        (Key::Down, Modifiers::empty(), 1),
+        (Key::Up, Modifiers::LOCK_MASK, 0),
+        (Key::j, Modifiers::LOCK_MASK, 1),
+        (Key::k, Modifiers::empty(), 0),
+        (Key::Up, Modifiers::empty(), 0),
+    ] {
+        if !press(key, modifiers) || inbox.model.selection.selected() != expected {
+            return Err(adw::glib::bool_error!(
+                "Window article navigation failed for {key:?} with {modifiers:?}"
+            ));
+        }
+    }
+    if !header.grab_focus()
+        || !gtk::prelude::GtkWindowExt::focus(window).is_some_and(|focus| {
+            focus == header.clone().upcast::<gtk::Widget>() || focus.is_ancestor(&header)
+        })
+    {
+        return Err(adw::glib::bool_error!(
+            "Header focus fixture was unavailable"
+        ));
+    }
+    if !press(Key::Down, Modifiers::LOCK_MASK) || inbox.model.selection.selected() != 1 {
+        return Err(adw::glib::bool_error!(
+            "Down did not transfer header focus to the article list"
+        ));
+    }
+    if press(Key::Up, Modifiers::CONTROL_MASK) || inbox.model.selection.selected() != 1 {
+        return Err(adw::glib::bool_error!("Modified arrows were intercepted"));
+    }
+    let dialog = adw::Dialog::new();
+    let entry = gtk::Entry::new();
+    dialog.set_child(Some(&entry));
+    dialog.present(Some(window));
+    layout(window);
+    if !entry.grab_focus()
+        || !gtk::prelude::GtkWindowExt::focus(window).is_some_and(|focus| {
+            focus == entry.clone().upcast::<gtk::Widget>() || focus.is_ancestor(&entry)
+        })
+    {
+        return Err(adw::glib::bool_error!(
+            "Editing focus fixture was unavailable"
+        ));
+    }
+    if press(Key::Up, Modifiers::empty()) || inbox.model.selection.selected() != 1 {
+        return Err(adw::glib::bool_error!(
+            "Article keys intercepted dialog editing"
+        ));
+    }
+    dialog.force_close();
+    layout(window);
+    *reader.source_list.borrow_mut() = Some(inbox.list.downgrade());
+    let selected = ui::inbox::selected_id(&inbox.list).unwrap();
+    return_to_article_list(reader, &destinations, &inbox.list, selected);
+    layout(window);
+    if !gtk::prelude::GtkWindowExt::focus(window).is_some_and(|focus| {
+        focus == inbox.list.clone().upcast::<gtk::Widget>() || focus.is_ancestor(&inbox.list)
+    }) || !press(Key::Up, Modifiers::empty())
+        || inbox.model.selection.selected() != 0
+    {
+        return Err(adw::glib::bool_error!(
+            "Up failed after returning focus to the article list"
+        ));
+    }
+    if activations.get() != 0
+        || (0..inbox.model.store.n_items()).any(|position| {
+            ui::inbox::entry_at(&inbox.model, position).is_some_and(|entry| entry.read)
+        })
+    {
+        return Err(adw::glib::bool_error!(
+            "Cursor navigation activated or marked an article read"
+        ));
+    }
+    if !press(Key::Return, Modifiers::empty()) || activations.get() != 1 {
+        return Err(adw::glib::bool_error!(
+            "Enter did not deliberately activate the keyboard selection"
+        ));
+    }
+    inbox.list.disconnect(activation_signal);
+    window.remove_controller(&keys);
+    Ok(())
+}
+
 fn smoke_test_reader_pipeline() -> Result<(), adw::glib::BoolError> {
     use brooklet::services::traits::Repository;
     let repository = Arc::new(
@@ -3583,6 +3785,13 @@ fn smoke_test_reader_pipeline() -> Result<(), adw::glib::BoolError> {
         source_list: Rc::new(RefCell::new(None)),
     };
     install_reader_position_tracking(&reader);
+    smoke_test_article_keyboard(
+        &window,
+        &builder,
+        &inbox,
+        &reader,
+        vec![long.clone(), replacement.clone()],
+    )?;
     window.present();
     open_article(&reader, &inbox, &long);
     open_article(&reader, &inbox, &replacement);
