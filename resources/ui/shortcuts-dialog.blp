@@ -48,9 +48,9 @@ Adw.ShortcutsDialog shortcuts_dialog {
     title: _("Article lists");
 
     Adw.ShortcutsItem {
-      title: _("Toggle selected article read or unread");
+      title: _("Dismiss or restore selected article");
       accelerator: "r";
-      subtitle: _("In lists or the reader; marking unread returns to the list");
+      subtitle: _("In a list; does not open the article");
     }
 
     Adw.ShortcutsItem {
@@ -88,6 +88,12 @@ Adw.ShortcutsDialog shortcuts_dialog {
     title: _("Reader");
 
     Adw.ShortcutsItem {
+      title: _("Toggle open article read or unread");
+      accelerator: "r";
+      subtitle: _("Marking unread returns to the source list");
+    }
+
+    Adw.ShortcutsItem {
       title: _("Scroll article down");
       accelerator: "j";
       subtitle: _("When the reader has focus");
@@ -121,6 +127,7 @@ Adw.ShortcutsDialog shortcuts_dialog {
       title: _("Dismiss a dialog or go back");
       action-name: "win.back";
       accelerator: "Escape";
+      subtitle: _("From the reader, return focus to the article list");
     }
   }
 }

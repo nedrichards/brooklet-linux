@@ -51,9 +51,20 @@ pub enum Inline {
     Text(String),
     Strong(Vec<Inline>),
     Emphasis(Vec<Inline>),
+    Superscript(Vec<Inline>),
+    Subscript(Vec<Inline>),
+    Strikethrough(Vec<Inline>),
     Code(String),
     Link { text: Vec<Inline>, url: String },
     Break,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableCellLayout {
+    pub column: u32,
+    pub row_span: u32,
+    pub column_span: u32,
+    pub header: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +91,8 @@ pub enum DocumentBlock {
         inline: Vec<Inline>,
         ordered: bool,
         ordinal: Option<i64>,
+        #[serde(default)]
+        depth: u32,
     },
     Caption {
         text: String,
@@ -87,6 +100,10 @@ pub enum DocumentBlock {
     },
     Table {
         rows: Vec<Vec<String>>,
+        #[serde(default)]
+        inline_rows: Vec<Vec<Vec<Inline>>>,
+        #[serde(default)]
+        cell_layout: Vec<Vec<TableCellLayout>>,
     },
     Image {
         url: String,

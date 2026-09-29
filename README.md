@@ -56,3 +56,6 @@ flatpak-builder --run build-dir \
 ## Licence
 
 Brooklet is licensed under GPL-3.0-or-later. See `COPYING`.
+
+For private cache audits and native rendering previews, see
+[Reader testing](docs/reader-testing.md).

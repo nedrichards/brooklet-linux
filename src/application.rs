@@ -63,9 +63,11 @@ struct ReaderUi {
     restoring: Rc<Cell<bool>>,
     positions: Rc<RefCell<HashMap<i64, ReaderPosition>>>,
     open_generation: Rc<Cell<u64>>,
+    image_requests: Rc<RefCell<Vec<tokio::task::AbortHandle>>>,
     origin_set: Rc<RefCell<Vec<Entry>>>,
     origin_index: Rc<Cell<usize>>,
     origin_inbox: Rc<Cell<bool>>,
+    source_list: Rc<RefCell<Option<adw::glib::WeakRef<gtk::ListView>>>>,
 }
 
 #[derive(Clone)]
@@ -276,8 +278,9 @@ impl BrookletApplication {
                 .object("library_navigation")
                 .expect("window.ui must define library_navigation");
             let saved_list: gtk::ListView = builder.object("saved_list").expect("saved_list");
+            let open_id = Rc::new(Cell::new(None));
             let other_views = OtherViews {
-                saved: ui::inbox::configure_with_action(&saved_list, false),
+                saved: ui::inbox::configure_with_action(&saved_list, false, open_id.clone()),
                 saved_status: builder.object("saved_status").expect("saved_status"),
                 saved_scroller: builder.object("saved_scroller").expect("saved_scroller"),
                 library_all: ui::inbox::configure_with_action(
@@ -285,18 +288,21 @@ impl BrookletApplication {
                         .object::<gtk::ListView>("library_all_list")
                         .expect("library_all_list"),
                     false,
+                    open_id.clone(),
                 ),
                 library_unread: ui::inbox::configure_with_action(
                     &builder
                         .object::<gtk::ListView>("library_unread_list")
                         .expect("library_unread_list"),
                     false,
+                    open_id.clone(),
                 ),
                 library_read: ui::inbox::configure_with_action(
                     &builder
                         .object::<gtk::ListView>("library_read_list")
                         .expect("library_read_list"),
                     false,
+                    open_id.clone(),
                 ),
                 library_all_status: builder
                     .object("library_all_status")
@@ -327,8 +333,16 @@ impl BrookletApplication {
                     .expect("library_categories_scroller"),
             };
             let current_entry = Rc::new(RefCell::new(None::<Entry>));
+            builder
+                .object::<gtk::ListView>("library_unread_list")
+                .expect("library_unread_list")
+                .add_css_class("unread-only-list");
+            builder
+                .object::<gtk::ListView>("library_read_list")
+                .expect("library_read_list")
+                .add_css_class("read-only-list");
             let inbox_ui = InboxUi {
-                model: ui::inbox::configure(&inbox_list),
+                model: ui::inbox::configure(&inbox_list, open_id.clone()),
                 list: inbox_list.clone(),
                 status: inbox_status.clone(),
                 scroller: inbox_scroller,
@@ -377,13 +391,15 @@ impl BrookletApplication {
                 scroller: reader_scroller,
                 content: reader_content,
                 controller: controller.clone(),
-                active_id: Rc::new(Cell::new(None)),
+                active_id: open_id,
                 restoring: Rc::new(Cell::new(false)),
                 positions: Rc::new(RefCell::new(HashMap::new())),
                 open_generation: Rc::new(Cell::new(0)),
+                image_requests: Rc::new(RefCell::new(Vec::new())),
                 origin_set: Rc::new(RefCell::new(Vec::new())),
                 origin_index: Rc::new(Cell::new(0)),
                 origin_inbox: Rc::new(Cell::new(false)),
+                source_list: Rc::new(RefCell::new(None)),
             };
             reader_ui.scroller.vadjustment().connect_value_changed({
                 let reader = reader_ui.clone();
@@ -402,7 +418,7 @@ impl BrookletApplication {
                     let content = reader.content.clone();
                     let active_id = reader.active_id.clone();
                     let offset = adjustment.value() as i32;
-                    let position = reader_position_from_offset(&content, entry_id, offset);
+                    let position = ui::reader::position_from_offset(&content, entry_id, offset);
                     reader
                         .positions
                         .borrow_mut()
@@ -429,7 +445,7 @@ impl BrookletApplication {
                     if let Some(entry) = ui::inbox::entry_at(&model, position) {
                         ui::inbox::select_id(list, entry.id);
                         *current_entry.borrow_mut() = Some(entry.clone());
-                        set_reader_origin(&reader_ui, &model, entry.id, true);
+                        set_reader_origin(&reader_ui, &model, list, entry.id, true);
                         open_article(&reader_ui, &inbox_ui, &entry);
                         if !entry.read {
                             mark_read(
@@ -467,7 +483,7 @@ impl BrookletApplication {
                         if let Some(entry) = ui::inbox::entry_at(&model, position) {
                             ui::inbox::select_id(list, entry.id);
                             *current_entry.borrow_mut() = Some(entry.clone());
-                            set_reader_origin(&reader_ui, &model, entry.id, false);
+                            set_reader_origin(&reader_ui, &model, list, entry.id, false);
                             open_article(&reader_ui, &inbox_ui, &entry);
                             if !entry.read {
                                 mark_read_from(
@@ -503,10 +519,6 @@ impl BrookletApplication {
                         return;
                     };
                     if let Some(entry) = ui::inbox::entry_by_id(&inbox_ui.model, entry_id) {
-                        let retain = !reader_ui.split.is_collapsed();
-                        if retain {
-                            ui::inbox::select_id(&inbox_ui.list, entry_id);
-                        }
                         mark_read(
                             ReadContext {
                                 controller: controller.clone(),
@@ -517,7 +529,7 @@ impl BrookletApplication {
                                 current: current.clone(),
                             },
                             entry,
-                            retain,
+                            false,
                             true,
                         );
                     }
@@ -662,7 +674,7 @@ impl BrookletApplication {
                     if let Some(entry_id) = reader.active_id.get()
                         && !reader.restoring.get()
                     {
-                        let position = reader_position_from_offset(
+                        let position = ui::reader::position_from_offset(
                             &reader.content,
                             entry_id,
                             reader.scroller.vadjustment().value() as i32,
@@ -763,7 +775,8 @@ impl BrookletApplication {
                         None::<gtk::SelectionModel>,
                         None::<gtk::ListItemFactory>,
                     );
-                    let model = ui::inbox::configure_with_action(&list, false);
+                    let model =
+                        ui::inbox::configure_with_action(&list, false, reader.active_id.clone());
                     let scroller = gtk::ScrolledWindow::new();
                     scroller.set_vexpand(true);
                     scroller.set_child(Some(&list));
@@ -795,10 +808,10 @@ impl BrookletApplication {
                         let inbox = inbox.clone();
                         let toast = toast.clone();
                         let undo = undo.clone();
-                        move |_, position| {
+                        move |list, position| {
                             if let Some(entry) = ui::inbox::entry_at(&model, position) {
                                 *current.borrow_mut() = Some(entry.clone());
-                                set_reader_origin(&reader, &model, entry.id, false);
+                                set_reader_origin(&reader, &model, list, entry.id, false);
                                 open_article(&reader, &inbox, &entry);
                                 if !entry.read {
                                     mark_read(
@@ -829,6 +842,10 @@ impl BrookletApplication {
             back_action.connect_activate({
                 let window = window.downgrade();
                 let reader = reader_ui.clone();
+                let reader_page = reader_page.clone();
+                let destinations: adw::ViewStack =
+                    builder.object("destinations").expect("destinations");
+                let inbox = inbox_ui.list.clone();
                 let navigation = library_navigation.clone();
                 move |_, _| {
                     if let Some(window) = window.upgrade()
@@ -837,11 +854,23 @@ impl BrookletApplication {
                         dialog.close();
                         return;
                     }
-                    if reader.split.is_collapsed() && reader.split.shows_content() {
-                        reader.split.set_show_content(false);
-                    } else {
-                        navigation.pop();
+                    let reader_focused = window.upgrade().is_some_and(|window| {
+                        gtk::prelude::GtkWindowExt::focus(&window).is_some_and(|focus| {
+                            focus == reader_page.clone().upcast::<gtk::Widget>()
+                                || focus.is_ancestor(&reader_page)
+                        })
+                    });
+                    if (reader.split.is_collapsed() && reader.split.shows_content())
+                        || (reader_focused && reader.scroller.is_mapped())
+                    {
+                        if let Some(entry_id) = reader.active_id.get() {
+                            return_to_article_list(&reader, &destinations, &inbox, entry_id);
+                        } else if reader.split.is_collapsed() {
+                            reader.split.set_show_content(false);
+                        }
+                        return;
                     }
+                    navigation.pop();
                 }
             });
             window.add_action(&back_action);
@@ -903,6 +932,7 @@ impl BrookletApplication {
             window.add_action(&setup_action);
 
             window.present();
+            focus_inbox_when_ready(&window, &inbox_ui.list, &inbox_ui.model.selection);
 
             controller.existing_account({
                 let setup_action = setup_action.clone();
@@ -997,12 +1027,24 @@ impl BrookletApplication {
             .set_accels_for_action("win.back", &["<alt>Left", "Escape"]);
         self.application.set_accels_for_action(
             "app.show-shortcuts",
-            &["F1", "<primary>question", "<primary><shift>slash"],
+            &[
+                "F1",
+                "<primary>question",
+                "<primary><shift>slash",
+                "<primary>slash",
+            ],
         );
     }
 }
 
 fn opens_shortcuts(key: gtk::gdk::Key, modifiers: gtk::gdk::ModifierType) -> bool {
+    let modifiers = modifiers
+        & (gtk::gdk::ModifierType::SHIFT_MASK
+            | gtk::gdk::ModifierType::CONTROL_MASK
+            | gtk::gdk::ModifierType::ALT_MASK
+            | gtk::gdk::ModifierType::SUPER_MASK
+            | gtk::gdk::ModifierType::HYPER_MASK
+            | gtk::gdk::ModifierType::META_MASK);
     if key == gtk::gdk::Key::F1 && modifiers.is_empty() {
         return true;
     }
@@ -1010,11 +1052,130 @@ fn opens_shortcuts(key: gtk::gdk::Key, modifiers: gtk::gdk::ModifierType) -> boo
         && !modifiers.intersects(
             gtk::gdk::ModifierType::ALT_MASK
                 | gtk::gdk::ModifierType::SUPER_MASK
+                | gtk::gdk::ModifierType::HYPER_MASK
                 | gtk::gdk::ModifierType::META_MASK,
         )
-        && (key == gtk::gdk::Key::question
-            || (key == gtk::gdk::Key::slash
-                && modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK)))
+        && (key == gtk::gdk::Key::question || key == gtk::gdk::Key::slash)
+}
+
+enum ArticleKeyFocus {
+    List(gtk::ListView),
+    Reader,
+    Other,
+}
+
+fn focus_inbox_when_ready(
+    window: &adw::ApplicationWindow,
+    list: &gtk::ListView,
+    selection: &gtk::SingleSelection,
+) {
+    let initial_focus = gtk::prelude::GtkWindowExt::focus(window);
+    let window = window.downgrade();
+    let selection = selection.clone();
+    let pending = Cell::new(true);
+    list.connect_map(move |list| {
+        if !pending.replace(false) {
+            return;
+        }
+        let window = window.clone();
+        let selection = selection.clone();
+        let initial_focus = initial_focus.clone();
+        // GtkListView needs its first layout frame before its rows can receive focus.
+        list.add_tick_callback(move |list, _| {
+            let Some(window) = window.upgrade() else {
+                return adw::glib::ControlFlow::Break;
+            };
+            let focus = gtk::prelude::GtkWindowExt::focus(&window);
+            // Do not steal focus from a control the user moved to during loading.
+            if focus.as_ref().is_some_and(|focus| {
+                Some(focus) != initial_focus.as_ref()
+                    && focus != list.upcast_ref::<gtk::Widget>()
+                    && !focus.is_ancestor(list)
+            }) {
+                return adw::glib::ControlFlow::Break;
+            }
+            if selection.n_items() > 0 {
+                if selection.selected() == gtk::INVALID_LIST_POSITION {
+                    selection.set_selected(0);
+                }
+                list.grab_focus();
+                list.scroll_to(selection.selected(), gtk::ListScrollFlags::FOCUS, None);
+            }
+            adw::glib::ControlFlow::Break
+        });
+    });
+}
+
+fn article_key_focus(
+    window: &adw::ApplicationWindow,
+    reader_page: &adw::NavigationPage,
+    reader_scroller: &gtk::ScrolledWindow,
+    destinations: &adw::ViewStack,
+) -> ArticleKeyFocus {
+    let mut current = gtk::prelude::GtkWindowExt::focus(window);
+    let no_focus = current.is_none();
+    while let Some(widget) = current {
+        if widget.is::<gtk::Editable>()
+            || widget.is::<gtk::TextView>()
+            || widget.is::<gtk::DropDown>()
+            || widget.is::<gtk::Popover>()
+        {
+            return ArticleKeyFocus::Other;
+        }
+        if let Ok(list) = widget.clone().downcast::<gtk::ListView>() {
+            return ArticleKeyFocus::List(list);
+        }
+        if widget == reader_page.clone().upcast::<gtk::Widget>() && reader_scroller.is_mapped() {
+            return ArticleKeyFocus::Reader;
+        }
+        if widget.is::<gtk::ListBox>() || widget.is::<adw::Dialog>() {
+            return ArticleKeyFocus::Other;
+        }
+        current = widget.parent();
+    }
+    if no_focus
+        && let Some(list) = destinations
+            .visible_child()
+            .and_then(|child| mapped_article_list(&child))
+    {
+        return ArticleKeyFocus::List(list);
+    }
+    ArticleKeyFocus::Other
+}
+
+fn return_to_article_list(
+    reader: &ReaderUi,
+    destinations: &adw::ViewStack,
+    inbox: &gtk::ListView,
+    entry_id: i64,
+) {
+    if reader.split.is_collapsed() {
+        reader.split.set_show_content(false);
+    }
+    let source = reader.source_list.borrow().clone();
+    let destinations = destinations.downgrade();
+    let inbox = inbox.downgrade();
+    adw::glib::idle_add_local_once(move || {
+        let destinations = destinations.upgrade();
+        let list = source
+            .and_then(|source| source.upgrade())
+            .filter(|list| list.is_mapped())
+            .or_else(|| {
+                destinations
+                    .as_ref()
+                    .and_then(|destinations| destinations.visible_child())
+                    .and_then(|child| mapped_article_list(&child))
+            })
+            .or_else(|| inbox.upgrade().filter(|list| list.is_mapped()));
+        if let Some(list) = list {
+            if ui::inbox::position_of_id(&list, entry_id).is_some() {
+                ui::inbox::select_id(&list, entry_id);
+            }
+            list.grab_focus();
+        } else if let Some(destinations) = destinations {
+            destinations.child_focus(gtk::DirectionType::TabForward);
+        }
+    });
 }
 
 fn install_article_cursor_keys(
@@ -1026,14 +1187,11 @@ fn install_article_cursor_keys(
 ) {
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-    let cursor_mode = Rc::new(Cell::new(false));
     keys.connect_key_pressed({
         let window = window.downgrade();
         let destinations = destinations.downgrade();
         let reader_page = reader_page.downgrade();
         let reader_scroller = reader_scroller.downgrade();
-        let cursor_mode = cursor_mode.clone();
-        let read_context = read_context.clone();
         move |_, key, _, modifiers| {
             let (Some(window), Some(destinations), Some(reader_page), Some(reader_scroller)) = (
                 window.upgrade(),
@@ -1056,214 +1214,96 @@ fn install_article_cursor_keys(
                     adw::glib::Propagation::Proceed
                 };
             }
-            if key == gtk::gdk::Key::Tab || key == gtk::gdk::Key::ISO_Left_Tab {
-                cursor_mode.set(false);
-                return adw::glib::Propagation::Proceed;
-            }
-            if key == gtk::gdk::Key::Escape {
-                cursor_mode.set(false);
-                return adw::glib::Propagation::Proceed;
-            }
             if !modifiers.is_empty() {
                 return adw::glib::Propagation::Proceed;
             }
+            let scope = article_key_focus(&window, &reader_page, &reader_scroller, &destinations);
             if key == gtk::gdk::Key::r {
-                let mut focus = gtk::prelude::GtkWindowExt::focus(&window);
-                while let Some(widget) = focus.clone() {
-                    if widget.is::<gtk::Editable>()
-                        || widget.is::<gtk::TextView>()
-                        || widget.is::<gtk::DropDown>()
-                        || widget.is::<gtk::Popover>()
-                    {
-                        return adw::glib::Propagation::Proceed;
-                    }
-                    if widget.is::<adw::Dialog>() && focused_article_list(&window).is_none() {
-                        return adw::glib::Propagation::Proceed;
-                    }
-                    focus = widget.parent();
-                }
-                if let Some(list) = focused_article_list(&window) {
-                    if let Some(entry) = ui::inbox::selected_from_list(&list) {
-                        toggle_read(read_context.clone(), entry, Some(list), None);
-                        return adw::glib::Propagation::Stop;
-                    }
-                } else if reader_scroller.is_mapped()
-                    && gtk::prelude::GtkWindowExt::focus(&window).is_some_and(|focus| {
-                        focus == reader_page.clone().upcast::<gtk::Widget>()
-                            || reader_page.is_ancestor(&focus)
-                    })
-                {
-                    if let Some(entry) = read_context.current.borrow().clone() {
-                        let entry_id = entry.id;
-                        let reader = read_context.reader.clone();
-                        let inbox_list = read_context.inbox.list.clone();
-                        let destinations = destinations.downgrade();
-                        let window = window.downgrade();
-                        let cursor_mode = cursor_mode.clone();
-                        let focus_returned = Rc::new(Cell::new(false));
-                        let return_to_list = Rc::new(move || {
-                            if focus_returned.get() {
-                                return;
+                match &scope {
+                    ArticleKeyFocus::List(list) => {
+                        if let Some(entry) = ui::inbox::selected_from_list(list) {
+                            if !entry.read
+                                && (list == &read_context.inbox.list
+                                    || list.has_css_class("unread-only-list"))
+                                && !read_context
+                                    .inbox
+                                    .read_in_flight
+                                    .borrow()
+                                    .contains(&entry.id)
+                            {
+                                ui::inbox::select_next_unread(
+                                    list,
+                                    &read_context.inbox.read_in_flight.borrow(),
+                                );
                             }
-                            if reader.split.is_collapsed() {
-                                reader.split.set_show_content(false);
-                            }
+                            toggle_read(read_context.clone(), entry, Some(list.clone()), None);
+                            return adw::glib::Propagation::Stop;
+                        }
+                    }
+                    ArticleKeyFocus::Reader => {
+                        if let Some(entry) = read_context.current.borrow().clone() {
+                            let entry_id = entry.id;
+                            let reader = read_context.reader.clone();
                             let destinations = destinations.clone();
-                            let inbox_list = inbox_list.clone();
-                            let window = window.clone();
-                            let cursor_mode = cursor_mode.clone();
-                            let focus_returned = focus_returned.clone();
-                            adw::glib::idle_add_local_once(move || {
-                                if focus_returned.get() {
-                                    return;
-                                }
-                                let list = destinations
-                                    .upgrade()
-                                    .and_then(|destinations| destinations.visible_child())
-                                    .and_then(|child| mapped_article_list(&child))
-                                    .unwrap_or(inbox_list);
-                                if list.is_mapped() {
-                                    list.grab_focus();
-                                    ui::inbox::select_id(&list, entry_id);
-                                    let focused = window.upgrade().is_some_and(|window| {
-                                        gtk::prelude::GtkWindowExt::focus(&window).is_some_and(
-                                            |focus| {
-                                                focus == list.clone().upcast::<gtk::Widget>()
-                                                    || focus.is_ancestor(&list)
-                                            },
-                                        )
-                                    });
-                                    if focused {
-                                        cursor_mode.set(true);
-                                        focus_returned.set(true);
-                                    }
+                            let inbox = read_context.inbox.list.clone();
+                            let returned = Rc::new(Cell::new(false));
+                            let return_to_list = Rc::new(move || {
+                                if !returned.replace(true) {
+                                    return_to_article_list(
+                                        &reader,
+                                        &destinations,
+                                        &inbox,
+                                        entry_id,
+                                    );
                                 }
                             });
-                        });
-                        toggle_read(read_context.clone(), entry, None, Some(return_to_list));
-                        return adw::glib::Propagation::Stop;
+                            toggle_read(read_context.clone(), entry, None, Some(return_to_list));
+                            return adw::glib::Propagation::Stop;
+                        }
                     }
-                } else if let Some(list) = destinations
-                    .visible_child()
-                    .and_then(|child| mapped_article_list(&child))
-                    && let Some(entry) = ui::inbox::selected_from_list(&list)
-                {
-                    toggle_read(read_context.clone(), entry, Some(list), None);
-                    return adw::glib::Propagation::Stop;
+                    ArticleKeyFocus::Other => {}
                 }
             }
-            if key == gtk::gdk::Key::u && reader_scroller.is_visible() {
-                let mut focus = gtk::prelude::GtkWindowExt::focus(&window);
-                while let Some(widget) = focus {
-                    if widget.is::<gtk::Editable>()
-                        || widget.is::<gtk::TextView>()
-                        || widget.is::<adw::Dialog>()
-                        || widget.is::<gtk::Popover>()
-                    {
-                        return adw::glib::Propagation::Proceed;
-                    }
-                    focus = widget.parent();
-                }
-                if gtk::prelude::WidgetExt::activate_action(&window, "win.keep-unread", None)
+            if key == gtk::gdk::Key::u && matches!(&scope, ArticleKeyFocus::Reader) {
+                return if gtk::prelude::WidgetExt::activate_action(&window, "win.keep-unread", None)
                     .is_ok()
                 {
-                    return adw::glib::Propagation::Stop;
-                }
+                    adw::glib::Propagation::Stop
+                } else {
+                    adw::glib::Propagation::Proceed
+                };
             }
-            if (key == gtk::gdk::Key::Return || key == gtk::gdk::Key::KP_Enter) && cursor_mode.get()
-            {
-                let list = focused_article_list(&window);
-                if let Some(list) = list
+            if let ArticleKeyFocus::List(list) = &scope {
+                if (key == gtk::gdk::Key::Return || key == gtk::gdk::Key::KP_Enter)
+                    && !gtk::prelude::GtkWindowExt::focus(&window)
+                        .is_some_and(|focus| focus.is::<gtk::Button>())
                     && let Some(selection) = list.model().and_downcast::<gtk::SingleSelection>()
                     && selection.selected() != gtk::INVALID_LIST_POSITION
                 {
-                    cursor_mode.set(false);
                     list.emit_by_name::<()>("activate", &[&selection.selected()]);
                     return adw::glib::Propagation::Stop;
                 }
-            }
-            let Some(direction) = ui::inbox::cursor_direction(key) else {
-                return adw::glib::Propagation::Proceed;
-            };
-            if let Some(focus) = gtk::prelude::GtkWindowExt::focus(&window) {
-                let mut current = Some(focus);
-                while let Some(widget) = current {
-                    if widget == reader_page && reader_scroller.is_mapped() {
-                        if key == gtk::gdk::Key::j || key == gtk::gdk::Key::k {
-                            let adjustment = reader_scroller.vadjustment();
-                            let target = adjustment.value() + f64::from(direction) * 80.0;
-                            adjustment.set_value(
-                                target.clamp(
-                                    adjustment.lower(),
-                                    (adjustment.upper() - adjustment.page_size())
-                                        .max(adjustment.lower()),
-                                ),
-                            );
-                            return adw::glib::Propagation::Stop;
-                        }
-                        return adw::glib::Propagation::Proceed;
-                    }
-                    if let Ok(list) = widget.clone().downcast::<gtk::ListView>() {
-                        return if ui::inbox::move_cursor(&list, direction) {
-                            cursor_mode.set(true);
-                            adw::glib::Propagation::Stop
-                        } else {
-                            adw::glib::Propagation::Proceed
-                        };
-                    }
-                    if widget.is::<gtk::ListBox>()
-                        || widget.is::<gtk::Editable>()
-                        || widget.is::<gtk::TextView>()
-                        || widget.is::<gtk::DropDown>()
-                        || widget.is::<adw::Dialog>()
-                        || widget.is::<gtk::Popover>()
-                    {
-                        return adw::glib::Propagation::Proceed;
-                    }
-                    current = widget.parent();
+                if let Some(direction) = ui::inbox::cursor_direction(key)
+                    && ui::inbox::move_cursor(list, direction)
+                {
+                    return adw::glib::Propagation::Stop;
                 }
+            } else if matches!(&scope, ArticleKeyFocus::Reader)
+                && let Some(direction) = ui::inbox::cursor_direction(key)
+                && (key == gtk::gdk::Key::j || key == gtk::gdk::Key::k)
+            {
+                let adjustment = reader_scroller.vadjustment();
+                let target = adjustment.value() + f64::from(direction) * 80.0;
+                adjustment.set_value(target.clamp(
+                    adjustment.lower(),
+                    (adjustment.upper() - adjustment.page_size()).max(adjustment.lower()),
+                ));
+                return adw::glib::Propagation::Stop;
             }
-            let Some(list) = destinations
-                .visible_child()
-                .and_then(|child| mapped_article_list(&child))
-            else {
-                return adw::glib::Propagation::Proceed;
-            };
-            if ui::inbox::move_cursor(&list, direction) {
-                cursor_mode.set(true);
-                adw::glib::Propagation::Stop
-            } else {
-                adw::glib::Propagation::Proceed
-            }
+            adw::glib::Propagation::Proceed
         }
     });
     window.add_controller(keys);
-    window.connect_focus_widget_notify({
-        move |window| {
-            if !cursor_mode.get() {
-                return;
-            }
-            let focus = gtk::prelude::GtkWindowExt::focus(window);
-            let list = focused_article_list(window);
-            if !focus.zip(list).is_some_and(|(focus, list)| {
-                !focus.is::<gtk::Button>()
-                    && (focus == list.clone().upcast::<gtk::Widget>() || focus.is_ancestor(&list))
-            }) {
-                cursor_mode.set(false);
-            }
-        }
-    });
-}
-
-fn focused_article_list(window: &adw::ApplicationWindow) -> Option<gtk::ListView> {
-    let mut current = gtk::prelude::GtkWindowExt::focus(window);
-    while let Some(widget) = current {
-        if let Ok(list) = widget.clone().downcast::<gtk::ListView>() {
-            return Some(list);
-        }
-        current = widget.parent();
-    }
-    None
 }
 
 fn focused_dialog(window: &gtk::Window) -> Option<adw::Dialog> {
@@ -1572,6 +1612,38 @@ fn update_source_read_state(list: Option<&gtk::ListView>, entry: &Entry, read: b
     };
     let model = ui::inbox::InboxModel { store, selection };
     let selected_id = ui::inbox::selected_id(list);
+    let leaves_view = (read && list.has_css_class("unread-only-list"))
+        || (!read && list.has_css_class("read-only-list"));
+    if leaves_view {
+        let position = (selected_id == Some(entry.id))
+            .then(|| ui::inbox::position_of_id(list, entry.id))
+            .flatten();
+        let scroller = list.parent().and_downcast::<gtk::ScrolledWindow>();
+        let place = scroller
+            .as_ref()
+            .map(|scroller| capture_list_place(list, scroller));
+        ui::inbox::remove_entry(&model, entry.id);
+        let empty = model.store.n_items() == 0;
+        if let Some(scroller) = scroller {
+            if let Some(status) = scroller.prev_sibling().and_downcast::<adw::StatusPage>() {
+                status.set_visible(empty);
+            }
+            scroller.set_visible(!empty);
+            if let Some(place) = place
+                && !empty
+            {
+                restore_list_place(list, &scroller, place);
+            }
+        }
+        if let Some(position) = position
+            && !empty
+        {
+            model
+                .selection
+                .set_selected(position.min(model.store.n_items() - 1));
+        }
+        return;
+    }
     ui::inbox::update_entry(
         &model,
         Entry {
@@ -1613,14 +1685,9 @@ fn toggle_read(
     let source = if inbox_source { None } else { source };
     let read_in_flight = context.inbox.read_in_flight.borrow().contains(&entry.id);
     if entry.read || read_in_flight {
-        let return_now = return_to_list.clone();
         mark_unread_from(context, entry, source, return_to_list);
-        if let Some(return_now) = return_now {
-            return_now();
-        }
     } else {
-        let retain = inbox_source && !context.reader.split.is_collapsed();
-        mark_read_from(context, entry, retain, true, source);
+        mark_read_from(context, entry, false, true, source);
     }
 }
 
@@ -1811,9 +1878,18 @@ fn mark_read_from(
                     *undo.borrow_mut() = vec![entry];
                 } else if let Some(removed) = {
                     let place = capture_list_place(&inbox.list, &inbox.scroller);
+                    let selected_position = (ui::inbox::selected_id(&inbox.list) == Some(entry_id))
+                        .then(|| ui::inbox::position_of_id(&inbox.list, entry_id))
+                        .flatten();
                     let removed = ui::inbox::remove_entry(&inbox.model, entry_id);
                     if removed.is_some() {
                         if inbox.model.store.n_items() > 0 {
+                            if let Some(position) = selected_position {
+                                inbox
+                                    .model
+                                    .selection
+                                    .set_selected(position.min(inbox.model.store.n_items() - 1));
+                            }
                             restore_list_place(&inbox.list, &inbox.scroller, place);
                         } else {
                             *inbox.emptied_place.borrow_mut() = Some(place);
@@ -1884,6 +1960,14 @@ fn undo_mark_read(
 
 fn open_article(reader_ui: &ReaderUi, inbox_ui: &InboxUi, entry: &Entry) {
     release_read_pin_unless(inbox_ui, Some(entry.id));
+    if let Some(list) = reader_ui
+        .source_list
+        .borrow()
+        .as_ref()
+        .and_then(|source| source.upgrade())
+    {
+        ui::inbox::refresh_open_marker(&list, Some(entry.id));
+    }
     if reader_ui.active_id.get() == Some(entry.id) && reader_ui.scroller.is_visible() {
         reader_ui.split.set_show_content(true);
         reader_ui.scroller.grab_focus();
@@ -1892,7 +1976,7 @@ fn open_article(reader_ui: &ReaderUi, inbox_ui: &InboxUi, entry: &Entry) {
     if let Some(previous_id) = reader_ui.active_id.get()
         && !reader_ui.restoring.get()
     {
-        let position = reader_position_from_offset(
+        let position = ui::reader::position_from_offset(
             &reader_ui.content,
             previous_id,
             reader_ui.scroller.vadjustment().value() as i32,
@@ -1904,6 +1988,9 @@ fn open_article(reader_ui: &ReaderUi, inbox_ui: &InboxUi, entry: &Entry) {
         reader_ui.controller.save_reader_position(position, |_| {});
     }
     let entry_id = entry.id;
+    for request in reader_ui.image_requests.borrow_mut().drain(..) {
+        request.abort();
+    }
     reader_ui.restoring.set(true);
     let generation = reader_ui.open_generation.get().wrapping_add(1);
     reader_ui.open_generation.set(generation);
@@ -1911,30 +1998,55 @@ fn open_article(reader_ui: &ReaderUi, inbox_ui: &InboxUi, entry: &Entry) {
     let images = ui::reader::show(entry, &reader_ui.title, &reader_ui.content);
     for slot in images {
         let reader = reader_ui.clone();
-        reader_ui.controller.fetch_image(slot.url, move |result| {
+        let url = slot.url.clone();
+        let request = reader_ui.controller.fetch_image(slot.url, move |result| {
+            if reader.open_generation.get() != generation {
+                return;
+            }
             let Ok(bytes) = result else {
                 return;
             };
             let handle = reader.controller.backend_handle();
             adw::glib::MainContext::default().spawn_local(async move {
                 let mut decode = Box::pin(async move {
+                    let decoders = reader.controller.image_decoders();
+                    let _permit = decoders
+                        .acquire()
+                        .await
+                        .expect("image decoders remain open");
+                    if reader.open_generation.get() != generation {
+                        return;
+                    }
                     let Ok(mut image) = glycin::Loader::new_vec(bytes).load().await else {
+                        reader.controller.invalidate_image(url);
                         return;
                     };
                     let Ok(frame) = image.next_frame().await else {
+                        reader.controller.invalidate_image(url);
                         return;
                     };
-                    if reader.active_id.get() != Some(entry_id) {
+                    if reader.open_generation.get() != generation {
                         return;
                     }
-                    let picture = gtk::Picture::for_paintable(&frame.texture());
-                    picture.set_alternative_text(Some(&slot.alt));
-                    picture.set_content_fit(gtk::ContentFit::Contain);
-                    picture.set_can_shrink(true);
+                    let scroll = reader.scroller.vadjustment().value();
+                    let place = (!reader.restoring.get()).then(|| {
+                        ui::reader::position_from_offset(&reader.content, entry_id, scroll as i32)
+                    });
+                    let picture = ui::reader::picture(&frame.texture(), &slot.alt);
                     while let Some(child) = slot.container.first_child() {
                         slot.container.remove(&child);
                     }
                     slot.container.append(&picture);
+                    if let Some(place) = place {
+                        ui::reader::preserve_after_image(
+                            &reader.content,
+                            &reader.scroller,
+                            reader.open_generation.clone(),
+                            generation,
+                            scroll,
+                            place,
+                        );
+                    }
                 });
                 std::future::poll_fn(|context| {
                     let _entered = handle.enter();
@@ -1943,6 +2055,7 @@ fn open_article(reader_ui: &ReaderUi, inbox_ui: &InboxUi, entry: &Entry) {
                 .await;
             });
         });
+        reader_ui.image_requests.borrow_mut().push(request);
     }
     reader_ui.placeholder.set_visible(false);
     reader_ui.scroller.set_visible(true);
@@ -1962,7 +2075,7 @@ fn open_article(reader_ui: &ReaderUi, inbox_ui: &InboxUi, entry: &Entry) {
                     return;
                 }
                 let value = position.map_or(0, |position| {
-                    offset_from_reader_position(&reader.content, &position)
+                    ui::reader::offset_from_position(&reader.content, &position)
                 });
                 reader.scroller.vadjustment().set_value(f64::from(value));
                 reader.restoring.set(false);
@@ -1974,9 +2087,19 @@ fn open_article(reader_ui: &ReaderUi, inbox_ui: &InboxUi, entry: &Entry) {
 fn set_reader_origin(
     reader: &ReaderUi,
     model: &ui::inbox::InboxModel,
+    list: &gtk::ListView,
     entry_id: i64,
     from_inbox: bool,
 ) {
+    if let Some(previous) = reader
+        .source_list
+        .borrow()
+        .as_ref()
+        .and_then(|source| source.upgrade())
+    {
+        ui::inbox::refresh_open_marker(&previous, None);
+    }
+    *reader.source_list.borrow_mut() = Some(list.downgrade());
     let entries = (0..model.store.n_items())
         .filter_map(|position| ui::inbox::entry_at(model, position))
         .collect::<Vec<_>>();
@@ -1997,39 +2120,6 @@ fn set_reader_origin_entries(
             .unwrap_or(0),
     );
     *reader.origin_set.borrow_mut() = entries;
-}
-
-fn reader_position_from_offset(content: &gtk::Box, entry_id: i64, scroll: i32) -> ReaderPosition {
-    let mut top = 0;
-    let mut index = 0;
-    let mut child = content.first_child();
-    while let Some(widget) = child {
-        let height = widget.height() + 18;
-        if top + height > scroll {
-            break;
-        }
-        top += height;
-        index += 1;
-        child = widget.next_sibling();
-    }
-    ReaderPosition {
-        entry_id,
-        first_visible_block: index,
-        offset_px: scroll.saturating_sub(top),
-    }
-}
-
-fn offset_from_reader_position(content: &gtk::Box, position: &ReaderPosition) -> i32 {
-    let mut top = 0;
-    let mut child = content.first_child();
-    for _ in 0..position.first_visible_block {
-        let Some(widget) = child else {
-            break;
-        };
-        top += widget.height() + 18;
-        child = widget.next_sibling();
-    }
-    top + position.offset_px
 }
 
 fn load_other_views(controller: Arc<AppController>, views: OtherViews, toast: adw::ToastOverlay) {
@@ -2381,7 +2471,7 @@ fn install_window_tools(
             scroller.set_visible(false);
             let list =
                 gtk::ListView::new(None::<gtk::SelectionModel>, None::<gtk::ListItemFactory>);
-            let model = ui::inbox::configure_with_action(&list, false);
+            let model = ui::inbox::configure_with_action(&list, false, reader.active_id.clone());
             scroller.set_child(Some(&list));
             let status = adw::StatusPage::new();
             status.set_vexpand(true);
@@ -2419,7 +2509,17 @@ fn install_window_tools(
             });
             read.connect_selected_notify({
                 let state = state.clone();
-                move |_| state.refresh()
+                let list = list.clone();
+                move |dropdown| {
+                    list.remove_css_class("unread-only-list");
+                    list.remove_css_class("read-only-list");
+                    match dropdown.selected() {
+                        1 => list.add_css_class("unread-only-list"),
+                        2 => list.add_css_class("read-only-list"),
+                        _ => {}
+                    }
+                    state.refresh();
+                }
             });
             controller.feeds_cached(None, {
                 let state = state.clone();
@@ -2457,11 +2557,11 @@ fn install_window_tools(
                 let inbox = inbox.clone();
                 let toast = toast.clone();
                 let undo = undo.clone();
-                move |_, position| {
+                move |list, position| {
                     if let Some(entry) = ui::inbox::entry_at(&model, position) {
                         dialog.close();
                         *current.borrow_mut() = Some(entry.clone());
-                        set_reader_origin(&reader, &model, entry.id, false);
+                        set_reader_origin(&reader, &model, list, entry.id, false);
                         open_article(&reader, &inbox, &entry);
                         if !entry.read {
                             mark_read(
@@ -2694,6 +2794,30 @@ fn install_window_tools(
             let days = adw::SpinRow::with_range(1.0, 3650.0, 1.0);
             days.set_title("Keep read articles for days");
             storage.add(&days);
+            let image_cache = adw::ActionRow::new();
+            image_cache.set_title("Article images");
+            image_cache.set_subtitle("Up to 256 MiB, saved as you read for offline access");
+            let clear_images = gtk::Button::with_label("Clear");
+            clear_images.set_valign(gtk::Align::Center);
+            clear_images.update_property(&[gtk::accessible::Property::Label("Clear cached article images")]);
+            image_cache.add_suffix(&clear_images);
+            image_cache.set_activatable_widget(Some(&clear_images));
+            clear_images.connect_clicked({
+                let controller = controller.clone();
+                let toast = toast.clone();
+                move |button| {
+                    button.set_sensitive(false);
+                    controller.clear_image_cache({
+                        let button = button.downgrade();
+                        let toast = toast.clone();
+                        move |result| {
+                            if let Some(button) = button.upgrade() { button.set_sensitive(true); }
+                            toast.add_toast(adw::Toast::new(if result.is_ok() { "Cached images cleared" } else { "Could not clear cached images" }));
+                        }
+                    });
+                }
+            });
+            storage.add(&image_cache);
             page.add(&storage);
             let karakeep = adw::PreferencesGroup::new();
             karakeep.set_title("Karakeep delivery");
@@ -2873,11 +2997,115 @@ fn show_account(inbox_status: &adw::StatusPage, setup_button: &gtk::Button) {
     setup_button.set_visible(false);
 }
 
+fn smoke_test_image_anchor() -> Result<(), adw::glib::BoolError> {
+    let window = gtk::Window::builder()
+        .default_width(400)
+        .default_height(300)
+        .build();
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 18);
+    let image = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    image.set_height_request(100);
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    body.set_height_request(1200);
+    content.append(&image);
+    content.append(&body);
+    let scroller = gtk::ScrolledWindow::builder().child(&content).build();
+    window.set_child(Some(&scroller));
+    window.present();
+    let main_loop = adw::glib::MainLoop::new(None, false);
+    let failed = Rc::new(Cell::new(false));
+    let generation = Rc::new(Cell::new(1));
+    content.add_tick_callback({
+        let main_loop = main_loop.clone();
+        let failed = failed.clone();
+        let step = Cell::new(0);
+        move |content, _| {
+            let frame = step.get();
+            step.set(frame + 1);
+            match frame {
+                1 => {
+                    scroller.vadjustment().set_value(200.0);
+                    let place = ui::reader::position_from_offset(content, 1, 200);
+                    image.set_height_request(300);
+                    ui::reader::preserve_after_image(
+                        content,
+                        &scroller,
+                        generation.clone(),
+                        1,
+                        200.0,
+                        place,
+                    );
+                }
+                5 => {
+                    if (scroller.vadjustment().value() - 400.0).abs() > 1.0 {
+                        failed.set(true);
+                    }
+                    scroller.vadjustment().set_value(350.0);
+                    let place = ui::reader::position_from_offset(content, 1, 350);
+                    image.set_height_request(500);
+                    ui::reader::preserve_after_image(
+                        content,
+                        &scroller,
+                        generation.clone(),
+                        1,
+                        350.0,
+                        place,
+                    );
+                    // User movement while an image loads takes precedence.
+                    scroller.vadjustment().set_value(360.0);
+                }
+                9 => {
+                    if (scroller.vadjustment().value() - 360.0).abs() > 1.0 {
+                        failed.set(true);
+                    }
+                    main_loop.quit();
+                    return adw::glib::ControlFlow::Break;
+                }
+                _ => {}
+            }
+            adw::glib::ControlFlow::Continue
+        }
+    });
+    adw::glib::timeout_add_local_once(Duration::from_secs(3), {
+        let main_loop = main_loop.clone();
+        let failed = failed.clone();
+        move || {
+            failed.set(true);
+            main_loop.quit();
+        }
+    });
+    main_loop.run();
+    window.close();
+    if failed.get() {
+        Err(adw::glib::bool_error!(
+            "Late image changed the reader's scroll anchor"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
+    let texture = gtk::gdk::MemoryTexture::new(
+        320,
+        160,
+        gtk::gdk::MemoryFormat::R8g8b8a8,
+        &adw::glib::Bytes::from_owned(vec![255_u8; 320 * 160 * 4]),
+        320 * 4,
+    );
+    let picture = ui::reader::picture(&texture.upcast(), "Image layout test");
+    for (width, expected_height) in [(160, 80), (320, 160)] {
+        let (minimum, natural, _, _) = picture.measure(gtk::Orientation::Vertical, width);
+        if minimum != expected_height || natural != expected_height {
+            return Err(adw::glib::bool_error!(
+                "Article image lost its proportional height"
+            ));
+        }
+    }
     register_resources();
     let builder = gtk::Builder::from_resource("/com/nedrichards/brooklet/ui/window.ui");
-    let _: adw::ApplicationWindow = builder
+    let window: adw::ApplicationWindow = builder
         .object("window")
         .expect("window.ui must define the application window");
     let setup = gtk::Builder::from_resource("/com/nedrichards/brooklet/ui/setup-dialog.ui");
@@ -2888,10 +3116,82 @@ pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
     let _: adw::ShortcutsDialog = shortcuts
         .object("shortcuts_dialog")
         .expect("shortcuts-dialog.ui must define the shortcuts dialog");
-    Ok(())
+    let list: gtk::ListView = builder.object("inbox_list").expect("inbox_list");
+    let selection = gtk::SingleSelection::new(Some(gtk::StringList::new(&["Launch focus test"])));
+    selection.set_autoselect(false);
+    selection.set_can_unselect(true);
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(|_, item| {
+        item.downcast_ref::<gtk::ListItem>()
+            .expect("list item")
+            .set_child(Some(&gtk::Label::new(Some("Launch focus test"))));
+    });
+    list.set_model(Some(&selection));
+    list.set_factory(Some(&factory));
+    window.present();
+    focus_inbox_when_ready(&window, &list, &selection);
+    builder
+        .object::<adw::StatusPage>("inbox_status")
+        .expect("inbox_status")
+        .set_visible(false);
+    builder
+        .object::<gtk::ScrolledWindow>("inbox_scroller")
+        .expect("inbox_scroller")
+        .set_visible(true);
+    let main_loop = adw::glib::MainLoop::new(None, false);
+    list.add_tick_callback({
+        let main_loop = main_loop.clone();
+        let frames = Cell::new(0);
+        move |_, _| {
+            if frames.replace(1) == 0 {
+                return adw::glib::ControlFlow::Continue;
+            }
+            main_loop.quit();
+            adw::glib::ControlFlow::Break
+        }
+    });
+    adw::glib::timeout_add_local_once(Duration::from_secs(3), {
+        let main_loop = main_loop.clone();
+        move || main_loop.quit()
+    });
+    main_loop.run();
+    let focused = gtk::prelude::GtkWindowExt::focus(&window).is_some_and(|focus| {
+        focus == list.clone().upcast::<gtk::Widget>() || focus.is_ancestor(&list)
+    });
+    window.close();
+    if !focused || selection.selected() != 0 {
+        return Err(adw::glib::bool_error!("Inbox did not receive launch focus"));
+    }
+    smoke_test_image_anchor()
 }
 
 fn register_resources() {
     gio::resources_register_include!("brooklet.gresource")
         .expect("Brooklet GResources must be valid");
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::opens_shortcuts;
+    use gtk::gdk::{Key, ModifierType as Modifiers};
+
+    #[test]
+    fn help_accepts_question_and_slash_with_lock_modifiers() {
+        for key in [Key::question, Key::slash] {
+            for extra in [
+                Modifiers::empty(),
+                Modifiers::SHIFT_MASK,
+                Modifiers::LOCK_MASK,
+            ] {
+                assert!(opens_shortcuts(key, Modifiers::CONTROL_MASK | extra));
+            }
+            assert!(!opens_shortcuts(key, Modifiers::empty()));
+            assert!(!opens_shortcuts(
+                key,
+                Modifiers::CONTROL_MASK | Modifiers::ALT_MASK
+            ));
+        }
+        assert!(opens_shortcuts(Key::F1, Modifiers::LOCK_MASK));
+        assert!(!opens_shortcuts(Key::F1, Modifiers::CONTROL_MASK));
+    }
 }

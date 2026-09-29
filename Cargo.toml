@@ -18,6 +18,10 @@ name = "brooklet"
 path = "src/main.rs"
 required-features = ["gui"]
 
+[[example]]
+name = "reader_review"
+required-features = ["gui"]
+
 [dependencies]
 async-trait = "0.1.89"
 ego-tree = "0.11.0"

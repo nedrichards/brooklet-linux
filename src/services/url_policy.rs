@@ -44,6 +44,7 @@ pub fn validate_dns_answers(addresses: Vec<SocketAddr>) -> Result<Vec<SocketAddr
 pub fn image_client() -> Result<Client, BrookletError> {
     Client::builder()
         .https_only(true)
+        .timeout(std::time::Duration::from_secs(20))
         .redirect(Policy::none())
         .no_proxy()
         .dns_resolver(Arc::new(PublicImageResolver))

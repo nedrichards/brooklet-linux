@@ -22,8 +22,11 @@ authenticated client policy, article image policy), `core-database`
 
 ## Product semantics retained
 
-- Inbox means unread. Merely selecting an entry never changes read state;
-  deliberate activation does.
+- Inbox means unread. Merely selecting an entry never changes read state.
+  Deliberate activation opens it and marks it read.
+- In an article list, `r` toggles the selected entry's read state without
+  opening it. Marking it read dismisses it from Inbox and advances the list
+  cursor; Undo can restore it without moving the reader.
 - Opening an unread entry marks it read once. Keep Unread reverses that intent
   while preserving the open reader and its scroll position. Undo restores the
   unread row without reopening the reader.

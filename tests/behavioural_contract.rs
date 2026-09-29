@@ -67,6 +67,11 @@ fn android_derived_html_fixtures_match() {
             if let Some(inline) = block_inline(block) {
                 collect_links(inline, &mut links);
             }
+            if let DocumentBlock::Table { inline_rows, .. } = block {
+                for cell in inline_rows.iter().flatten() {
+                    collect_links(cell, &mut links);
+                }
+            }
         }
         assert_eq!(links, case.links, "{}: links", case.name);
 
@@ -83,7 +88,7 @@ fn android_derived_html_fixtures_match() {
             assert!(blocks.iter().any(|block| matches!(block, DocumentBlock::Caption { text, .. } if text == &expected)), "{}: caption", case.name);
         }
         if case.table_rows > 0 {
-            assert!(blocks.iter().any(|block| matches!(block, DocumentBlock::Table { rows } if rows.len() == case.table_rows)), "{}: table", case.name);
+            assert!(blocks.iter().any(|block| matches!(block, DocumentBlock::Table { rows, .. } if rows.len() == case.table_rows)), "{}: table", case.name);
         }
     }
 }
@@ -141,7 +146,11 @@ fn collect_links<'a>(inline: &'a [Inline], links: &mut Vec<&'a str>) {
                 links.push(url);
                 collect_links(text, links);
             }
-            Inline::Strong(children) | Inline::Emphasis(children) => collect_links(children, links),
+            Inline::Strong(children)
+            | Inline::Emphasis(children)
+            | Inline::Superscript(children)
+            | Inline::Subscript(children)
+            | Inline::Strikethrough(children) => collect_links(children, links),
             Inline::Text(_) | Inline::Code(_) | Inline::Break => {}
         }
     }

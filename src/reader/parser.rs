@@ -3,7 +3,7 @@ use scraper::{ElementRef, Html, Node, Selector};
 use url::Url;
 
 use crate::{
-    model::{DocumentBlock, Inline},
+    model::{DocumentBlock, Inline, TableCellLayout},
     services::url_policy::resolve_http_url,
 };
 
@@ -42,27 +42,47 @@ fn walk_container(parent: NodeRef<'_, Node>, base: Option<&Url>, blocks: &mut Ve
                 flush_loose(&mut loose, base, blocks);
                 let level = tag[1..].parse().unwrap_or(1);
                 blocks.push(rich_block(&element, base, RichKind::Heading(level)));
-                append_nested_images(&element, base, blocks);
+                append_nested_assets(&element, base, blocks);
             }
             "p" => {
                 flush_loose(&mut loose, base, blocks);
                 blocks.push(rich_block(&element, base, RichKind::Paragraph));
-                append_nested_images(&element, base, blocks);
+                append_nested_assets(&element, base, blocks);
             }
             "blockquote" => {
                 flush_loose(&mut loose, base, blocks);
-                blocks.push(rich_block(&element, base, RichKind::Quote));
-                append_nested_images(&element, base, blocks);
+                let mut quoted = Vec::new();
+                walk_container(child, base, &mut quoted);
+                blocks.extend(quoted.into_iter().map(|block| match block {
+                    DocumentBlock::Paragraph { text, inline } => {
+                        DocumentBlock::Quote { text, inline }
+                    }
+                    DocumentBlock::ListItem {
+                        text,
+                        inline,
+                        ordered,
+                        ordinal,
+                        depth,
+                    } => DocumentBlock::ListItem {
+                        text,
+                        inline,
+                        ordered,
+                        ordinal,
+                        depth: depth + 1,
+                    },
+                    other => other,
+                }));
             }
             "pre" => {
                 flush_loose(&mut loose, base, blocks);
                 blocks.push(DocumentBlock::Code {
                     text: element.text().collect::<String>(),
                 });
+                append_nested_assets(&element, base, blocks);
             }
             "ol" | "ul" => {
                 flush_loose(&mut loose, base, blocks);
-                append_list(&element, base, blocks, tag == "ol");
+                append_list(&element, base, blocks, tag == "ol", 0);
             }
             "figure" => {
                 flush_loose(&mut loose, base, blocks);
@@ -71,10 +91,26 @@ fn walk_container(parent: NodeRef<'_, Node>, base: Option<&Url>, blocks: &mut Ve
             "figcaption" => {
                 flush_loose(&mut loose, base, blocks);
                 blocks.push(rich_block(&element, base, RichKind::Caption));
+                append_nested_assets(&element, base, blocks);
             }
             "table" => {
                 flush_loose(&mut loose, base, blocks);
-                append_table(&element, blocks);
+                if element
+                    .select(&Selector::parse("table").expect("table selector"))
+                    .next()
+                    .is_some()
+                {
+                    // Nested tables are typically page layout. Walk them once,
+                    // retaining actual leaf tables instead of duplicating their cells.
+                    walk_container(child, base, blocks);
+                } else {
+                    append_table(&element, base, blocks);
+                    append_nested_assets(&element, base, blocks);
+                }
+            }
+            "iframe" | "video" | "audio" => {
+                flush_loose(&mut loose, base, blocks);
+                append_media(&element, base, blocks);
             }
             "img" => {
                 flush_loose(&mut loose, base, blocks);
@@ -83,7 +119,8 @@ fn walk_container(parent: NodeRef<'_, Node>, base: Option<&Url>, blocks: &mut Ve
                 }
             }
             "script" | "style" | "noscript" | "template" => {}
-            "div" | "article" | "section" | "main" | "body" | "html" => {
+            "div" | "article" | "section" | "main" | "body" | "html" | "tbody" | "thead"
+            | "tfoot" | "tr" | "td" | "th" => {
                 flush_loose(&mut loose, base, blocks);
                 walk_container(child, base, blocks);
             }
@@ -138,7 +175,6 @@ fn flush_loose(
 enum RichKind {
     Heading(u8),
     Paragraph,
-    Quote,
     Caption,
 }
 
@@ -155,7 +191,6 @@ fn rich_block(element: &ElementRef<'_>, base: Option<&Url>, kind: RichKind) -> D
             inline,
         },
         RichKind::Paragraph => DocumentBlock::Paragraph { text, inline },
-        RichKind::Quote => DocumentBlock::Quote { text, inline },
         RichKind::Caption => DocumentBlock::Caption { text, inline },
     }
 }
@@ -165,6 +200,7 @@ fn append_list(
     base: Option<&Url>,
     blocks: &mut Vec<DocumentBlock>,
     ordered: bool,
+    depth: u32,
 ) {
     let mut ordinal = element
         .value()
@@ -186,13 +222,22 @@ fn append_list(
         } else {
             0
         };
-        let text = normalize_whitespace(&item.text().collect::<Vec<_>>().join(" "));
-        let inline = item
+        let own_children: Vec<_> = item
             .children()
             .filter(|node| {
                 ElementRef::wrap(*node)
                     .is_none_or(|element| !matches!(element.value().name(), "ol" | "ul"))
             })
+            .collect();
+        let text = normalize_whitespace(
+            &own_children
+                .iter()
+                .map(|node| node_text(*node))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        let inline = own_children
+            .into_iter()
             .flat_map(|node| inline_node(node, base))
             .collect();
         blocks.push(DocumentBlock::ListItem {
@@ -200,41 +245,150 @@ fn append_list(
             inline,
             ordered,
             ordinal: ordered.then_some(current),
+            depth,
         });
+        for child in item.children() {
+            let Some(child) = ElementRef::wrap(child) else {
+                continue;
+            };
+            match child.value().name() {
+                "ol" | "ul" => append_list(
+                    &child,
+                    base,
+                    blocks,
+                    child.value().name() == "ol",
+                    depth + 1,
+                ),
+                "img" => blocks.extend(image_block(&child, base)),
+                _ => append_nested_assets(&child, base, blocks),
+            }
+        }
         if ordered {
             ordinal = current.saturating_add(1);
         }
     }
 }
 
-fn append_table(element: &ElementRef<'_>, blocks: &mut Vec<DocumentBlock>) {
+fn append_table(element: &ElementRef<'_>, base: Option<&Url>, blocks: &mut Vec<DocumentBlock>) {
     let row_selector = Selector::parse("tr").expect("static row selector");
     let cell_selector = Selector::parse("th, td").expect("static cell selector");
-    let rows = element
-        .select(&row_selector)
-        .filter_map(|row| {
-            let cells: Vec<_> = row
-                .select(&cell_selector)
-                .map(|cell| normalize_whitespace(&cell.text().collect::<Vec<_>>().join(" ")))
-                .filter(|cell| !cell.is_empty())
-                .collect();
-            (!cells.is_empty()).then_some(cells)
-        })
-        .collect();
-    blocks.push(DocumentBlock::Table { rows });
+    let mut rows = Vec::new();
+    let mut inline_rows = Vec::new();
+    let mut cell_layout = Vec::new();
+    let mut occupied = std::collections::HashSet::new();
+    let html_rows: Vec<_> = element.select(&row_selector).collect();
+    for (row_index, row) in html_rows.iter().enumerate() {
+        let cells: Vec<_> = row.select(&cell_selector).collect();
+        let text: Vec<_> = cells
+            .iter()
+            .map(|cell| normalize_whitespace(&cell.text().collect::<Vec<_>>().join(" ")))
+            .collect();
+        let mut column = 0;
+        let mut layout = Vec::new();
+        for cell in &cells {
+            let column_span = cell
+                .value()
+                .attr("colspan")
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(1)
+                .clamp(1, 64);
+            let row_span = cell
+                .value()
+                .attr("rowspan")
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(1);
+            let remaining_rows = html_rows[row_index..]
+                .iter()
+                .take_while(|other| other.parent() == row.parent())
+                .count() as u32;
+            let row_span = if row_span == 0 {
+                // HTML's zero span extends to the end of this row group.
+                remaining_rows
+            } else {
+                row_span
+            }
+            .clamp(1, remaining_rows.clamp(1, 128));
+            while (column..column + column_span)
+                .any(|column| occupied.contains(&(row_index as u32, column)))
+            {
+                column += 1;
+            }
+            layout.push(TableCellLayout {
+                column,
+                row_span,
+                column_span,
+                header: cell.value().name() == "th",
+            });
+            for row in row_index as u32..row_index as u32 + row_span {
+                for col in column..column + column_span {
+                    occupied.insert((row, col));
+                }
+            }
+            column += column_span;
+        }
+        let inline = cells
+            .iter()
+            .map(|cell| {
+                let inline: Vec<_> = cell
+                    .children()
+                    .flat_map(|node| inline_node(node, base))
+                    .collect();
+                if cell.value().name() == "th" {
+                    vec![Inline::Strong(inline)]
+                } else {
+                    inline
+                }
+            })
+            .collect();
+        rows.push(text);
+        inline_rows.push(inline);
+        cell_layout.push(layout);
+    }
+    if rows.iter().flatten().any(|cell| !cell.is_empty()) {
+        blocks.push(DocumentBlock::Table {
+            rows,
+            inline_rows,
+            cell_layout,
+        });
+    }
 }
 
-fn append_nested_images(
+fn append_media(element: &ElementRef<'_>, base: Option<&Url>, blocks: &mut Vec<DocumentBlock>) {
+    let source = element.value().attr("src").or_else(|| {
+        element
+            .select(&Selector::parse("source").expect("source selector"))
+            .find_map(|source| source.value().attr("src"))
+    });
+    let text = match element.value().name() {
+        "audio" => "Listen to audio",
+        "video" => "Open video",
+        _ => "Open embedded content",
+    }
+    .to_owned();
+    if let Some(url) = source.and_then(|source| resolve_http_url(base, source)) {
+        blocks.push(DocumentBlock::Paragraph {
+            inline: vec![Inline::Link {
+                text: vec![Inline::Text(text.clone())],
+                url,
+            }],
+            text,
+        });
+    }
+}
+
+fn append_nested_assets(
     element: &ElementRef<'_>,
     base: Option<&Url>,
     blocks: &mut Vec<DocumentBlock>,
 ) {
-    let selector = Selector::parse("img").expect("static image selector");
-    blocks.extend(
-        element
-            .select(&selector)
-            .filter_map(|image| image_block(&image, base)),
-    );
+    let selector = Selector::parse("img, iframe, video, audio").expect("static asset selector");
+    for asset in element.select(&selector) {
+        if asset.value().name() == "img" {
+            blocks.extend(image_block(&asset, base));
+        } else {
+            append_media(&asset, base, blocks);
+        }
+    }
 }
 
 fn image_block(element: &ElementRef<'_>, base: Option<&Url>) -> Option<DocumentBlock> {
@@ -269,6 +423,9 @@ fn inline_node(node: NodeRef<'_, Node>, base: Option<&Url>) -> Vec<Inline> {
             match element.value().name() {
                 "strong" | "b" => vec![Inline::Strong(children())],
                 "em" | "i" => vec![Inline::Emphasis(children())],
+                "sup" => vec![Inline::Superscript(children())],
+                "sub" => vec![Inline::Subscript(children())],
+                "s" | "del" => vec![Inline::Strikethrough(children())],
                 "code" => vec![Inline::Code(element.text().collect::<String>())],
                 "a" => {
                     let content = children();
@@ -312,7 +469,7 @@ fn block_is_blank(block: &DocumentBlock) -> bool {
         | DocumentBlock::Code { text }
         | DocumentBlock::ListItem { text, .. }
         | DocumentBlock::Caption { text, .. } => text.is_empty(),
-        DocumentBlock::Table { rows } => rows.is_empty(),
+        DocumentBlock::Table { rows, .. } => rows.is_empty(),
         DocumentBlock::Image { url, .. } => url.is_empty(),
     }
 }
@@ -320,6 +477,113 @@ fn block_is_blank(block: &DocumentBlock) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_spans_reserve_columns_and_stop_at_row_group_boundaries() {
+        let blocks = parse_document(
+            "<table><thead><tr><th colspan='2'>Heading</th></tr></thead><tbody><tr><td rowspan='0'>A</td><td>B</td></tr><tr><td>C</td></tr></tbody><tbody><tr><td>D</td><td>E</td></tr></tbody></table>",
+            None,
+        );
+        let DocumentBlock::Table { cell_layout, .. } = &blocks[0] else {
+            panic!("table expected")
+        };
+        assert_eq!(
+            cell_layout[0][0],
+            TableCellLayout {
+                column: 0,
+                row_span: 1,
+                column_span: 2,
+                header: true
+            }
+        );
+        assert_eq!(cell_layout[1][0].row_span, 2);
+        assert_eq!(cell_layout[2][0].column, 1);
+        assert_eq!(cell_layout[3][0].column, 0);
+        let mut occupied = std::collections::HashSet::new();
+        for (row, cells) in cell_layout.iter().enumerate() {
+            for cell in cells {
+                for y in row as u32..row as u32 + cell.row_span {
+                    for x in cell.column..cell.column + cell.column_span {
+                        assert!(occupied.insert((y, x)), "merged cells must not overlap");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn table_cells_preserve_headers_links_and_emphasis() {
+        let blocks = parse_document(
+            "<table><tr><th>Heading</th></tr><tr><td><a href='/detail'><em>Detail</em></a></td></tr></table>",
+            Some("https://example.com/story"),
+        );
+        assert!(
+            matches!(&blocks[0], DocumentBlock::Table { inline_rows, .. } if matches!(&inline_rows[0][0][0], Inline::Strong(_)) && matches!(&inline_rows[1][0][0], Inline::Link { url, text } if url == "https://example.com/detail" && matches!(&text[0], Inline::Emphasis(_))))
+        );
+    }
+
+    #[test]
+    fn retains_nested_lists_and_quoted_block_structure() {
+        let blocks = parse_document(
+            "<blockquote><p>First paragraph.</p><ul><li>Parent<ul><li>Child</li></ul></li><li>Sibling</li></ul><p>Last paragraph.</p></blockquote>",
+            None,
+        );
+        assert!(
+            matches!(&blocks[0], DocumentBlock::Quote { text, .. } if text == "First paragraph.")
+        );
+        let items: Vec<_> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                DocumentBlock::ListItem { text, depth, .. } => Some((text.as_str(), *depth)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(items, [("Parent", 1), ("Child", 2), ("Sibling", 1)]);
+        assert!(
+            matches!(blocks.last().unwrap(), DocumentBlock::Quote { text, .. } if text == "Last paragraph.")
+        );
+    }
+
+    #[test]
+    fn retains_caption_images_and_empty_table_columns() {
+        let blocks = parse_document(
+            "<figure><figcaption>Caption<img src='/caption.png'></figcaption></figure><table><tr><td>A</td><td></td><td>C<img src='/cell.png'></td></tr></table>",
+            Some("https://example.com/story"),
+        );
+        let images: Vec<_> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                DocumentBlock::Image { url, .. } => Some(url.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            images,
+            [
+                "https://example.com/caption.png",
+                "https://example.com/cell.png"
+            ]
+        );
+        assert!(blocks.iter().any(|block| matches!(block, DocumentBlock::Table { rows, .. } if rows == &vec![vec!["A".to_string(), "".to_string(), "C".to_string()]])));
+    }
+
+    #[test]
+    fn media_has_safe_visible_links_and_inline_typography_survives() {
+        let blocks = parse_document(
+            "<p>x<sup>2</sup> H<sub>2</sub>O <del>old</del></p><iframe src='/embed'></iframe><audio><source src='/audio.mp3'></audio><video src='javascript:bad'></video>",
+            Some("https://example.com/story"),
+        );
+        assert!(
+            matches!(&blocks[0], DocumentBlock::Paragraph { inline, .. } if inline.iter().any(|part| matches!(part, Inline::Superscript(_))) && inline.iter().any(|part| matches!(part, Inline::Subscript(_))) && inline.iter().any(|part| matches!(part, Inline::Strikethrough(_))))
+        );
+        assert_eq!(blocks.len(), 3);
+        assert!(
+            matches!(&blocks[1], DocumentBlock::Paragraph { inline, .. } if matches!(&inline[0], Inline::Link { url, .. } if url == "https://example.com/embed"))
+        );
+        assert!(
+            matches!(&blocks[2], DocumentBlock::Paragraph { text, .. } if text == "Listen to audio")
+        );
+    }
 
     #[test]
     fn decodes_entities_once() {
@@ -385,7 +649,7 @@ mod tests {
         assert!(
             blocks
                 .iter()
-                .any(|block| matches!(block, DocumentBlock::Table { rows } if rows.len() == 2))
+                .any(|block| matches!(block, DocumentBlock::Table { rows, .. } if rows.len() == 2))
         );
     }
 

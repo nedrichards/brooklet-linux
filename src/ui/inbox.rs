@@ -1,9 +1,11 @@
 use std::{
-    collections::HashMap,
+    cell::Cell,
+    collections::{HashMap, HashSet},
+    rc::Rc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use adw::{gio, glib, prelude::*};
+use adw::{gio, prelude::*};
 use brooklet::model::{DeliveryState, Entry};
 
 use super::entry_object::EntryObject;
@@ -58,16 +60,21 @@ impl InboxChanges {
     }
 }
 
-pub fn configure(list: &gtk::ListView) -> InboxModel {
-    configure_with_action(list, true)
+pub fn configure(list: &gtk::ListView, open_id: Rc<Cell<Option<i64>>>) -> InboxModel {
+    configure_with_action(list, true, open_id)
 }
 
-pub fn configure_with_action(list: &gtk::ListView, mark_read_action: bool) -> InboxModel {
+pub fn configure_with_action(
+    list: &gtk::ListView,
+    mark_read_action: bool,
+    open_id: Rc<Cell<Option<i64>>>,
+) -> InboxModel {
     let store = gio::ListStore::new::<EntryObject>();
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
     list.set_model(Some(&selection));
+    list.add_css_class("article-list");
     // GTK's single-click mode also selects rows on hover. Keep the keyboard
     // cursor stable while the pointer moves over the list.
     list.set_single_click_activate(false);
@@ -80,10 +87,6 @@ pub fn configure_with_action(list: &gtk::ListView, mark_read_action: bool) -> In
             .expect("factory item must be a GtkListItem");
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         row.add_css_class("article-row");
-        row.set_margin_top(6);
-        row.set_margin_bottom(6);
-        row.set_margin_start(12);
-        row.set_margin_end(6);
         let focus = gtk::EventControllerFocus::new();
         let focus_item = item.downgrade();
         let focus_list = list_weak.clone();
@@ -118,6 +121,28 @@ pub fn configure_with_action(list: &gtk::ListView, mark_read_action: bool) -> In
         });
         content.add_controller(touch);
 
+        // GTK's row double-click handler grabs row focus after emitting
+        // activate. Opening the reader transfers focus away from the list;
+        // grabbing it back can scroll the inbox to its old keyboard cursor.
+        // Claim the double click here before it bubbles to that handler.
+        let double_click = gtk::GestureClick::builder().button(1).build();
+        let click_item = item.downgrade();
+        let click_list = list_weak.clone();
+        double_click.connect_pressed(move |gesture, presses, _, _| {
+            if presses != 2 {
+                return;
+            }
+            let (Some(item), Some(list)) = (click_item.upgrade(), click_list.upgrade()) else {
+                return;
+            };
+            let position = item.position();
+            if position != gtk::INVALID_LIST_POSITION {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                list.emit_by_name::<()>("activate", &[&position]);
+            }
+        });
+        content.add_controller(double_click);
+
         let title = gtk::Label::new(None);
         title.set_xalign(0.0);
         title.set_wrap(true);
@@ -147,7 +172,7 @@ pub fn configure_with_action(list: &gtk::ListView, mark_read_action: bool) -> In
         }
         item.set_child(Some(&row));
     });
-    factory.connect_bind(|_, item| {
+    factory.connect_bind(move |_, item| {
         let item = item
             .downcast_ref::<gtk::ListItem>()
             .expect("factory item must be a GtkListItem");
@@ -168,12 +193,8 @@ pub fn configure_with_action(list: &gtk::ListView, mark_read_action: bool) -> In
             .first_child()
             .and_downcast::<gtk::Label>()
             .expect("first row child must be the title label");
-        let metadata_label = title
-            .next_sibling()
-            .and_downcast::<gtk::Label>()
-            .expect("second row child must be the metadata label");
         title.set_label(&entry.entry().title);
-        metadata_label.set_label(&metadata(entry.entry()));
+        set_open_marker(&row, entry.entry(), open_id.get());
         if let Some(read_toggle) = content.next_sibling().and_downcast::<gtk::Button>() {
             let is_read = entry.entry().read;
             let label = if is_read { "Mark Unread" } else { "Mark Read" };
@@ -194,33 +215,6 @@ pub fn configure_with_action(list: &gtk::ListView, mark_read_action: bool) -> In
     });
     list.set_factory(Some(&factory));
 
-    let keys = gtk::EventControllerKey::new();
-    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-    keys.connect_key_pressed({
-        let list = list.clone();
-        move |_, key, _, modifiers| {
-            if !modifiers.is_empty() {
-                return glib::Propagation::Proceed;
-            }
-            if (key == gtk::gdk::Key::Return || key == gtk::gdk::Key::KP_Enter)
-                && list.has_focus()
-                && let Some(selection) = list.model().and_downcast::<gtk::SingleSelection>()
-                && selection.selected() != gtk::INVALID_LIST_POSITION
-            {
-                list.emit_by_name::<()>("activate", &[&selection.selected()]);
-                return glib::Propagation::Stop;
-            }
-            let Some(direction) = cursor_direction(key) else {
-                return glib::Propagation::Proceed;
-            };
-            if move_cursor(&list, direction) {
-                glib::Propagation::Stop
-            } else {
-                glib::Propagation::Proceed
-            }
-        }
-    });
-    list.add_controller(keys);
     InboxModel { store, selection }
 }
 
@@ -298,6 +292,53 @@ pub fn selected_from_list(list: &gtk::ListView) -> Option<Entry> {
         .map(|item| item.entry().clone())
 }
 
+fn set_open_marker(row: &gtk::Box, entry: &Entry, open_id: Option<i64>) {
+    let is_open = open_id == Some(entry.id);
+    if is_open {
+        row.add_css_class("open-article");
+    } else {
+        row.remove_css_class("open-article");
+    }
+    let metadata_label = row
+        .first_child()
+        .and_downcast::<gtk::Box>()
+        .and_then(|content| content.first_child())
+        .and_then(|title| title.next_sibling())
+        .and_downcast::<gtk::Label>()
+        .expect("article row must contain a metadata label");
+    let description = if is_open {
+        format!("Open in reader · {}", metadata(entry))
+    } else {
+        metadata(entry)
+    };
+    metadata_label.set_label(&description);
+}
+
+pub fn refresh_open_marker(list: &gtk::ListView, open_id: Option<i64>) {
+    fn visit(widget: &gtk::Widget, list: &gtk::ListView, open_id: Option<i64>) {
+        if widget.has_css_class("article-row") {
+            if let Some(entry_id) = widget
+                .widget_name()
+                .strip_prefix("article-")
+                .and_then(|id| id.parse::<i64>().ok())
+                && let Some(position) = position_of_id(list, entry_id)
+                && let Some(selection) = list.model().and_downcast::<gtk::SingleSelection>()
+                && let Some(entry) = selection.item(position).and_downcast::<EntryObject>()
+                && let Ok(row) = widget.clone().downcast::<gtk::Box>()
+            {
+                set_open_marker(&row, entry.entry(), open_id);
+            }
+            return;
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            visit(&widget, list, open_id);
+            child = widget.next_sibling();
+        }
+    }
+    visit(list.upcast_ref(), list, open_id);
+}
+
 pub fn selected_id(list: &gtk::ListView) -> Option<i64> {
     selected_from_list(list).map(|entry| entry.id)
 }
@@ -333,6 +374,33 @@ pub fn move_cursor(list: &gtk::ListView, direction: i32) -> bool {
     selection.set_selected(position);
     list.scroll_to(position, gtk::ListScrollFlags::FOCUS, None);
     true
+}
+
+pub fn select_next_unread(list: &gtk::ListView, pending: &HashSet<i64>) {
+    let Some(selection) = list.model().and_downcast::<gtk::SingleSelection>() else {
+        return;
+    };
+    let selected = selection.selected();
+    if selected == gtk::INVALID_LIST_POSITION {
+        return;
+    }
+    let count = selection.n_items();
+    let next = ((selected + 1)..count)
+        .chain((0..selected).rev())
+        .find(|position| {
+            selection
+                .item(*position)
+                .and_downcast::<EntryObject>()
+                .is_some_and(|item| !item.entry().read && !pending.contains(&item.entry().id))
+        });
+    if let Some(next) = next {
+        selection.set_selected(next);
+        if list.is_mapped() {
+            list.scroll_to(next, gtk::ListScrollFlags::FOCUS, None);
+        }
+    } else {
+        selection.set_selected(gtk::INVALID_LIST_POSITION);
+    }
 }
 
 pub fn position_of_id(list: &gtk::ListView, entry_id: i64) -> Option<u32> {
@@ -485,7 +553,8 @@ mod tests {
     }
 
     #[test]
-    fn replacing_entries_keeps_the_keyboard_cursor_on_the_same_article() {
+    fn list_selection_survives_refresh_and_skips_pending_dismissals() {
+        gtk::init().expect("GTK is available for the selection test");
         let store = gio::ListStore::new::<EntryObject>();
         let selection = gtk::SingleSelection::new(Some(store.clone()));
         selection.set_autoselect(false);
@@ -504,6 +573,19 @@ mod tests {
             .expect("the selected article remains in the model");
         assert_eq!(selected.entry().id, 1);
         assert_eq!(model.selection.selected(), 2);
+
+        let list = gtk::ListView::new(None::<gtk::SelectionModel>, None::<gtk::ListItemFactory>);
+        let model = configure(&list, Rc::new(Cell::new(None)));
+        replace(
+            &model,
+            vec![example_entry(1), example_entry(2), example_entry(3)],
+        );
+        model.selection.set_selected(0);
+
+        select_next_unread(&list, &HashSet::from([2]));
+
+        assert_eq!(selected_id(&list), Some(3));
+        assert!(!entry_at(&model, 0).expect("first row remains").read);
     }
 
     #[test]

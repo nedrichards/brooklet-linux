@@ -19,11 +19,16 @@ pub struct AppController {
     runtime: tokio::runtime::Runtime,
     setup_service: Arc<dyn SetupService>,
     sync_service: Arc<dyn SyncService>,
+    image_cache: Arc<crate::services::image_cache::ImageCache>,
+    image_decoders: Arc<tokio::sync::Semaphore>,
 }
 
 impl AppController {
     pub fn backend_handle(&self) -> tokio::runtime::Handle {
         self.runtime.handle().clone()
+    }
+    pub fn image_decoders(&self) -> Arc<tokio::sync::Semaphore> {
+        self.image_decoders.clone()
     }
     pub fn new(
         setup_service: Arc<dyn SetupService>,
@@ -38,6 +43,14 @@ impl AppController {
             runtime,
             setup_service,
             sync_service,
+            image_cache: crate::services::image_cache::ImageCache::new(
+                glib::user_cache_dir()
+                    .join(crate::config::APP_ID)
+                    .join("images.db"),
+                crate::services::image_cache::DEFAULT_IMAGE_CACHE_BYTES,
+            )
+            .map_err(std::io::Error::other)?,
+            image_decoders: Arc::new(tokio::sync::Semaphore::new(2)),
         })
     }
 
@@ -83,7 +96,14 @@ impl AppController {
 
     pub fn disconnect(&self, callback: impl FnOnce(Result<(), BrookletError>) + 'static) {
         let service = self.sync_service.clone();
-        self.dispatch(async move { service.disconnect().await }, callback);
+        let cache = self.image_cache.clone();
+        self.dispatch(
+            async move {
+                service.disconnect().await?;
+                cache.clear().await
+            },
+            callback,
+        );
     }
 
     pub fn entries_for_view(
@@ -270,14 +290,21 @@ impl AppController {
         &self,
         url: String,
         callback: impl FnOnce(Result<Vec<u8>, BrookletError>) + 'static,
-    ) {
-        self.dispatch(
-            async move {
-                let client = crate::services::url_policy::image_client()?;
-                crate::services::url_policy::fetch_article_image(&client, &url).await
-            },
-            callback,
-        );
+    ) -> tokio::task::AbortHandle {
+        let cache = self.image_cache.clone();
+        self.dispatch_abortable(async move { cache.fetch(&url).await }, callback)
+    }
+
+    pub fn invalidate_image(&self, url: String) {
+        let cache = self.image_cache.clone();
+        self.runtime.spawn(async move {
+            let _ = cache.invalidate(url).await;
+        });
+    }
+
+    pub fn clear_image_cache(&self, callback: impl FnOnce(Result<(), BrookletError>) + 'static) {
+        let cache = self.image_cache.clone();
+        self.dispatch(async move { cache.clear().await }, callback);
     }
 
     fn dispatch<T: Send + 'static>(
@@ -285,8 +312,16 @@ impl AppController {
         future: impl Future<Output = Result<T, BrookletError>> + Send + 'static,
         callback: impl FnOnce(Result<T, BrookletError>) + 'static,
     ) {
+        self.dispatch_abortable(future, callback);
+    }
+
+    fn dispatch_abortable<T: Send + 'static>(
+        &self,
+        future: impl Future<Output = Result<T, BrookletError>> + Send + 'static,
+        callback: impl FnOnce(Result<T, BrookletError>) + 'static,
+    ) -> tokio::task::AbortHandle {
         let (sender, receiver) = mpsc::sync_channel(1);
-        self.runtime.spawn(async move {
+        let task = self.runtime.spawn(async move {
             let _ = sender.send(future.await);
         });
         let mut callback = Some(callback);
@@ -300,5 +335,6 @@ impl AppController {
                 Err(mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
             }
         });
+        task.abort_handle()
     }
 }

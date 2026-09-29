@@ -2,6 +2,23 @@
   min-width: 16rem;
 }
 
+.article-row {
+  border-left: 3px solid transparent;
+  padding: 8px 12px;
+}
+
+listview.article-list > row {
+  padding: 0;
+}
+
+listview.article-list > row:focus-visible {
+  outline-offset: -3px;
+}
+
+.article-row.open-article {
+  border-left-color: var(--accent-color);
+}
+
 .reader-placeholder {
   padding: 24px;
 }
@@ -25,4 +42,14 @@
   border-radius: 12px;
   color: var(--error-color);
   padding: 12px;
+}
+
+.reader-table-cell {
+  padding: 6px 8px;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.reader-table-header {
+  background: color-mix(in srgb, currentColor 6%, transparent);
+  border-radius: 4px;
 }
