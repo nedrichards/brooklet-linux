@@ -64,7 +64,7 @@ struct ReaderUi {
     positions: Rc<RefCell<HashMap<i64, ReaderPosition>>>,
     open_generation: Rc<Cell<u64>>,
     image_requests: Rc<RefCell<Vec<tokio::task::AbortHandle>>>,
-    origin_set: Rc<RefCell<Vec<Entry>>>,
+    origin_set: Rc<RefCell<Vec<Arc<Entry>>>>,
     origin_index: Rc<Cell<usize>>,
     origin_inbox: Rc<Cell<bool>>,
     source_list: Rc<RefCell<Option<adw::glib::WeakRef<gtk::ListView>>>>,
@@ -403,7 +403,7 @@ impl BrookletApplication {
             };
             reader_ui.scroller.vadjustment().connect_value_changed({
                 let reader = reader_ui.clone();
-                let generation = Rc::new(Cell::new(0_u64));
+                let pending_save = Rc::new(RefCell::new(None::<adw::glib::SourceId>));
                 move |adjustment| {
                     if reader.restoring.get() {
                         return;
@@ -411,9 +411,10 @@ impl BrookletApplication {
                     let Some(entry_id) = reader.active_id.get() else {
                         return;
                     };
-                    let token = generation.get().wrapping_add(1);
-                    generation.set(token);
-                    let generation = generation.clone();
+                    if let Some(source) = pending_save.borrow_mut().take() {
+                        source.remove();
+                    }
+                    let pending = pending_save.clone();
                     let controller = reader.controller.clone();
                     let content = reader.content.clone();
                     let active_id = reader.active_id.clone();
@@ -423,12 +424,15 @@ impl BrookletApplication {
                         .positions
                         .borrow_mut()
                         .insert(entry_id, position.clone());
-                    adw::glib::timeout_add_local_once(Duration::from_millis(250), move || {
-                        if generation.get() != token || active_id.get() != Some(entry_id) {
-                            return;
-                        }
-                        controller.save_reader_position(position, |_| {});
-                    });
+                    let source =
+                        adw::glib::timeout_add_local_once(Duration::from_millis(250), move || {
+                            pending.borrow_mut().take();
+                            if active_id.get() != Some(entry_id) {
+                                return;
+                            }
+                            controller.save_reader_position(position, |_| {});
+                        });
+                    *pending_save.borrow_mut() = Some(source);
                 }
             });
             let undo_entry = Rc::new(RefCell::new(Vec::<Entry>::new()));
@@ -1595,7 +1599,7 @@ fn update_reader_read_state(
     }
     for entry in reader.origin_set.borrow_mut().iter_mut() {
         if entry.id == entry_id {
-            entry.read = read;
+            Arc::make_mut(entry).read = read;
         }
     }
 }
@@ -2101,14 +2105,20 @@ fn set_reader_origin(
     }
     *reader.source_list.borrow_mut() = Some(list.downgrade());
     let entries = (0..model.store.n_items())
-        .filter_map(|position| ui::inbox::entry_at(model, position))
+        .filter_map(|position| {
+            model
+                .store
+                .item(position)
+                .and_downcast::<ui::entry_object::EntryObject>()
+        })
+        .map(|object| object.shared_entry())
         .collect::<Vec<_>>();
     set_reader_origin_entries(reader, entries, entry_id, from_inbox);
 }
 
 fn set_reader_origin_entries(
     reader: &ReaderUi,
-    entries: Vec<Entry>,
+    entries: Vec<Arc<Entry>>,
     entry_id: i64,
     from_inbox: bool,
 ) {
@@ -2216,7 +2226,12 @@ fn install_reader_actions(window: &adw::ApplicationWindow, tools: WindowTools) {
                 let Some(next) = next else {
                     return;
                 };
-                let Some(entry) = reader.origin_set.borrow().get(next).cloned() else {
+                let Some(entry) = reader
+                    .origin_set
+                    .borrow()
+                    .get(next)
+                    .map(|entry| entry.as_ref().clone())
+                else {
                     return;
                 };
                 reader.origin_index.set(next);
@@ -2309,7 +2324,7 @@ fn install_reader_actions(window: &adw::ApplicationWindow, tools: WindowTools) {
                             .iter_mut()
                             .find(|item| item.id == entry_id)
                         {
-                            origin.starred = desired;
+                            Arc::make_mut(origin).starred = desired;
                         }
                         load_other_views(controller, views, toast.clone());
                         toast.add_toast(adw::Toast::new(if desired {

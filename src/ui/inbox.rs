@@ -224,44 +224,60 @@ pub fn replace(model: &InboxModel, entries: Vec<Entry>) {
         .selected_item()
         .and_downcast::<EntryObject>()
         .map(|item| item.entry().id);
-    for (index, entry) in entries.iter().enumerate() {
-        let index = index as u32;
-        if entry_at(model, index).is_some_and(|current| current.id == entry.id) {
-            if entry_at(model, index).as_ref() != Some(entry) {
-                model
-                    .store
-                    .splice(index, 1, &[EntryObject::new(entry.clone())]);
-            }
-            continue;
-        }
-        let existing = ((index + 1)..model.store.n_items()).find(|position| {
-            entry_at(model, *position).is_some_and(|current| current.id == entry.id)
-        });
-        if let Some(existing) = existing {
-            let item = model
+    // Compare borrowed bodies and retain existing objects. A single changed
+    // interval avoids repeated scans, body clones, and items-changed emissions.
+    let previous = (0..model.store.n_items())
+        .map(|index| {
+            model
                 .store
-                .item(existing)
+                .item(index)
                 .and_downcast::<EntryObject>()
-                .expect("existing entry must be an EntryObject");
-            model.store.remove(existing);
-            if item.entry() == entry {
-                model.store.insert(index, &item);
-            } else {
-                model.store.insert(index, &EntryObject::new(entry.clone()));
-            }
-        } else {
-            model.store.insert(index, &EntryObject::new(entry.clone()));
-        }
-    }
-    while model.store.n_items() > entries.len() as u32 {
-        model.store.remove(entries.len() as u32);
-    }
-    if let Some(id) = selected_id {
-        let position = (0..model.store.n_items())
-            .find(|position| entry_at(model, *position).is_some_and(|entry| entry.id == id));
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let prefix = previous
+        .iter()
+        .zip(&entries)
+        .take_while(|(old, new)| old.entry() == *new)
+        .count();
+    let suffix = previous[prefix..]
+        .iter()
+        .rev()
+        .zip(entries[prefix..].iter().rev())
+        .take_while(|(old, new)| old.entry() == *new)
+        .count();
+    let old_end = previous.len() - suffix;
+    let new_end = entries.len() - suffix;
+    let selected_position =
+        selected_id.and_then(|id| entries.iter().position(|entry| entry.id == id));
+    if prefix != old_end || prefix != new_end {
+        let existing = previous[prefix..old_end]
+            .iter()
+            .map(|item| (item.entry().id, item))
+            .collect::<HashMap<_, _>>();
+        let replacements = entries
+            .into_iter()
+            .skip(prefix)
+            .take(new_end - prefix)
+            .map(|entry| {
+                if let Some(item) = existing
+                    .get(&entry.id)
+                    .filter(|item| item.entry() == &entry)
+                {
+                    (*item).clone()
+                } else {
+                    EntryObject::new(entry)
+                }
+            })
+            .collect::<Vec<_>>();
         model
-            .selection
-            .set_selected(position.unwrap_or(gtk::INVALID_LIST_POSITION));
+            .store
+            .splice(prefix as u32, (old_end - prefix) as u32, &replacements);
+    }
+    if selected_id.is_some() {
+        model.selection.set_selected(
+            selected_position.map_or(gtk::INVALID_LIST_POSITION, |position| position as u32),
+        );
     }
 }
 
@@ -573,6 +589,39 @@ mod tests {
             .expect("the selected article remains in the model");
         assert_eq!(selected.entry().id, 1);
         assert_eq!(model.selection.selected(), 2);
+        let mut navigation_entry = selected.shared_entry();
+        assert!(std::sync::Arc::ptr_eq(
+            &navigation_entry,
+            &selected.shared_entry()
+        ));
+        std::sync::Arc::make_mut(&mut navigation_entry).read = true;
+        assert!(
+            !selected.entry().read,
+            "navigation state must not mutate the list snapshot"
+        );
+
+        let changes = Rc::new(Cell::new(0));
+        model.store.connect_items_changed({
+            let changes = changes.clone();
+            move |_, _, _, _| changes.set(changes.get() + 1)
+        });
+        replace(
+            &model,
+            vec![example_entry(3), example_entry(2), example_entry(1)],
+        );
+        assert_eq!(changes.get(), 0, "unchanged refresh emits no model changes");
+        let retained = model.store.item(1).unwrap();
+        replace(
+            &model,
+            vec![example_entry(2), example_entry(4), example_entry(1)],
+        );
+        assert_eq!(changes.get(), 1, "mixed changes are delivered atomically");
+        assert_eq!(model.store.item(0).unwrap(), retained);
+        assert_eq!(model.selection.selected(), 2);
+        replace(&model, vec![example_entry(4)]);
+        assert_eq!(model.selection.selected(), gtk::INVALID_LIST_POSITION);
+        replace(&model, Vec::new());
+        assert_eq!(model.store.n_items(), 0);
 
         let list = gtk::ListView::new(None::<gtk::SelectionModel>, None::<gtk::ListItemFactory>);
         let model = configure(&list, Rc::new(Cell::new(None)));
@@ -586,6 +635,38 @@ mod tests {
 
         assert_eq!(selected_id(&list), Some(3));
         assert!(!entry_at(&model, 0).expect("first row remains").read);
+    }
+
+    #[test]
+    #[ignore = "manual synthetic performance probe; run alone with --nocapture"]
+    fn large_list_refresh_performance() {
+        gtk::init().unwrap();
+        let store = gio::ListStore::new::<EntryObject>();
+        let selection = gtk::SingleSelection::new(Some(store.clone()));
+        let model = InboxModel { store, selection };
+        let entries = (0..5000)
+            .map(|id| Entry {
+                html: "x".repeat(16 * 1024),
+                ..example_entry(id)
+            })
+            .collect::<Vec<_>>();
+        replace(&model, entries.clone());
+        for scenario in ["unchanged", "prepend", "reverse", "remove-half"] {
+            let mut incoming = entries.clone();
+            match scenario {
+                "prepend" => incoming.insert(0, example_entry(5001)),
+                "reverse" => incoming.reverse(),
+                "remove-half" => incoming.retain(|entry| entry.id % 2 == 0),
+                _ => {}
+            }
+            let start = std::time::Instant::now();
+            replace(&model, incoming);
+            eprintln!(
+                "5000 articles, 16 KiB bodies, {scenario}: {:?}",
+                start.elapsed()
+            );
+            replace(&model, entries.clone());
+        }
     }
 
     #[test]

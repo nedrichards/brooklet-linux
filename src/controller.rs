@@ -1,7 +1,4 @@
-use std::{
-    sync::{Arc, mpsc},
-    time::Duration,
-};
+use std::sync::Arc;
 
 use adw::glib;
 
@@ -320,19 +317,13 @@ impl AppController {
         future: impl Future<Output = Result<T, BrookletError>> + Send + 'static,
         callback: impl FnOnce(Result<T, BrookletError>) + 'static,
     ) -> tokio::task::AbortHandle {
-        let (sender, receiver) = mpsc::sync_channel(1);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
         let task = self.runtime.spawn(async move {
             let _ = sender.send(future.await);
         });
-        let mut callback = Some(callback);
-        glib::timeout_add_local(Duration::from_millis(25), move || {
-            match receiver.try_recv() {
-                Ok(result) => {
-                    callback.take().expect("callback is called once")(result);
-                    glib::ControlFlow::Break
-                }
-                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                Err(mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+        glib::MainContext::default().spawn_local(async move {
+            if let Ok(result) = receiver.await {
+                callback(result);
             }
         });
         task.abort_handle()

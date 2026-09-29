@@ -1,4 +1,5 @@
 use std::cell::OnceCell;
+use std::sync::Arc;
 
 use adw::glib;
 use adw::glib::subclass::prelude::*;
@@ -9,7 +10,7 @@ mod imp {
 
     #[derive(Default)]
     pub struct EntryObject {
-        pub entry: OnceCell<Entry>,
+        pub entry: OnceCell<Arc<Entry>>,
     }
 
     #[glib::object_subclass]
@@ -31,12 +32,20 @@ impl EntryObject {
         object
             .imp()
             .entry
-            .set(entry)
+            .set(Arc::new(entry))
             .expect("entry is initialized exactly once");
         object
     }
 
     pub fn entry(&self) -> &Entry {
         self.imp().entry.get().expect("entry must be initialized")
+    }
+
+    pub fn shared_entry(&self) -> Arc<Entry> {
+        self.imp()
+            .entry
+            .get()
+            .expect("entry must be initialized")
+            .clone()
     }
 }
