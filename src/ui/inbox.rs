@@ -525,6 +525,7 @@ mod tests {
             author: None,
             published_at_ms: 0,
             html: String::new(),
+            content_revision: 0,
             read: false,
             starred: false,
             reading_minutes: 3,
@@ -647,6 +648,7 @@ mod tests {
         let entries = (0..5000)
             .map(|id| Entry {
                 html: "x".repeat(16 * 1024),
+                content_revision: 0,
                 ..example_entry(id)
             })
             .collect::<Vec<_>>();
@@ -682,6 +684,7 @@ mod tests {
             author: Some("Ada".into()),
             published_at_ms: 0,
             html: String::new(),
+            content_revision: 0,
             read: false,
             starred: false,
             reading_minutes: 3,

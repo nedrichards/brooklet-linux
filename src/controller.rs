@@ -18,9 +18,40 @@ pub struct AppController {
     sync_service: Arc<dyn SyncService>,
     image_cache: Arc<crate::services::image_cache::ImageCache>,
     image_decoders: Arc<tokio::sync::Semaphore>,
+    parsers: Arc<tokio::sync::Semaphore>,
 }
 
 impl AppController {
+    pub fn parse_entry(
+        &self,
+        entry_id: EntryId,
+        callback: impl FnOnce(
+            Result<(Vec<crate::model::DocumentBlock>, Option<ReaderPosition>), BrookletError>,
+        ) + 'static,
+    ) -> tokio::task::AbortHandle {
+        let service = self.sync_service.clone();
+        let parsers = self.parsers.clone();
+        self.dispatch_abortable(
+            async move {
+                let permit = parsers.acquire_owned().await.expect("parser remains open");
+                let position = service.reader_position(entry_id).await?;
+                let entry = service
+                    .cached_entry(entry_id)
+                    .await?
+                    .ok_or(BrookletError::InvalidSetup("a cached article body"))?;
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    (
+                        crate::reader::parse_document(&entry.html, Some(&entry.url)),
+                        position,
+                    )
+                })
+                .await
+                .map_err(|error| BrookletError::Storage(std::io::Error::other(error)))
+            },
+            callback,
+        )
+    }
     pub fn backend_handle(&self) -> tokio::runtime::Handle {
         self.runtime.handle().clone()
     }
@@ -31,6 +62,22 @@ impl AppController {
         setup_service: Arc<dyn SetupService>,
         sync_service: Arc<dyn SyncService>,
     ) -> Result<Self, std::io::Error> {
+        let image_cache = crate::services::image_cache::ImageCache::new(
+            glib::user_cache_dir()
+                .join(crate::config::APP_ID)
+                .join("images.db"),
+            crate::services::image_cache::DEFAULT_IMAGE_CACHE_BYTES,
+        )
+        .map_err(std::io::Error::other)?;
+        Self::with_image_cache(setup_service, sync_service, image_cache)
+    }
+
+    /// Inject an isolated cache for offline rendering tests.
+    pub fn with_image_cache(
+        setup_service: Arc<dyn SetupService>,
+        sync_service: Arc<dyn SyncService>,
+        image_cache: Arc<crate::services::image_cache::ImageCache>,
+    ) -> Result<Self, std::io::Error> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("brooklet-backend")
@@ -40,14 +87,9 @@ impl AppController {
             runtime,
             setup_service,
             sync_service,
-            image_cache: crate::services::image_cache::ImageCache::new(
-                glib::user_cache_dir()
-                    .join(crate::config::APP_ID)
-                    .join("images.db"),
-                crate::services::image_cache::DEFAULT_IMAGE_CACHE_BYTES,
-            )
-            .map_err(std::io::Error::other)?,
+            image_cache,
             image_decoders: Arc::new(tokio::sync::Semaphore::new(2)),
+            parsers: Arc::new(tokio::sync::Semaphore::new(1)),
         })
     }
 
@@ -122,16 +164,16 @@ impl AppController {
         category_id: Option<i64>,
         read: Option<bool>,
         callback: impl FnOnce(Result<Vec<Entry>, BrookletError>) + 'static,
-    ) {
+    ) -> tokio::task::AbortHandle {
         let service = self.sync_service.clone();
-        self.dispatch(
+        self.dispatch_abortable(
             async move {
                 service
                     .search_entries(&query, feed_id, category_id, read)
                     .await
             },
             callback,
-        );
+        )
     }
 
     pub fn categories_cached(

@@ -51,6 +51,8 @@ impl MinifluxApiFactory for ReqwestMinifluxApiFactory {
 
 #[async_trait]
 pub trait SyncService: Send + Sync {
+    async fn cached_entry(&self, entry_id: EntryId) -> Result<Option<Entry>, BrookletError>;
+
     async fn disconnect(&self) -> Result<(), BrookletError>;
     async fn cached_inbox(&self) -> Result<Vec<Entry>, BrookletError>;
     async fn set_read_local(&self, entry_id: EntryId, read: bool) -> Result<(), BrookletError>;
@@ -325,6 +327,11 @@ fn now_ms() -> i64 {
 
 #[async_trait]
 impl SyncService for AccountSyncService {
+    async fn cached_entry(&self, entry_id: EntryId) -> Result<Option<Entry>, BrookletError> {
+        let account = self.configured_account().await?;
+        self.repository.cached_entry(account.id, entry_id).await
+    }
+
     async fn disconnect(&self) -> Result<(), BrookletError> {
         let _guard = self.sync_lock.lock().await;
         if let Some(account) = self.repository.account().await? {
@@ -526,6 +533,7 @@ fn map_entry(account_id: i64, entry: EntryDto) -> Entry {
         author: entry.author.filter(|author| !author.trim().is_empty()),
         published_at_ms,
         html: entry.content,
+        content_revision: 0,
         read: entry.status == "read",
         starred: entry.starred,
         reading_minutes: entry.reading_time,

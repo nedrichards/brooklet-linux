@@ -10,6 +10,7 @@ pub fn present(
 ) {
     let builder = gtk::Builder::from_resource("/com/nedrichards/brooklet/ui/setup-dialog.ui");
     let dialog: adw::Dialog = object(&builder, "setup_dialog");
+    let signals = super::signal_scope::SignalScope::for_dialog(&dialog);
     let server_entry: adw::EntryRow = object(&builder, "server_entry");
     let token_entry: adw::PasswordEntryRow = object(&builder, "token_entry");
     let connect_button: gtk::Button = object(&builder, "connect_button");
@@ -34,14 +35,20 @@ pub fn present(
             );
         })
     };
-    server_entry.connect_changed({
-        let update_submit = update_submit.clone();
-        move |_| update_submit()
-    });
-    token_entry.connect_changed({
-        let update_submit = update_submit.clone();
-        move |_| update_submit()
-    });
+    signals.track(
+        &server_entry,
+        server_entry.connect_changed({
+            let update_submit = update_submit.clone();
+            move |_| update_submit()
+        }),
+    );
+    signals.track(
+        &token_entry,
+        token_entry.connect_changed({
+            let update_submit = update_submit.clone();
+            move |_| update_submit()
+        }),
+    );
     update_submit();
 
     let submit: Rc<dyn Fn()> = Rc::new({
@@ -115,30 +122,42 @@ pub fn present(
         }
     });
 
-    connect_button.connect_clicked({
-        let submit = submit.clone();
-        move |_| submit()
-    });
-    token_entry.connect_entry_activated({
-        let submit = submit.clone();
-        move |_| submit()
-    });
-    server_entry.connect_entry_activated({
-        let token_entry = token_entry.clone();
-        move |_| {
-            token_entry.grab_focus();
-        }
-    });
-    continue_button.connect_clicked({
-        let dialog = dialog.clone();
-        let configured_account = configured_account.clone();
-        move |_| {
-            if let Some(account) = configured_account.borrow_mut().take() {
-                on_complete(account);
-                dialog.close();
+    signals.track(
+        &connect_button,
+        connect_button.connect_clicked({
+            let submit = submit.clone();
+            move |_| submit()
+        }),
+    );
+    signals.track(
+        &token_entry,
+        token_entry.connect_entry_activated({
+            let submit = submit.clone();
+            move |_| submit()
+        }),
+    );
+    signals.track(
+        &server_entry,
+        server_entry.connect_entry_activated({
+            let token_entry = token_entry.clone();
+            move |_| {
+                token_entry.grab_focus();
             }
-        }
-    });
+        }),
+    );
+    signals.track(
+        &continue_button,
+        continue_button.connect_clicked({
+            let dialog = dialog.clone();
+            let configured_account = configured_account.clone();
+            move |_| {
+                if let Some(account) = configured_account.borrow_mut().take() {
+                    on_complete(account);
+                    dialog.close();
+                }
+            }
+        }),
+    );
 
     dialog.present(Some(parent));
     server_entry.grab_focus();

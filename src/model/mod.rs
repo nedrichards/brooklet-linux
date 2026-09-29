@@ -38,6 +38,9 @@ pub struct Entry {
     pub author: Option<String>,
     pub published_at_ms: i64,
     pub html: String,
+    /// Opaque content fingerprint; summaries retain it without retaining HTML.
+    #[serde(default)]
+    pub content_revision: i64,
     pub read: bool,
     pub starred: bool,
     pub reading_minutes: u32,

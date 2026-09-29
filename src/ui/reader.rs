@@ -98,7 +98,188 @@ pub struct ImageSlot {
     pub alt: String,
 }
 
-pub fn show(entry: &Entry, title: &adw::WindowTitle, content: &gtk::Box) -> Vec<ImageSlot> {
+pub fn empty(entry: &Entry, content: &gtk::Box, message: &str) {
+    content.append(&label(message, true));
+    if matches!(url::Url::parse(&entry.url), Ok(url) if matches!(url.scheme(), "http" | "https")) {
+        let link = gtk::LinkButton::with_label(&entry.url, "Open original article");
+        link.set_halign(gtk::Align::Start);
+        content.append(&link);
+    }
+}
+
+enum BuildTask {
+    Block(DocumentBlock),
+    TableCells(TableTasks),
+    Cell {
+        grid: gtk::Grid,
+        text: String,
+        inline: Vec<Inline>,
+        row: i32,
+        column: i32,
+        layout: Option<brooklet::model::TableCellLayout>,
+        columns: u32,
+    },
+}
+
+struct TableTasks {
+    grid: gtk::Grid,
+    cells: Box<dyn Iterator<Item = (usize, usize, String)>>,
+    inline_rows: Vec<Vec<Vec<Inline>>>,
+    cell_layout: Vec<Vec<brooklet::model::TableCellLayout>>,
+    columns: u32,
+}
+
+/// One small amount of GTK construction per frame, including individual table cells.
+pub struct DocumentBuilder {
+    tasks: std::collections::VecDeque<BuildTask>,
+}
+
+impl DocumentBuilder {
+    pub fn new(blocks: Vec<DocumentBlock>) -> Self {
+        Self {
+            tasks: blocks.into_iter().map(BuildTask::Block).collect(),
+        }
+    }
+
+    pub fn step(&mut self, content: &gtk::Box) -> (Vec<ImageSlot>, bool) {
+        let started = std::time::Instant::now();
+        let mut images = Vec::new();
+        for _ in 0..8 {
+            let Some(task) = self.tasks.pop_front() else {
+                break;
+            };
+            match task {
+                BuildTask::Block(DocumentBlock::Table {
+                    rows,
+                    inline_rows,
+                    cell_layout,
+                }) => {
+                    let grid = gtk::Grid::builder()
+                        .accessible_role(gtk::AccessibleRole::Table)
+                        .row_spacing(8)
+                        .column_spacing(16)
+                        .column_homogeneous(true)
+                        .build();
+                    grid.add_css_class("reader-table");
+                    let columns = cell_layout
+                        .iter()
+                        .flatten()
+                        .map(|cell| cell.column + cell.column_span)
+                        .max()
+                        .unwrap_or_else(|| rows.iter().map(Vec::len).max().unwrap_or(0) as u32);
+                    grid.update_relation(&[
+                        gtk::accessible::Relation::RowCount(rows.len() as i32),
+                        gtk::accessible::Relation::ColCount(columns as i32),
+                    ]);
+                    content.append(&table_view::viewport(&grid));
+                    let cells = rows.into_iter().enumerate().flat_map(|(row, cells)| {
+                        cells
+                            .into_iter()
+                            .enumerate()
+                            .map(move |(column, text)| (row, column, text))
+                    });
+                    self.tasks.push_front(BuildTask::TableCells(TableTasks {
+                        grid,
+                        cells: Box::new(cells),
+                        inline_rows,
+                        cell_layout,
+                        columns,
+                    }));
+                }
+                BuildTask::TableCells(mut table) => {
+                    if let Some((row, column, text)) = table.cells.next() {
+                        let cell = BuildTask::Cell {
+                            grid: table.grid.clone(),
+                            text,
+                            inline: table
+                                .inline_rows
+                                .get(row)
+                                .and_then(|cells| cells.get(column))
+                                .cloned()
+                                .unwrap_or_default(),
+                            layout: table
+                                .cell_layout
+                                .get(row)
+                                .and_then(|cells| cells.get(column))
+                                .cloned(),
+                            row: row as i32,
+                            column: column as i32,
+                            columns: table.columns,
+                        };
+                        // Expand just one cell at a time. A large table must not
+                        // clone all its inline markup in one frame callback.
+                        self.tasks.push_front(BuildTask::TableCells(table));
+                        self.tasks.push_front(cell);
+                    }
+                }
+                BuildTask::Cell {
+                    grid,
+                    text,
+                    inline,
+                    row,
+                    column,
+                    layout,
+                    columns,
+                } => {
+                    let cell = rich_label(&text, &inline);
+                    cell.set_hexpand(true);
+                    cell.set_width_chars(if columns <= 2 { 12 } else { 16 });
+                    cell.set_valign(gtk::Align::Start);
+                    cell.add_css_class("reader-table-cell");
+                    let column = layout
+                        .as_ref()
+                        .map_or(column, |geometry| geometry.column as i32);
+                    let row_span = layout
+                        .as_ref()
+                        .map_or(1, |geometry| geometry.row_span as i32);
+                    let column_span = layout
+                        .as_ref()
+                        .map_or(1, |geometry| geometry.column_span as i32);
+                    if layout.as_ref().is_some_and(|geometry| geometry.header) {
+                        cell.add_css_class("reader-table-header");
+                        cell.set_accessible_role(gtk::AccessibleRole::ColumnHeader);
+                    } else {
+                        cell.set_accessible_role(gtk::AccessibleRole::Cell);
+                    }
+                    cell.update_relation(&[
+                        gtk::accessible::Relation::RowIndex(row + 1),
+                        gtk::accessible::Relation::ColIndex(column + 1),
+                        gtk::accessible::Relation::RowSpan(row_span),
+                        gtk::accessible::Relation::ColSpan(column_span),
+                    ]);
+                    grid.attach(&cell, column, row, column_span, row_span);
+                }
+                BuildTask::Block(block) => {
+                    let image = if let DocumentBlock::Image { url, description } = &block {
+                        Some((
+                            url.clone(),
+                            description
+                                .clone()
+                                .unwrap_or_else(|| "Article image".into()),
+                        ))
+                    } else {
+                        None
+                    };
+                    let widget = block_widget(block);
+                    if let Some((url, alt)) = image {
+                        images.push(ImageSlot {
+                            url,
+                            alt,
+                            container: widget.clone().downcast::<gtk::Box>().unwrap(),
+                        });
+                    }
+                    content.append(&widget);
+                }
+            }
+            if started.elapsed() >= std::time::Duration::from_millis(4) {
+                break;
+            }
+        }
+        (images, self.tasks.is_empty())
+    }
+}
+
+pub fn begin(entry: &Entry, title: &adw::WindowTitle, content: &gtk::Box) {
     while let Some(child) = content.first_child() {
         content.remove(&child);
     }
@@ -121,7 +302,11 @@ pub fn show(entry: &Entry, title: &adw::WindowTitle, content: &gtk::Box) -> Vec<
     byline.add_css_class("dim-label");
     content.append(&byline);
     content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+}
 
+#[allow(dead_code)] // Synchronous rendering is used by the offline preview only.
+pub fn show(entry: &Entry, title: &adw::WindowTitle, content: &gtk::Box) -> Vec<ImageSlot> {
+    begin(entry, title, content);
     let mut images = Vec::new();
     let blocks = parse_document(&entry.html, Some(&entry.url));
     if blocks.is_empty() {

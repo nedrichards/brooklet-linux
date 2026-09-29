@@ -45,6 +45,73 @@ struct InboxUi {
 }
 
 #[derive(Clone)]
+struct WeakInboxModel {
+    store: adw::glib::WeakRef<gio::ListStore>,
+    selection: adw::glib::WeakRef<gtk::SingleSelection>,
+}
+
+#[derive(Clone)]
+struct WeakInboxUi {
+    model: WeakInboxModel,
+    list: adw::glib::WeakRef<gtk::ListView>,
+    status: adw::glib::WeakRef<adw::StatusPage>,
+    scroller: adw::glib::WeakRef<gtk::ScrolledWindow>,
+    spinner: adw::glib::WeakRef<adw::Spinner>,
+    new_button: adw::glib::WeakRef<gtk::Button>,
+    pending_entries: Rc<RefCell<Option<Vec<Entry>>>>,
+    read_in_flight: Rc<RefCell<HashSet<i64>>>,
+    suppress_read: Rc<RefCell<HashSet<i64>>>,
+    pinned_read: Rc<RefCell<Option<Entry>>>,
+    rebuilding: Rc<Cell<bool>>,
+    emptied_place: Rc<RefCell<Option<ListPlace>>>,
+    undo_toast: Rc<RefCell<Option<adw::Toast>>>,
+}
+impl InboxUi {
+    fn downgrade(&self) -> WeakInboxUi {
+        WeakInboxUi {
+            model: WeakInboxModel {
+                store: self.model.store.downgrade(),
+                selection: self.model.selection.downgrade(),
+            },
+            list: self.list.downgrade(),
+            status: self.status.downgrade(),
+            scroller: self.scroller.downgrade(),
+            spinner: self.spinner.downgrade(),
+            new_button: self.new_button.downgrade(),
+            pending_entries: self.pending_entries.clone(),
+            read_in_flight: self.read_in_flight.clone(),
+            suppress_read: self.suppress_read.clone(),
+            pinned_read: self.pinned_read.clone(),
+            rebuilding: self.rebuilding.clone(),
+            emptied_place: self.emptied_place.clone(),
+            undo_toast: self.undo_toast.clone(),
+        }
+    }
+}
+impl WeakInboxUi {
+    fn upgrade(&self) -> Option<InboxUi> {
+        Some(InboxUi {
+            model: ui::inbox::InboxModel {
+                store: self.model.store.upgrade()?,
+                selection: self.model.selection.upgrade()?,
+            },
+            list: self.list.upgrade()?,
+            status: self.status.upgrade()?,
+            scroller: self.scroller.upgrade()?,
+            spinner: self.spinner.upgrade()?,
+            new_button: self.new_button.upgrade()?,
+            pending_entries: self.pending_entries.clone(),
+            read_in_flight: self.read_in_flight.clone(),
+            suppress_read: self.suppress_read.clone(),
+            pinned_read: self.pinned_read.clone(),
+            rebuilding: self.rebuilding.clone(),
+            emptied_place: self.emptied_place.clone(),
+            undo_toast: self.undo_toast.clone(),
+        })
+    }
+}
+
+#[derive(Clone)]
 struct ListPlace {
     entry_id: Option<i64>,
     row_y: f64,
@@ -64,6 +131,8 @@ struct ReaderUi {
     positions: Rc<RefCell<HashMap<i64, ReaderPosition>>>,
     open_generation: Rc<Cell<u64>>,
     image_requests: Rc<RefCell<Vec<tokio::task::AbortHandle>>>,
+    images: Rc<RefCell<Option<Rc<ui::reader_images::Images>>>>,
+    build_tick: Rc<RefCell<Option<gtk::TickCallbackId>>>,
     origin_set: Rc<RefCell<Vec<Arc<Entry>>>>,
     origin_index: Rc<Cell<usize>>,
     origin_inbox: Rc<Cell<bool>>,
@@ -71,7 +140,75 @@ struct ReaderUi {
 }
 
 #[derive(Clone)]
+struct WeakReaderUi {
+    split: adw::glib::WeakRef<adw::NavigationSplitView>,
+    title: adw::glib::WeakRef<adw::WindowTitle>,
+    placeholder: adw::glib::WeakRef<adw::StatusPage>,
+    scroller: adw::glib::WeakRef<gtk::ScrolledWindow>,
+    content: adw::glib::WeakRef<gtk::Box>,
+    controller: Arc<AppController>,
+    active_id: Rc<Cell<Option<i64>>>,
+    restoring: Rc<Cell<bool>>,
+    positions: Rc<RefCell<HashMap<i64, ReaderPosition>>>,
+    open_generation: Rc<Cell<u64>>,
+    image_requests: Rc<RefCell<Vec<tokio::task::AbortHandle>>>,
+    images: Rc<RefCell<Option<Rc<ui::reader_images::Images>>>>,
+    build_tick: Rc<RefCell<Option<gtk::TickCallbackId>>>,
+    origin_set: Rc<RefCell<Vec<Arc<Entry>>>>,
+    origin_index: Rc<Cell<usize>>,
+    origin_inbox: Rc<Cell<bool>>,
+    source_list: Rc<RefCell<Option<adw::glib::WeakRef<gtk::ListView>>>>,
+}
+impl ReaderUi {
+    fn downgrade(&self) -> WeakReaderUi {
+        WeakReaderUi {
+            split: self.split.downgrade(),
+            title: self.title.downgrade(),
+            placeholder: self.placeholder.downgrade(),
+            scroller: self.scroller.downgrade(),
+            content: self.content.downgrade(),
+            controller: self.controller.clone(),
+            active_id: self.active_id.clone(),
+            restoring: self.restoring.clone(),
+            positions: self.positions.clone(),
+            open_generation: self.open_generation.clone(),
+            image_requests: self.image_requests.clone(),
+            images: self.images.clone(),
+            build_tick: self.build_tick.clone(),
+            origin_set: self.origin_set.clone(),
+            origin_index: self.origin_index.clone(),
+            origin_inbox: self.origin_inbox.clone(),
+            source_list: self.source_list.clone(),
+        }
+    }
+}
+impl WeakReaderUi {
+    fn upgrade(&self) -> Option<ReaderUi> {
+        Some(ReaderUi {
+            split: self.split.upgrade()?,
+            title: self.title.upgrade()?,
+            placeholder: self.placeholder.upgrade()?,
+            scroller: self.scroller.upgrade()?,
+            content: self.content.upgrade()?,
+            controller: self.controller.clone(),
+            active_id: self.active_id.clone(),
+            restoring: self.restoring.clone(),
+            positions: self.positions.clone(),
+            open_generation: self.open_generation.clone(),
+            image_requests: self.image_requests.clone(),
+            images: self.images.clone(),
+            build_tick: self.build_tick.clone(),
+            origin_set: self.origin_set.clone(),
+            origin_index: self.origin_index.clone(),
+            origin_inbox: self.origin_inbox.clone(),
+            source_list: self.source_list.clone(),
+        })
+    }
+}
+
+#[derive(Clone)]
 struct OtherViews {
+    generation: Rc<Cell<u64>>,
     saved: ui::inbox::InboxModel,
     saved_status: adw::StatusPage,
     saved_scroller: gtk::ScrolledWindow,
@@ -124,10 +261,18 @@ struct SearchState {
     scroller: gtk::ScrolledWindow,
     generation: Rc<Cell<u64>>,
     toast: adw::ToastOverlay,
+    pending: Rc<RefCell<Option<adw::glib::SourceId>>>,
+    request: Rc<RefCell<Option<tokio::task::AbortHandle>>>,
 }
 
 impl SearchState {
     fn refresh(&self) {
+        if let Some(source) = self.pending.borrow_mut().take() {
+            source.remove();
+        }
+        if let Some(task) = self.request.borrow_mut().take() {
+            task.abort();
+        }
         let token = self.generation.get().wrapping_add(1);
         self.generation.set(token);
         let feed = self
@@ -154,14 +299,19 @@ impl SearchState {
         let status = self.status.clone();
         let scroller = self.scroller.clone();
         let controller = self.controller.clone();
-        adw::glib::timeout_add_local_once(Duration::from_millis(180), move || {
+        let pending = self.pending.clone();
+        let request = self.request.clone();
+        let source = adw::glib::timeout_add_local_once(Duration::from_millis(180), move || {
+            pending.borrow_mut().take();
             if generation.get() != token {
                 return;
             }
-            controller.search_entries(text, feed, category, read, move |result| {
+            let completed = request.clone();
+            let task = controller.search_entries(text, feed, category, read, move |result| {
                 if generation.get() != token {
                     return;
                 }
+                completed.borrow_mut().take();
                 match result {
                     Ok(entries) => {
                         let empty = entries.is_empty();
@@ -173,7 +323,9 @@ impl SearchState {
                     Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
                 }
             });
+            *request.borrow_mut() = Some(task);
         });
+        *self.pending.borrow_mut() = Some(source);
     }
 }
 
@@ -280,6 +432,7 @@ impl BrookletApplication {
             let saved_list: gtk::ListView = builder.object("saved_list").expect("saved_list");
             let open_id = Rc::new(Cell::new(None));
             let other_views = OtherViews {
+                generation: Rc::new(Cell::new(0)),
                 saved: ui::inbox::configure_with_action(&saved_list, false, open_id.clone()),
                 saved_status: builder.object("saved_status").expect("saved_status"),
                 saved_scroller: builder.object("saved_scroller").expect("saved_scroller"),
@@ -359,11 +512,17 @@ impl BrookletApplication {
                 undo_toast: Rc::new(RefCell::new(None)),
             };
             inbox_ui.model.selection.connect_selected_item_notify({
-                let inbox = inbox_ui.clone();
+                let weak = inbox_ui.downgrade();
                 move |_| {
+                    let Some(inbox) = weak.upgrade() else {
+                        return;
+                    };
                     if !inbox.rebuilding.get() {
-                        let inbox = inbox.clone();
+                        let weak = weak.clone();
                         adw::glib::idle_add_local_once(move || {
+                            let Some(inbox) = weak.upgrade() else {
+                                return;
+                            };
                             if !inbox.rebuilding.get() {
                                 release_read_pin_unless(
                                     &inbox,
@@ -375,8 +534,11 @@ impl BrookletApplication {
                 }
             });
             inbox_ui.new_button.connect_clicked({
-                let inbox = inbox_ui.clone();
+                let weak = inbox_ui.downgrade();
                 move |_| {
+                    let Some(inbox) = weak.upgrade() else {
+                        return;
+                    };
                     let Some(entries) = inbox.pending_entries.borrow_mut().take() else {
                         return;
                     };
@@ -396,56 +558,32 @@ impl BrookletApplication {
                 positions: Rc::new(RefCell::new(HashMap::new())),
                 open_generation: Rc::new(Cell::new(0)),
                 image_requests: Rc::new(RefCell::new(Vec::new())),
+                images: Rc::new(RefCell::new(None)),
+                build_tick: Rc::new(RefCell::new(None)),
                 origin_set: Rc::new(RefCell::new(Vec::new())),
                 origin_index: Rc::new(Cell::new(0)),
                 origin_inbox: Rc::new(Cell::new(false)),
                 source_list: Rc::new(RefCell::new(None)),
             };
-            reader_ui.scroller.vadjustment().connect_value_changed({
-                let reader = reader_ui.clone();
-                let pending_save = Rc::new(RefCell::new(None::<adw::glib::SourceId>));
-                move |adjustment| {
-                    if reader.restoring.get() {
-                        return;
-                    }
-                    let Some(entry_id) = reader.active_id.get() else {
-                        return;
-                    };
-                    if let Some(source) = pending_save.borrow_mut().take() {
-                        source.remove();
-                    }
-                    let pending = pending_save.clone();
-                    let controller = reader.controller.clone();
-                    let content = reader.content.clone();
-                    let active_id = reader.active_id.clone();
-                    let offset = adjustment.value() as i32;
-                    let position = ui::reader::position_from_offset(&content, entry_id, offset);
-                    reader
-                        .positions
-                        .borrow_mut()
-                        .insert(entry_id, position.clone());
-                    let source =
-                        adw::glib::timeout_add_local_once(Duration::from_millis(250), move || {
-                            pending.borrow_mut().take();
-                            if active_id.get() != Some(entry_id) {
-                                return;
-                            }
-                            controller.save_reader_position(position, |_| {});
-                        });
-                    *pending_save.borrow_mut() = Some(source);
-                }
-            });
+            install_reader_position_tracking(&reader_ui);
             let undo_entry = Rc::new(RefCell::new(Vec::<Entry>::new()));
 
             inbox_list.connect_activate({
                 let model = inbox_ui.model.clone();
-                let reader_ui = reader_ui.clone();
+                let weak_reader = reader_ui.downgrade();
                 let controller = controller.clone();
-                let inbox_ui = inbox_ui.clone();
-                let toast_overlay = toast_overlay.clone();
+                let weak_inbox = inbox_ui.downgrade();
+                let weak_toast = toast_overlay.downgrade();
                 let undo_entry = undo_entry.clone();
                 let current_entry = current_entry.clone();
                 move |list, position| {
+                    let (Some(reader_ui), Some(inbox_ui), Some(toast_overlay)) = (
+                        weak_reader.upgrade(),
+                        weak_inbox.upgrade(),
+                        weak_toast.upgrade(),
+                    ) else {
+                        return;
+                    };
                     if let Some(entry) = ui::inbox::entry_at(&model, position) {
                         ui::inbox::select_id(list, entry.id);
                         *current_entry.borrow_mut() = Some(entry.clone());
@@ -478,12 +616,19 @@ impl BrookletApplication {
                 let list: gtk::ListView = builder.object(name).expect("article list");
                 list.connect_activate({
                     let controller = controller.clone();
-                    let reader_ui = reader_ui.clone();
+                    let weak_reader = reader_ui.downgrade();
                     let current_entry = current_entry.clone();
-                    let inbox_ui = inbox_ui.clone();
-                    let toast_overlay = toast_overlay.clone();
+                    let weak_inbox = inbox_ui.downgrade();
+                    let weak_toast = toast_overlay.downgrade();
                     let undo_entry = undo_entry.clone();
                     move |list, position| {
+                        let (Some(reader_ui), Some(inbox_ui), Some(toast_overlay)) = (
+                            weak_reader.upgrade(),
+                            weak_inbox.upgrade(),
+                            weak_toast.upgrade(),
+                        ) else {
+                            return;
+                        };
                         if let Some(entry) = ui::inbox::entry_at(&model, position) {
                             ui::inbox::select_id(list, entry.id);
                             *current_entry.borrow_mut() = Some(entry.clone());
@@ -658,6 +803,31 @@ impl BrookletApplication {
             install_window_tools(&window, application, &builder, tools);
             let destinations: adw::ViewStack =
                 builder.object("destinations").expect("destinations");
+            for navigation in [
+                destinations.clone().upcast::<adw::glib::Object>(),
+                library_navigation.clone().upcast::<adw::glib::Object>(),
+            ] {
+                let property = if navigation.is::<adw::ViewStack>() {
+                    "visible-child"
+                } else {
+                    "visible-page"
+                };
+                navigation.connect_notify_local(Some(property), {
+                    let controller = controller.clone();
+                    let views = other_views.clone();
+                    let toast = toast_overlay.downgrade();
+                    move |_, _| {
+                        let controller = controller.clone();
+                        let views = views.clone();
+                        let toast = toast.clone();
+                        adw::glib::idle_add_local_once(move || {
+                            if let Some(toast) = toast.upgrade() {
+                                load_other_views(controller, views, toast);
+                            }
+                        });
+                    }
+                });
+            }
             install_article_cursor_keys(
                 &window,
                 &destinations,
@@ -686,6 +856,36 @@ impl BrookletApplication {
                         reader.controller.save_reader_position(position, |_| {});
                     }
                     adw::glib::Propagation::Proceed
+                }
+            });
+            window.connect_destroy({
+                let reader = reader_ui.clone();
+                let application = application.downgrade();
+                let current = current_entry.clone();
+                let undo = undo_entry.clone();
+                move |_| {
+                    reader
+                        .open_generation
+                        .set(reader.open_generation.get().wrapping_add(1));
+                    for request in reader.image_requests.borrow_mut().drain(..) {
+                        request.abort();
+                    }
+                    if let Some(tick) = reader.build_tick.borrow_mut().take() {
+                        tick.remove();
+                    }
+                    reader.images.borrow_mut().take();
+                    reader.origin_set.borrow_mut().clear();
+                    reader.positions.borrow_mut().clear();
+                    reader.active_id.set(None);
+                    current.borrow_mut().take();
+                    undo.borrow_mut().clear();
+                    while let Some(child) = reader.content.first_child() {
+                        reader.content.remove(&child);
+                    }
+                    if let Some(application) = application.upgrade() {
+                        application.remove_action("sync");
+                        application.remove_action("search");
+                    }
                 }
             });
             for (name, tag) in [
@@ -807,12 +1007,17 @@ impl BrookletApplication {
                     });
                     list.connect_activate({
                         let controller = controller.clone();
-                        let reader = reader.clone();
+                        let reader = reader.downgrade();
                         let current = current.clone();
-                        let inbox = inbox.clone();
-                        let toast = toast.clone();
+                        let inbox = inbox.downgrade();
+                        let toast = toast.downgrade();
                         let undo = undo.clone();
                         move |list, position| {
+                            let (Some(reader), Some(inbox), Some(toast)) =
+                                (reader.upgrade(), inbox.upgrade(), toast.upgrade())
+                            else {
+                                return;
+                            };
                             if let Some(entry) = ui::inbox::entry_at(&model, position) {
                                 *current.borrow_mut() = Some(entry.clone());
                                 set_reader_origin(&reader, &model, list, entry.id, false);
@@ -1039,6 +1244,48 @@ impl BrookletApplication {
             ],
         );
     }
+}
+
+fn install_reader_position_tracking(reader: &ReaderUi) {
+    reader.scroller.vadjustment().connect_value_changed({
+        let weak = reader.downgrade();
+        let pending_save = Rc::new(RefCell::new(None::<adw::glib::SourceId>));
+        move |adjustment| {
+            let Some(reader) = weak.upgrade() else {
+                return;
+            };
+            if reader.restoring.get() {
+                return;
+            }
+            let Some(entry_id) = reader.active_id.get() else {
+                return;
+            };
+            if let Some(source) = pending_save.borrow_mut().take() {
+                source.remove();
+            }
+            let pending = pending_save.clone();
+            let controller = reader.controller.clone();
+            let content = reader.content.downgrade();
+            let active_id = reader.active_id.clone();
+            let offset = adjustment.value() as i32;
+            let positions = reader.positions.clone();
+            let generation = reader.open_generation.clone();
+            let expected = generation.get();
+            let source = adw::glib::timeout_add_local_once(Duration::from_millis(250), move || {
+                pending.borrow_mut().take();
+                if active_id.get() != Some(entry_id) || generation.get() != expected {
+                    return;
+                }
+                let Some(content) = content.upgrade() else {
+                    return;
+                };
+                let position = ui::reader::position_from_offset(&content, entry_id, offset);
+                positions.borrow_mut().insert(entry_id, position.clone());
+                controller.save_reader_position(position, |_| {});
+            });
+            *pending_save.borrow_mut() = Some(source);
+        }
+    });
 }
 
 fn opens_shortcuts(key: gtk::gdk::Key, modifiers: gtk::gdk::ModifierType) -> bool {
@@ -1999,93 +2246,92 @@ fn open_article(reader_ui: &ReaderUi, inbox_ui: &InboxUi, entry: &Entry) {
     let generation = reader_ui.open_generation.get().wrapping_add(1);
     reader_ui.open_generation.set(generation);
     reader_ui.active_id.set(Some(entry.id));
-    let images = ui::reader::show(entry, &reader_ui.title, &reader_ui.content);
-    for slot in images {
-        let reader = reader_ui.clone();
-        let url = slot.url.clone();
-        let request = reader_ui.controller.fetch_image(slot.url, move |result| {
-            if reader.open_generation.get() != generation {
-                return;
-            }
-            let Ok(bytes) = result else {
-                return;
-            };
-            let handle = reader.controller.backend_handle();
-            adw::glib::MainContext::default().spawn_local(async move {
-                let mut decode = Box::pin(async move {
-                    let decoders = reader.controller.image_decoders();
-                    let _permit = decoders
-                        .acquire()
-                        .await
-                        .expect("image decoders remain open");
-                    if reader.open_generation.get() != generation {
-                        return;
-                    }
-                    let Ok(mut image) = glycin::Loader::new_vec(bytes).load().await else {
-                        reader.controller.invalidate_image(url);
-                        return;
-                    };
-                    let Ok(frame) = image.next_frame().await else {
-                        reader.controller.invalidate_image(url);
-                        return;
-                    };
-                    if reader.open_generation.get() != generation {
-                        return;
-                    }
-                    let scroll = reader.scroller.vadjustment().value();
-                    let place = (!reader.restoring.get()).then(|| {
-                        ui::reader::position_from_offset(&reader.content, entry_id, scroll as i32)
-                    });
-                    let picture = ui::reader::picture(&frame.texture(), &slot.alt);
-                    while let Some(child) = slot.container.first_child() {
-                        slot.container.remove(&child);
-                    }
-                    slot.container.append(&picture);
-                    if let Some(place) = place {
-                        ui::reader::preserve_after_image(
-                            &reader.content,
-                            &reader.scroller,
-                            reader.open_generation.clone(),
-                            generation,
-                            scroll,
-                            place,
-                        );
-                    }
-                });
-                std::future::poll_fn(|context| {
-                    let _entered = handle.enter();
-                    std::future::Future::poll(decode.as_mut(), context)
-                })
-                .await;
-            });
-        });
-        reader_ui.image_requests.borrow_mut().push(request);
+    reader_ui.images.borrow_mut().take();
+    if let Some(tick) = reader_ui.build_tick.borrow_mut().take() {
+        tick.remove();
     }
+    ui::reader::begin(entry, &reader_ui.title, &reader_ui.content);
+    reader_ui.scroller.vadjustment().set_value(0.0);
     reader_ui.placeholder.set_visible(false);
     reader_ui.scroller.set_visible(true);
     reader_ui.split.set_show_content(true);
     reader_ui.scroller.grab_focus();
-    reader_ui.controller.reader_position(entry.id, {
-        let reader = reader_ui.clone();
-        move |result| {
-            let position = reader
-                .positions
-                .borrow()
-                .get(&entry_id)
-                .cloned()
-                .or_else(|| result.ok().flatten());
-            adw::glib::timeout_add_local_once(Duration::from_millis(100), move || {
-                if reader.open_generation.get() != generation {
-                    return;
-                }
-                let value = position.map_or(0, |position| {
-                    ui::reader::offset_from_position(&reader.content, &position)
-                });
-                reader.scroller.vadjustment().set_value(f64::from(value));
-                reader.restoring.set(false);
-            });
+    let weak = reader_ui.downgrade();
+    let metadata = entry.clone();
+    let request = reader_ui.controller.parse_entry(entry_id, move |result| {
+        let Some(reader) = weak.upgrade() else {
+            return;
+        };
+        if reader.open_generation.get() != generation {
+            return;
         }
+        reader.image_requests.borrow_mut().clear();
+        let (blocks, stored_position) = match result {
+            Ok(document) => document,
+            Err(error) => {
+                ui::reader::empty(&metadata, &reader.content, &error.sync_message());
+                reader.restoring.set(false);
+                return;
+            }
+        };
+        let position = reader
+            .positions
+            .borrow()
+            .get(&entry_id)
+            .cloned()
+            .or(stored_position);
+        if blocks.is_empty() {
+            ui::reader::empty(
+                &metadata,
+                &reader.content,
+                "This article has no cached body.",
+            );
+        }
+        let images = ui::reader_images::Images::new(
+            reader.controller.clone(),
+            &reader.content,
+            &reader.scroller,
+            reader.open_generation.clone(),
+            entry_id,
+            reader.restoring.clone(),
+        );
+        *reader.images.borrow_mut() = Some(images);
+        let builder = RefCell::new(ui::reader::DocumentBuilder::new(blocks));
+        let weak = reader.downgrade();
+        let built = Cell::new(false);
+        let tick = reader.content.add_tick_callback(move |content, _| {
+            let Some(reader) = weak.upgrade() else {
+                return adw::glib::ControlFlow::Break;
+            };
+            if reader.open_generation.get() != generation {
+                return adw::glib::ControlFlow::Break;
+            }
+            if built.get() {
+                // Wait for the last batch's layout before applying the saved anchor.
+                // Respect a user who started scrolling while the document was built.
+                if reader.scroller.vadjustment().value() == 0.0 {
+                    let offset = position.as_ref().map_or(0, |position| {
+                        ui::reader::offset_from_position(content, position)
+                    });
+                    reader.scroller.vadjustment().set_value(f64::from(offset));
+                }
+                reader.restoring.set(false);
+                if let Some(images) = reader.images.borrow().as_ref() {
+                    images.queue();
+                }
+                reader.build_tick.borrow_mut().take();
+                return adw::glib::ControlFlow::Break;
+            }
+            let (slots, complete) = builder.borrow_mut().step(content);
+            if let Some(images) = reader.images.borrow().as_ref() {
+                images.add(slots);
+            }
+            built.set(complete);
+            adw::glib::ControlFlow::Continue
+        });
+        *reader.build_tick.borrow_mut() = Some(tick);
     });
+    reader_ui.image_requests.borrow_mut().push(request);
 }
 
 fn set_reader_origin(
@@ -2133,6 +2379,8 @@ fn set_reader_origin_entries(
 }
 
 fn load_other_views(controller: Arc<AppController>, views: OtherViews, toast: adw::ToastOverlay) {
+    let token = views.generation.get().wrapping_add(1);
+    views.generation.set(token);
     for (view, model, status, scroller) in [
         (
             "saved",
@@ -2159,40 +2407,63 @@ fn load_other_views(controller: Arc<AppController>, views: OtherViews, toast: ad
             views.library_read_scroller.clone(),
         ),
     ] {
+        // Empty-state scrollers are hidden; their parent still identifies the visible page.
+        if !scroller.parent().is_some_and(|parent| parent.is_mapped()) {
+            continue;
+        }
         let toast = toast.clone();
-        controller.entries_for_view(view.into(), move |result| match result {
-            Ok(entries) => {
-                replace_view_entries(&model, &status, &scroller, entries);
+        let generation = views.generation.clone();
+        controller.entries_for_view(view.into(), move |result| {
+            if generation.get() != token {
+                return;
             }
-            Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
+            match result {
+                Ok(entries) => {
+                    replace_view_entries(&model, &status, &scroller, entries);
+                }
+                Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
+            }
         });
+    }
+    if !views
+        .categories_scroller
+        .parent()
+        .is_some_and(|parent| parent.is_mapped())
+    {
+        return;
     }
     controller.categories_cached({
         let list = views.categories.clone();
         let status = views.categories_status.clone();
         let scroller = views.categories_scroller.clone();
         let toast = toast.clone();
-        move |result| match result {
-            Ok(categories) => {
-                let empty = categories.is_empty();
-                while let Some(row) = list.first_child() {
-                    list.remove(&row);
-                }
-                for category in categories {
-                    let row = adw::ActionRow::builder()
-                        .title(&category.title)
-                        .use_markup(false)
-                        .activatable(true)
-                        .build();
-                    row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-                    row.set_action_name(Some("win.library-category"));
-                    row.set_action_target_value(Some(&category.id.to_variant()));
-                    list.append(&row);
-                }
-                status.set_visible(empty);
-                scroller.set_visible(!empty);
+        let generation = views.generation.clone();
+        move |result| {
+            if generation.get() != token {
+                return;
             }
-            Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
+            match result {
+                Ok(categories) => {
+                    let empty = categories.is_empty();
+                    while let Some(row) = list.first_child() {
+                        list.remove(&row);
+                    }
+                    for category in categories {
+                        let row = adw::ActionRow::builder()
+                            .title(&category.title)
+                            .use_markup(false)
+                            .activatable(true)
+                            .build();
+                        row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+                        row.set_action_name(Some("win.library-category"));
+                        row.set_action_target_value(Some(&category.id.to_variant()));
+                        list.append(&row);
+                    }
+                    status.set_visible(empty);
+                    scroller.set_visible(!empty);
+                }
+                Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
+            }
         }
     });
 }
@@ -2427,6 +2698,15 @@ fn install_window_tools(
     menu_button.set_menu_model(Some(&menu));
 
     let search_dialog = Rc::new(RefCell::new(None::<(adw::Dialog, gtk::SearchEntry)>));
+    window.connect_destroy({
+        let search_dialog = search_dialog.clone();
+        move |_| {
+            let open = search_dialog.borrow_mut().take();
+            if let Some((dialog, _)) = open {
+                dialog.close();
+            }
+        }
+    });
     let search = gio::SimpleAction::new("search", None);
     search.connect_activate({
         let window = window.downgrade();
@@ -2509,20 +2789,38 @@ fn install_window_tools(
                 scroller,
                 generation: Rc::new(Cell::new(0)),
                 toast: toast.clone(),
+                pending: Rc::new(RefCell::new(None)),
+                request: Rc::new(RefCell::new(None)),
             };
-            query.connect_search_changed({
+            let signals = Rc::new(RefCell::new(Vec::<(
+                adw::glib::WeakRef<adw::glib::Object>,
+                adw::glib::SignalHandlerId,
+            )>::new()));
+            let signal = query.connect_search_changed({
                 let state = state.clone();
                 move |_| state.refresh()
             });
-            feed.connect_selected_notify({
+            signals.borrow_mut().push((
+                query.clone().upcast::<adw::glib::Object>().downgrade(),
+                signal,
+            ));
+            let signal = feed.connect_selected_notify({
                 let state = state.clone();
                 move |_| state.refresh()
             });
-            category.connect_selected_notify({
+            signals.borrow_mut().push((
+                feed.clone().upcast::<adw::glib::Object>().downgrade(),
+                signal,
+            ));
+            let signal = category.connect_selected_notify({
                 let state = state.clone();
                 move |_| state.refresh()
             });
-            read.connect_selected_notify({
+            signals.borrow_mut().push((
+                category.clone().upcast::<adw::glib::Object>().downgrade(),
+                signal,
+            ));
+            let signal = read.connect_selected_notify({
                 let state = state.clone();
                 let list = list.clone();
                 move |dropdown| {
@@ -2534,6 +2832,32 @@ fn install_window_tools(
                         _ => {}
                     }
                     state.refresh();
+                }
+            });
+            signals.borrow_mut().push((
+                read.clone().upcast::<adw::glib::Object>().downgrade(),
+                signal,
+            ));
+            dialog.connect_closed({
+                let signals = signals.clone();
+                let generation = state.generation.clone();
+                let pending = state.pending.clone();
+                let request = state.request.clone();
+                let store = model.store.clone();
+                move |_| {
+                    generation.set(generation.get().wrapping_add(1));
+                    if let Some(source) = pending.borrow_mut().take() {
+                        source.remove();
+                    }
+                    if let Some(task) = request.borrow_mut().take() {
+                        task.abort();
+                    }
+                    for (object, signal) in signals.borrow_mut().drain(..) {
+                        if let Some(object) = object.upgrade() {
+                            object.disconnect(signal);
+                        }
+                    }
+                    store.remove_all();
                 }
             });
             controller.feeds_cached(None, {
@@ -2565,18 +2889,26 @@ fn install_window_tools(
             });
             state.refresh();
             list.connect_activate({
-                let dialog = dialog.clone();
+                let dialog = dialog.downgrade();
                 let controller = controller.clone();
-                let reader = reader.clone();
+                let reader = reader.downgrade();
                 let current = current.clone();
-                let inbox = inbox.clone();
-                let toast = toast.clone();
+                let inbox = inbox.downgrade();
+                let toast = toast.downgrade();
                 let undo = undo.clone();
                 move |list, position| {
+                    let (Some(dialog), Some(reader), Some(inbox), Some(toast)) = (
+                        dialog.upgrade(),
+                        reader.upgrade(),
+                        inbox.upgrade(),
+                        toast.upgrade(),
+                    ) else {
+                        return;
+                    };
                     if let Some(entry) = ui::inbox::entry_at(&model, position) {
+                        set_reader_origin(&reader, &model, list, entry.id, false);
                         dialog.close();
                         *current.borrow_mut() = Some(entry.clone());
-                        set_reader_origin(&reader, &model, list, entry.id, false);
                         open_article(&reader, &inbox, &entry);
                         if !entry.read {
                             mark_read(
@@ -2646,6 +2978,7 @@ fn install_window_tools(
                 return;
             };
             let dialog = adw::Dialog::new();
+            let signals = ui::signal_scope::SignalScope::for_dialog(&dialog);
             dialog.set_title("Subscribe to a feed");
             dialog.set_content_width(430);
             let body = gtk::Box::new(gtk::Orientation::Vertical, 12);
@@ -2667,17 +3000,17 @@ fn install_window_tools(
             button.add_css_class("suggested-action");
             button.set_halign(gtk::Align::End);
             body.append(&button);
-            url.connect_activate({
+            signals.track(&url, url.connect_activate({
                 let button = button.clone();
                 move |_| button.emit_clicked()
-            });
-            url.connect_changed({
+            }));
+            signals.track(&url, url.connect_changed({
                 let error = error.clone();
                 move |_| error.set_visible(false)
-            });
+            }));
             let submit_button = button.clone();
             let input_url = url.clone();
-            button.connect_clicked({
+            signals.track(&button, button.connect_clicked({
                 let dialog = dialog.clone();
                 let controller = controller.clone();
                 let toast = toast.clone();
@@ -2714,7 +3047,7 @@ fn install_window_tools(
                         }
                     });
                 }
-            });
+            }));
             dialog.set_child(Some(&body));
             dialog.present(Some(&window));
             url.grab_focus();
@@ -2733,6 +3066,7 @@ fn install_window_tools(
                 return;
             };
             let dialog = adw::PreferencesDialog::new();
+            let signals = ui::signal_scope::SignalScope::for_dialog(&dialog);
             let page = adw::PreferencesPage::new();
             let account_group = adw::PreferencesGroup::new();
             account_group.set_title("Miniflux account");
@@ -2749,7 +3083,7 @@ fn install_window_tools(
             logout_row.add_suffix(&logout_button);
             logout_row.set_activatable_widget(Some(&logout_button));
             account_group.add(&logout_row);
-            logout_button.connect_clicked({
+            signals.track(&logout_button, logout_button.connect_clicked({
                 let logout_button = logout_button.clone();
                 let window = window.downgrade();
                 let application = application.clone();
@@ -2802,7 +3136,7 @@ fn install_window_tools(
                     });
                     confirm.present(Some(&window));
                 }
-            });
+            }));
             page.add(&account_group);
             let storage = adw::PreferencesGroup::new();
             storage.set_title("Local cache");
@@ -2817,7 +3151,7 @@ fn install_window_tools(
             clear_images.update_property(&[gtk::accessible::Property::Label("Clear cached article images")]);
             image_cache.add_suffix(&clear_images);
             image_cache.set_activatable_widget(Some(&clear_images));
-            clear_images.connect_clicked({
+            signals.track(&clear_images, clear_images.connect_clicked({
                 let controller = controller.clone();
                 let toast = toast.clone();
                 move |button| {
@@ -2831,7 +3165,7 @@ fn install_window_tools(
                         }
                     });
                 }
-            });
+            }));
             storage.add(&image_cache);
             page.add(&storage);
             let karakeep = adw::PreferencesGroup::new();
@@ -2848,14 +3182,14 @@ fn install_window_tools(
             key.set_title("API key (leave blank to keep saved key)");
             key.set_sensitive(false);
             karakeep.add(&key);
-            direct.connect_active_notify({
+            signals.track(&direct, direct.connect_active_notify({
                 let endpoint = endpoint.clone();
                 let key = key.clone();
                 move |row| {
                     endpoint.set_sensitive(row.is_active());
                     key.set_sensitive(row.is_active());
                 }
-            });
+            }));
             let save_karakeep = gtk::Button::with_label("Save Karakeep settings");
             save_karakeep.set_margin_top(8);
             karakeep.add(&save_karakeep);
@@ -2886,13 +3220,14 @@ fn install_window_tools(
                 }
             });
             controller.storage_policy({
+                let signals = signals.clone();
                 let controller = controller.clone();
                 let toast = toast.clone();
                 let days = days.clone();
                 move |result| match result {
                     Ok(policy) => {
                         days.set_value(policy.retain_read_days.unwrap_or(30) as f64);
-                        days.connect_value_notify({
+                        signals.track(&days, days.connect_value_notify({
                             let controller = controller.clone();
                             let toast = toast.clone();
                             move |row| {
@@ -2913,7 +3248,7 @@ fn install_window_tools(
                                     },
                                 );
                             }
-                        });
+                        }));
                     }
                     Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
                 }
@@ -2931,7 +3266,7 @@ fn install_window_tools(
                     Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
                 }
             });
-            save_karakeep.connect_clicked({
+            signals.track(&save_karakeep, save_karakeep.connect_clicked({
                 let controller = controller.clone();
                 let direct = direct.clone();
                 let endpoint = endpoint.clone();
@@ -2965,7 +3300,7 @@ fn install_window_tools(
                         },
                     );
                 }
-            });
+            }));
             controller.sync_status(move |result| match result {
                 Ok(info) => {
                     status.set_title(&format!(
@@ -3100,6 +3435,241 @@ fn smoke_test_image_anchor() -> Result<(), adw::glib::BoolError> {
     }
 }
 
+fn smoke_test_reader_pipeline() -> Result<(), adw::glib::BoolError> {
+    use brooklet::services::traits::Repository;
+    let repository = Arc::new(
+        SqliteRepository::open_in_memory().map_err(|error| adw::glib::bool_error!("{error}"))?,
+    );
+    let secrets = Arc::new(Oo7SecretStore::new("brooklet-smoke-test"));
+    let cache_directory = adw::glib::tmp_dir().join(format!(
+        "brooklet-smoke-{}",
+        adw::glib::uuid_string_random()
+    ));
+    std::fs::create_dir(&cache_directory).map_err(|error| adw::glib::bool_error!("{error}"))?;
+    let image_cache = brooklet::services::image_cache::ImageCache::new(
+        cache_directory.join("images.db"),
+        1024 * 1024,
+    )
+    .map_err(|error| adw::glib::bool_error!("{error}"))?;
+    let controller = Arc::new(
+        AppController::with_image_cache(
+            Arc::new(AccountSetupService::new(
+                Arc::new(MinifluxIdentityValidator),
+                repository.clone(),
+                secrets.clone(),
+            )),
+            Arc::new(AccountSyncService::new(
+                repository.clone(),
+                secrets,
+                Arc::new(ReqwestMinifluxApiFactory),
+            )),
+            image_cache.clone(),
+        )
+        .map_err(|error| adw::glib::bool_error!("{error}"))?,
+    );
+    let png = gtk::gdk::MemoryTexture::new(
+        32,
+        32,
+        gtk::gdk::MemoryFormat::R8g8b8a8,
+        &adw::glib::Bytes::from_owned(vec![255_u8; 32 * 32 * 4]),
+        32 * 4,
+    )
+    .save_to_png_bytes();
+    controller
+        .backend_handle()
+        .block_on(async {
+            for index in 0..40 {
+                let png = png.as_ref().to_vec();
+                image_cache
+                    .get_or_fetch(
+                        &format!("https://example.invalid/image/{index}"),
+                        || async { Ok(png) },
+                    )
+                    .await?;
+            }
+            Ok::<(), BrookletError>(())
+        })
+        .map_err(|error| adw::glib::bool_error!("{error}"))?;
+    let image_controller = controller.clone();
+    let entry = |id, html: String| Entry {
+        id,
+        account_id: 1,
+        feed_id: 1,
+        feed_title: "Synthetic feed".into(),
+        category_title: String::new(),
+        title: format!("Synthetic article {id}"),
+        url: "https://example.invalid/article".into(),
+        author: None,
+        published_at_ms: 0,
+        html,
+        content_revision: 0,
+        read: false,
+        starred: false,
+        reading_minutes: 1,
+        delivery_state: None,
+        delivery_error: None,
+    };
+    let long = entry(
+        1,
+        format!(
+            "{}<table>{}</table>",
+            "<p>Long paragraph</p>".repeat(160),
+            "<tr><th>Heading</th><td>Cell</td></tr>".repeat(40)
+        ),
+    );
+    let replacement = entry(2, "<p>Replacement body</p>".into());
+    controller
+        .backend_handle()
+        .block_on(async {
+            repository
+                .save_account(&brooklet::model::Account {
+                    id: 1,
+                    server_url: "https://example.invalid".into(),
+                    username: "synthetic".into(),
+                    server_version: "2.3.2".into(),
+                })
+                .await?;
+            repository
+                .replace_unread_snapshot(1, &[long.clone(), replacement.clone()])
+                .await?;
+            repository
+                .save_reader_position(
+                    1,
+                    &ReaderPosition {
+                        entry_id: 1,
+                        first_visible_block: 80,
+                        offset_px: 2,
+                    },
+                )
+                .await
+        })
+        .map_err(|error| adw::glib::bool_error!("{error}"))?;
+    let builder = gtk::Builder::from_resource("/com/nedrichards/brooklet/ui/window.ui");
+    let window: adw::ApplicationWindow = builder.object("window").unwrap();
+    let active_id = Rc::new(Cell::new(None));
+    let list: gtk::ListView = builder.object("inbox_list").unwrap();
+    let inbox = InboxUi {
+        model: ui::inbox::configure(&list, active_id.clone()),
+        list,
+        status: builder.object("inbox_status").unwrap(),
+        scroller: builder.object("inbox_scroller").unwrap(),
+        spinner: builder.object("sync_spinner").unwrap(),
+        new_button: builder.object("new_articles_button").unwrap(),
+        pending_entries: Rc::new(RefCell::new(None)),
+        read_in_flight: Rc::new(RefCell::new(HashSet::new())),
+        suppress_read: Rc::new(RefCell::new(HashSet::new())),
+        pinned_read: Rc::new(RefCell::new(None)),
+        rebuilding: Rc::new(Cell::new(false)),
+        emptied_place: Rc::new(RefCell::new(None)),
+        undo_toast: Rc::new(RefCell::new(None)),
+    };
+    let reader = ReaderUi {
+        split: builder.object("inbox_split").unwrap(),
+        title: builder.object("reader_title").unwrap(),
+        placeholder: builder.object("reader_placeholder").unwrap(),
+        scroller: builder.object("reader_scroller").unwrap(),
+        content: builder.object("reader_content").unwrap(),
+        controller,
+        active_id,
+        restoring: Rc::new(Cell::new(false)),
+        positions: Rc::new(RefCell::new(HashMap::new())),
+        open_generation: Rc::new(Cell::new(0)),
+        image_requests: Rc::new(RefCell::new(Vec::new())),
+        images: Rc::new(RefCell::new(None)),
+        build_tick: Rc::new(RefCell::new(None)),
+        origin_set: Rc::new(RefCell::new(Vec::new())),
+        origin_index: Rc::new(Cell::new(0)),
+        origin_inbox: Rc::new(Cell::new(false)),
+        source_list: Rc::new(RefCell::new(None)),
+    };
+    install_reader_position_tracking(&reader);
+    window.present();
+    open_article(&reader, &inbox, &long);
+    open_article(&reader, &inbox, &replacement);
+    let main_loop = adw::glib::MainLoop::new(None, false);
+    let failure = Rc::new(RefCell::new(Some("Background reader timed out".to_owned())));
+    window.add_tick_callback({
+        let main_loop = main_loop.clone();
+        let failure = failure.clone();
+        let reader = reader.downgrade();
+        let inbox = inbox.downgrade();
+        let stage = Cell::new(0);
+        let construction_frames = Cell::new(0);
+        move |_, _| {
+            let (Some(reader), Some(inbox)) = (reader.upgrade(), inbox.upgrade()) else {
+                return adw::glib::ControlFlow::Break;
+            };
+            if reader.restoring.get() {
+                if stage.get() == 1 {
+                    construction_frames.set(construction_frames.get() + 1);
+                }
+                return adw::glib::ControlFlow::Continue;
+            }
+            if stage.get() == 0 {
+                let labels = reader
+                    .content
+                    .observe_children()
+                    .iter::<adw::glib::Object>()
+                    .filter_map(Result::ok)
+                    .filter_map(|object| object.downcast::<gtk::Widget>().ok())
+                    .filter_map(|widget| widget.downcast::<gtk::Label>().ok())
+                    .map(|label| label.text().to_string())
+                    .collect::<Vec<_>>();
+                if !labels.iter().any(|text| text == "Replacement body")
+                    || labels.iter().any(|text| text == "Long paragraph")
+                {
+                    *failure.borrow_mut() = Some("A stale article replaced the active body".into());
+                    main_loop.quit();
+                    return adw::glib::ControlFlow::Break;
+                }
+                stage.set(1);
+                open_article(&reader, &inbox, &long);
+                return adw::glib::ControlFlow::Continue;
+            }
+            if construction_frames.get() < 2 || reader.scroller.vadjustment().value() <= 0.0 {
+                *failure.borrow_mut() =
+                    Some("Reader construction or saved anchor restoration failed".into());
+            } else {
+                failure.borrow_mut().take();
+            }
+            main_loop.quit();
+            adw::glib::ControlFlow::Break
+        }
+    });
+    let deadline = adw::glib::timeout_add_local_once(Duration::from_secs(5), {
+        let main_loop = main_loop.clone();
+        move || main_loop.quit()
+    });
+    main_loop.run();
+    if failure.borrow().is_none() {
+        deadline.remove();
+    }
+    let weak = reader.downgrade();
+    // Keep the adjustment alive to prove its signal doesn't keep the reader alive.
+    let adjustment = reader.scroller.vadjustment();
+    reader.images.borrow_mut().take();
+    if let Some(tick) = reader.build_tick.borrow_mut().take() {
+        tick.remove();
+    }
+    window.destroy();
+    drop(reader);
+    drop(inbox);
+    drop(window);
+    drop(builder);
+    if weak.content.upgrade().is_some() || weak.scroller.upgrade().is_some() {
+        return Err(adw::glib::bool_error!(
+            "Adjustment signal retained the reader"
+        ));
+    }
+    drop(adjustment);
+    if let Some(error) = failure.borrow_mut().take() {
+        return Err(adw::glib::bool_error!("{error}"));
+    }
+    let result = ui::reader_images::smoke_test(image_controller);
+    let _ = std::fs::remove_dir_all(cache_directory);
+    result
+}
+
 pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
     let texture = gtk::gdk::MemoryTexture::new(
@@ -3177,7 +3747,9 @@ pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
     if !focused || selection.selected() != 0 {
         return Err(adw::glib::bool_error!("Inbox did not receive launch focus"));
     }
-    smoke_test_image_anchor()
+    smoke_test_image_anchor()?;
+    ui::signal_scope::smoke_test()?;
+    smoke_test_reader_pipeline()
 }
 
 fn register_resources() {

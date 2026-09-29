@@ -74,17 +74,31 @@ Close an existing Brooklet instance before launching a different binary.
 The app stores image bytes in `$XDG_CACHE_HOME/com.nedrichards.brooklet.Devel/images.db`.
 It holds up to 256 MiB of image payloads and 8,192 entries, with least recently
 used eviction. SQLite metadata and journal files add storage overhead. Cache
-hits do not make network requests. Images are saved as articles are opened;
+hits do not make network requests. Images are saved as they approach the viewport;
 this does not pre-download every synced article or pin all Saved images.
 The same URL is retained until eviction or an explicit clear.
 
 SQLite work runs on blocking backend threads. Downloads share one HTTP client
-and are limited to four, decoding to two. Switching articles cancels pending
-downloads, and generation checks reject stale decode results. Failed decodes
-are evicted. Preferences offers Clear under Article images; logout also clears
-the image cache. The cache is disposable and never holds service credentials.
+with four global slots; a reader session allows only two complete fetch/decode
+jobs. Images within one viewport of the visible region are eligible. Switching
+articles or scrolling away cancels obsolete jobs, and generation checks reject
+stale results. Decode requests fit display width with at most 2 Mi pixels and
+4,096 pixels per side, rejecting sources above 32 Mi pixels. Actual returned
+frames are checked against the pixel limit and a 32 MiB buffer limit. The
+resident decoded-payload budget is 64 MiB; offscreen textures are evicted first.
+These are payload limits, not an RSS ceiling for GTK, GPU, or decoder helpers.
+Failed or oversized decodes retain placeholders. Preferences offers Clear under
+Article images; logout also clears the image cache. The cache is disposable and
+never holds service credentials.
 
 The preview uses its own `OUTPUT_DIR/images.db`, isolated from the app cache.
 Populate it with `--images`, then run a new preview process with
 `--offline-images` and the same output directory. Offline mode refuses fetches.
 For additional verification, run the latter with `flatpak build --unshare=network`.
+
+The app's `--smoke-test` also exercises the asynchronous reader with synthetic
+long text and a table, rapid replacement, saved-position restoration, and
+teardown with weak-widget checks. It decodes generated PNGs from an isolated
+temporary cache to check viewport loading and session release. It neither
+accesses the installed account nor fetches remote images. Development Glycin
+sandbox limitations described above still apply.

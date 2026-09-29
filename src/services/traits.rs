@@ -34,6 +34,19 @@ pub trait KarakeepApi: Send + Sync {
 
 #[async_trait]
 pub trait Repository: Send + Sync {
+    /// Body lookup for deliberate activation. List queries return summaries.
+    async fn cached_entry(
+        &self,
+        account_id: i64,
+        entry_id: i64,
+    ) -> Result<Option<Entry>, BrookletError> {
+        Ok(self
+            .unread_entries(account_id)
+            .await?
+            .into_iter()
+            .find(|entry| entry.id == entry_id))
+    }
+
     async fn account(&self) -> Result<Option<Account>, BrookletError>;
     async fn save_account(&self, account: &Account) -> Result<(), BrookletError>;
     async fn delete_account(&self, account_id: i64) -> Result<(), BrookletError>;

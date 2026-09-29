@@ -1,6 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 use async_trait::async_trait;
@@ -115,9 +115,15 @@ const MIGRATIONS: &[&str] = &[
         CREATE INDEX entries_changed ON entries(account_id, changed_at_ms DESC);
         CREATE INDEX entries_saved ON entries(account_id, starred, published_at_ms DESC);
     "#,
+    "ALTER TABLE entries ADD COLUMN content_revision INTEGER NOT NULL DEFAULT 0; CREATE INDEX entries_delivery ON karakeep_deliveries(account_id, entry_id); CREATE INDEX entries_order ON entries(account_id, published_at_ms DESC, id DESC);",
 ];
 
 pub struct SqliteRepository {
+    store: Arc<SqliteStore>,
+    access: Arc<tokio::sync::Semaphore>,
+}
+
+struct SqliteStore {
     connection: Mutex<Connection>,
     path: PathBuf,
 }
@@ -143,13 +149,37 @@ impl SqliteRepository {
         }
         migrate(&mut connection)?;
         Ok(Self {
-            connection: Mutex::new(connection),
-            path,
+            store: Arc::new(SqliteStore {
+                connection: Mutex::new(connection),
+                path,
+            }),
+            access: Arc::new(tokio::sync::Semaphore::new(1)),
         })
     }
 
     pub fn path(&self) -> &Path {
-        &self.path
+        &self.store.path
+    }
+
+    async fn run<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&SqliteStore) -> Result<T, BrookletError> + Send + 'static,
+    ) -> Result<T, BrookletError> {
+        // Acquire before spawning: only one blocking task can use this database,
+        // rather than occupying the pool with threads waiting on its mutex.
+        let permit = self
+            .access
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("database remains open");
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            operation(&store)
+        })
+        .await
+        .map_err(|error| BrookletError::Storage(std::io::Error::other(error)))?
     }
 }
 
@@ -166,9 +196,20 @@ fn migrate(connection: &mut Connection) -> Result<(), rusqlite::Error> {
 
 const ENTRY_SELECT: &str = r#"SELECT e.id, e.account_id, e.feed_id, e.feed_title,
     e.category_title, e.title, e.url, e.author, e.published_at_ms, e.html,
-    e.read, e.starred, e.reading_minutes, k.state, k.last_error
+    e.read, e.starred, e.reading_minutes, k.state, k.last_error, e.content_revision
     FROM entries e
     LEFT JOIN karakeep_deliveries k ON k.account_id=e.account_id AND k.entry_id=e.id"#;
+
+fn summary_select() -> String {
+    ENTRY_SELECT.replace("e.html,", "'' AS html,")
+}
+
+fn content_revision(html: &str) -> i64 {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    html.hash(&mut hash);
+    (hash.finish() & i64::MAX as u64) as i64
+}
 
 fn read_entry(row: &rusqlite::Row<'_>) -> Result<Entry, rusqlite::Error> {
     let state: Option<String> = row.get(13)?;
@@ -183,6 +224,7 @@ fn read_entry(row: &rusqlite::Row<'_>) -> Result<Entry, rusqlite::Error> {
         author: row.get(7)?,
         published_at_ms: row.get(8)?,
         html: row.get(9)?,
+        content_revision: row.get(15)?,
         read: row.get(10)?,
         starred: row.get(11)?,
         reading_minutes: row.get(12)?,
@@ -195,9 +237,20 @@ fn read_entry(row: &rusqlite::Row<'_>) -> Result<Entry, rusqlite::Error> {
     })
 }
 
-#[async_trait]
-impl Repository for SqliteRepository {
-    async fn account(&self) -> Result<Option<Account>, BrookletError> {
+impl SqliteStore {
+    fn cached_entry(&self, account_id: i64, entry_id: i64) -> Result<Option<Entry>, BrookletError> {
+        let connection = self.connection.lock().expect("SQLite mutex poisoned");
+        connection
+            .query_row(
+                &format!("{ENTRY_SELECT} WHERE e.account_id=?1 AND e.id=?2"),
+                params![account_id, entry_id],
+                read_entry,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn account(&self) -> Result<Option<Account>, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         connection
             .query_row(
@@ -216,7 +269,7 @@ impl Repository for SqliteRepository {
             .map_err(Into::into)
     }
 
-    async fn save_account(&self, account: &Account) -> Result<(), BrookletError> {
+    fn save_account(&self, account: &Account) -> Result<(), BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         connection.execute(
             r#"INSERT INTO accounts (id, server_url, username, server_version, created_at_ms)
@@ -235,7 +288,7 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn delete_account(&self, account_id: i64) -> Result<(), BrookletError> {
+    fn delete_account(&self, account_id: i64) -> Result<(), BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         connection.pragma_update(None, "secure_delete", "ON")?;
         connection.execute("DELETE FROM accounts WHERE id = ?1", [account_id])?;
@@ -247,7 +300,7 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn replace_unread_snapshot(
+    fn replace_unread_snapshot(
         &self,
         account_id: i64,
         entries: &[Entry],
@@ -269,8 +322,8 @@ impl Repository for SqliteRepository {
             let mut statement = transaction.prepare(
                 r#"INSERT INTO entries (
                        account_id, id, feed_id, feed_title, category_title, title, url,
-                       author, published_at_ms, html, read, starred, reading_minutes
-                   ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                       author, published_at_ms, html, read, starred, reading_minutes, content_revision
+                   ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                    ON CONFLICT(account_id, id) DO UPDATE SET
                        feed_id = excluded.feed_id,
                        feed_title = excluded.feed_title,
@@ -279,7 +332,7 @@ impl Repository for SqliteRepository {
                        url = excluded.url,
                        author = excluded.author,
                        published_at_ms = excluded.published_at_ms,
-                       html = excluded.html,
+                       html = excluded.html, content_revision = excluded.content_revision,
                        read = CASE WHEN EXISTS (
                            SELECT 1 FROM pending_mutations AS pending
                            WHERE pending.account_id = entries.account_id
@@ -309,6 +362,7 @@ impl Repository for SqliteRepository {
                     entry.read,
                     entry.starred,
                     entry.reading_minutes,
+                    content_revision(&entry.html),
                 ])?;
             }
         }
@@ -316,10 +370,11 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn unread_entries(&self, account_id: i64) -> Result<Vec<Entry>, BrookletError> {
+    fn unread_entries(&self, account_id: i64) -> Result<Vec<Entry>, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         let sql = format!(
-            "{ENTRY_SELECT} WHERE e.account_id=?1 AND e.read=0 ORDER BY e.published_at_ms DESC, e.id DESC"
+            "{} WHERE e.account_id=?1 AND e.read=0 ORDER BY e.published_at_ms DESC, e.id DESC",
+            summary_select()
         );
         let mut statement = connection.prepare(&sql)?;
         statement
@@ -328,11 +383,7 @@ impl Repository for SqliteRepository {
             .map_err(Into::into)
     }
 
-    async fn entries_for_view(
-        &self,
-        account_id: i64,
-        view: &str,
-    ) -> Result<Vec<Entry>, BrookletError> {
+    fn entries_for_view(&self, account_id: i64, view: &str) -> Result<Vec<Entry>, BrookletError> {
         let (filter, feed_id) = match view {
             "inbox" | "unread" => ("e.read=0", None),
             "saved" => ("e.starred=1", None),
@@ -347,7 +398,8 @@ impl Repository for SqliteRepository {
             },
         };
         let sql = format!(
-            "{ENTRY_SELECT} WHERE e.account_id=?1 AND {filter} ORDER BY e.published_at_ms DESC,e.id DESC"
+            "{} WHERE e.account_id=?1 AND {filter} ORDER BY e.published_at_ms DESC,e.id DESC",
+            summary_select()
         );
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         let mut statement = connection.prepare(&sql)?;
@@ -363,7 +415,7 @@ impl Repository for SqliteRepository {
         Ok(entries)
     }
 
-    async fn search_entries(
+    fn search_entries(
         &self,
         account_id: i64,
         query: &str,
@@ -380,7 +432,8 @@ impl Repository for SqliteRepository {
                 .replace('_', "\\_")
         );
         let sql = format!(
-            "{ENTRY_SELECT} LEFT JOIN feeds f ON f.account_id=e.account_id AND f.id=e.feed_id WHERE e.account_id=?1 AND (?2='' OR e.title LIKE ?3 ESCAPE '\\' OR e.feed_title LIKE ?3 ESCAPE '\\' OR COALESCE(e.author,'') LIKE ?3 ESCAPE '\\' OR e.html LIKE ?3 ESCAPE '\\') AND (?4 IS NULL OR e.feed_id=?4) AND (?5 IS NULL OR f.category_id=?5) AND (?6 IS NULL OR e.read=?6) ORDER BY e.published_at_ms DESC LIMIT 500"
+            "{} LEFT JOIN feeds f ON f.account_id=e.account_id AND f.id=e.feed_id WHERE e.account_id=?1 AND (?2='' OR e.title LIKE ?3 ESCAPE '\\' OR e.feed_title LIKE ?3 ESCAPE '\\' OR COALESCE(e.author,'') LIKE ?3 ESCAPE '\\' OR e.html LIKE ?3 ESCAPE '\\') AND (?4 IS NULL OR e.feed_id=?4) AND (?5 IS NULL OR f.category_id=?5) AND (?6 IS NULL OR e.read=?6) ORDER BY e.published_at_ms DESC LIMIT 500",
+            summary_select()
         );
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         let mut statement = connection.prepare(&sql)?;
@@ -400,7 +453,7 @@ impl Repository for SqliteRepository {
             .map_err(Into::into)
     }
 
-    async fn set_read_local(
+    fn set_read_local(
         &self,
         account_id: i64,
         entry_id: EntryId,
@@ -427,10 +480,7 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn pending_mutations(
-        &self,
-        account_id: i64,
-    ) -> Result<Vec<PendingMutation>, BrookletError> {
+    fn pending_mutations(&self, account_id: i64) -> Result<Vec<PendingMutation>, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         let mut statement = connection.prepare(
             r#"SELECT account_id, entry_id, field, desired
@@ -456,7 +506,7 @@ impl Repository for SqliteRepository {
             .map_err(Into::into)
     }
 
-    async fn acknowledge_mutation(&self, mutation: &PendingMutation) -> Result<(), BrookletError> {
+    fn acknowledge_mutation(&self, mutation: &PendingMutation) -> Result<(), BrookletError> {
         let field = match mutation.field {
             MutationField::Read => "read",
             MutationField::Starred => "starred",
@@ -475,7 +525,7 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn set_starred_local(
+    fn set_starred_local(
         &self,
         account_id: i64,
         entry_id: EntryId,
@@ -494,7 +544,7 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn set_read_many_local(
+    fn set_read_many_local(
         &self,
         account_id: i64,
         entry_ids: &[EntryId],
@@ -515,7 +565,7 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn categories_cached(&self, account_id: i64) -> Result<Vec<Category>, BrookletError> {
+    fn categories_cached(&self, account_id: i64) -> Result<Vec<Category>, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         let mut statement = connection
             .prepare("SELECT id,title FROM categories WHERE account_id=?1 ORDER BY title")?;
@@ -530,7 +580,7 @@ impl Repository for SqliteRepository {
             .map_err(Into::into)
     }
 
-    async fn feeds_cached(
+    fn feeds_cached(
         &self,
         account_id: i64,
         category_id: Option<i64>,
@@ -551,7 +601,7 @@ impl Repository for SqliteRepository {
             .map_err(Into::into)
     }
 
-    async fn merge_metadata(
+    fn merge_metadata(
         &self,
         account_id: i64,
         categories: &[Category],
@@ -583,7 +633,7 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn sync_cursor(&self, account_id: i64) -> Result<Option<i64>, BrookletError> {
+    fn sync_cursor(&self, account_id: i64) -> Result<Option<i64>, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         connection
             .query_row(
@@ -595,7 +645,7 @@ impl Repository for SqliteRepository {
             .map_err(Into::into)
     }
 
-    async fn merge_changed_page(
+    fn merge_changed_page(
         &self,
         account_id: i64,
         entries: &[Entry],
@@ -608,7 +658,7 @@ impl Repository for SqliteRepository {
             for id in removed_ids {
                 remove.execute(params![account_id, id])?;
             }
-            let mut merge = transaction.prepare("INSERT INTO entries(account_id,id,feed_id,feed_title,category_title,title,url,author,published_at_ms,html,read,starred,reading_minutes) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(account_id,id) DO UPDATE SET feed_id=excluded.feed_id,feed_title=excluded.feed_title,category_title=excluded.category_title,title=excluded.title,url=excluded.url,author=excluded.author,published_at_ms=excluded.published_at_ms,html=excluded.html,read=CASE WHEN EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id AND m.field='read') THEN entries.read ELSE excluded.read END,starred=CASE WHEN EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id AND m.field='starred') THEN entries.starred ELSE excluded.starred END,reading_minutes=excluded.reading_minutes")?;
+            let mut merge = transaction.prepare("INSERT INTO entries(account_id,id,feed_id,feed_title,category_title,title,url,author,published_at_ms,html,read,starred,reading_minutes,content_revision) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) ON CONFLICT(account_id,id) DO UPDATE SET feed_id=excluded.feed_id,feed_title=excluded.feed_title,category_title=excluded.category_title,title=excluded.title,url=excluded.url,author=excluded.author,published_at_ms=excluded.published_at_ms,html=excluded.html,content_revision=excluded.content_revision,read=CASE WHEN EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id AND m.field='read') THEN entries.read ELSE excluded.read END,starred=CASE WHEN EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id AND m.field='starred') THEN entries.starred ELSE excluded.starred END,reading_minutes=excluded.reading_minutes")?;
             for entry in entries {
                 merge.execute(params![
                     entry.account_id,
@@ -623,7 +673,8 @@ impl Repository for SqliteRepository {
                     entry.html,
                     entry.read,
                     entry.starred,
-                    entry.reading_minutes
+                    entry.reading_minutes,
+                    content_revision(&entry.html)
                 ])?;
             }
         }
@@ -631,7 +682,7 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn complete_sync(
+    fn complete_sync(
         &self,
         account_id: i64,
         cursor: i64,
@@ -642,7 +693,7 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn record_sync_error(
+    fn record_sync_error(
         &self,
         account_id: i64,
         error: &str,
@@ -653,7 +704,7 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn sync_status(&self, account_id: i64) -> Result<SyncStatus, BrookletError> {
+    fn sync_status(&self, account_id: i64) -> Result<SyncStatus, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         let (last_successful_sync_at_ms, error) = connection
             .query_row(
@@ -672,10 +723,7 @@ impl Repository for SqliteRepository {
         })
     }
 
-    async fn reader_position(
-        &self,
-        entry_id: EntryId,
-    ) -> Result<Option<ReaderPosition>, BrookletError> {
+    fn reader_position(&self, entry_id: EntryId) -> Result<Option<ReaderPosition>, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         connection
             .query_row(
@@ -693,7 +741,7 @@ impl Repository for SqliteRepository {
             .map_err(Into::into)
     }
 
-    async fn save_reader_position(
+    fn save_reader_position(
         &self,
         account_id: i64,
         position: &ReaderPosition,
@@ -703,7 +751,7 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn queue_karakeep(&self, delivery: &KarakeepDelivery) -> Result<(), BrookletError> {
+    fn queue_karakeep(&self, delivery: &KarakeepDelivery) -> Result<(), BrookletError> {
         let route = if delivery.route == KarakeepRoute::Direct {
             "direct"
         } else {
@@ -714,10 +762,7 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn pending_karakeep(
-        &self,
-        account_id: i64,
-    ) -> Result<Vec<KarakeepDelivery>, BrookletError> {
+    fn pending_karakeep(&self, account_id: i64) -> Result<Vec<KarakeepDelivery>, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         let mut statement = connection.prepare("SELECT id,account_id,entry_id,canonical_url,title,route,state,last_error FROM karakeep_deliveries WHERE account_id=?1 AND state='queued' ORDER BY id")?;
         statement
@@ -747,7 +792,7 @@ impl Repository for SqliteRepository {
             .map_err(Into::into)
     }
 
-    async fn finish_karakeep(
+    fn finish_karakeep(
         &self,
         delivery_id: i64,
         error: Option<&str>,
@@ -758,7 +803,7 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn defer_karakeep(&self, delivery_id: i64, error: &str) -> Result<(), BrookletError> {
+    fn defer_karakeep(&self, delivery_id: i64, error: &str) -> Result<(), BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         connection.execute(
             "UPDATE karakeep_deliveries SET state='queued',last_error=?2 WHERE id=?1",
@@ -767,10 +812,7 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn karakeep_config(
-        &self,
-        account_id: i64,
-    ) -> Result<Option<KarakeepConfig>, BrookletError> {
+    fn karakeep_config(&self, account_id: i64) -> Result<Option<KarakeepConfig>, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         connection
             .query_row(
@@ -792,7 +834,7 @@ impl Repository for SqliteRepository {
             .map_err(Into::into)
     }
 
-    async fn save_karakeep_config(
+    fn save_karakeep_config(
         &self,
         account_id: i64,
         config: &KarakeepConfig,
@@ -802,7 +844,7 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn storage_policy(&self, account_id: i64) -> Result<StoragePolicy, BrookletError> {
+    fn storage_policy(&self, account_id: i64) -> Result<StoragePolicy, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         Ok(connection
             .query_row(
@@ -819,7 +861,7 @@ impl Repository for SqliteRepository {
             .unwrap_or_default())
     }
 
-    async fn save_storage_policy(
+    fn save_storage_policy(
         &self,
         account_id: i64,
         policy: &StoragePolicy,
@@ -829,8 +871,8 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn apply_retention(&self, account_id: i64, now_ms: i64) -> Result<usize, BrookletError> {
-        let policy = self.storage_policy(account_id).await?;
+    fn apply_retention(&self, account_id: i64, now_ms: i64) -> Result<usize, BrookletError> {
+        let policy = self.storage_policy(account_id)?;
         let mut connection = self.connection.lock().expect("SQLite mutex poisoned");
         let transaction = connection.transaction()?;
         transaction.execute("DELETE FROM karakeep_deliveries WHERE account_id=?1 AND state='saved' AND completed_at_ms<?2",params![account_id,now_ms-30*86_400_000])?;
@@ -857,9 +899,326 @@ impl Repository for SqliteRepository {
     }
 }
 
+#[async_trait]
+impl Repository for SqliteRepository {
+    async fn cached_entry(
+        &self,
+        account_id: i64,
+        entry_id: i64,
+    ) -> Result<Option<Entry>, BrookletError> {
+        self.run(move |store| store.cached_entry(account_id, entry_id))
+            .await
+    }
+
+    async fn account(&self) -> Result<Option<Account>, BrookletError> {
+        self.run(move |store| store.account()).await
+    }
+
+    async fn save_account(&self, account: &Account) -> Result<(), BrookletError> {
+        let account = account.clone();
+        self.run(move |store| store.save_account(&account)).await
+    }
+
+    async fn delete_account(&self, account_id: i64) -> Result<(), BrookletError> {
+        self.run(move |store| store.delete_account(account_id))
+            .await
+    }
+
+    async fn replace_unread_snapshot(
+        &self,
+        account_id: i64,
+        entries: &[Entry],
+    ) -> Result<(), BrookletError> {
+        let entries = entries.to_vec();
+        self.run(move |store| store.replace_unread_snapshot(account_id, &entries))
+            .await
+    }
+
+    async fn unread_entries(&self, account_id: i64) -> Result<Vec<Entry>, BrookletError> {
+        self.run(move |store| store.unread_entries(account_id))
+            .await
+    }
+
+    async fn entries_for_view(
+        &self,
+        account_id: i64,
+        view: &str,
+    ) -> Result<Vec<Entry>, BrookletError> {
+        let view = view.to_owned();
+        self.run(move |store| store.entries_for_view(account_id, &view))
+            .await
+    }
+
+    async fn search_entries(
+        &self,
+        account_id: i64,
+        query: &str,
+        feed_id: Option<i64>,
+        category_id: Option<i64>,
+        read: Option<bool>,
+    ) -> Result<Vec<Entry>, BrookletError> {
+        let query = query.to_owned();
+        self.run(move |store| store.search_entries(account_id, &query, feed_id, category_id, read))
+            .await
+    }
+
+    async fn set_read_local(
+        &self,
+        account_id: i64,
+        entry_id: EntryId,
+        read: bool,
+    ) -> Result<(), BrookletError> {
+        self.run(move |store| store.set_read_local(account_id, entry_id, read))
+            .await
+    }
+
+    async fn pending_mutations(
+        &self,
+        account_id: i64,
+    ) -> Result<Vec<PendingMutation>, BrookletError> {
+        self.run(move |store| store.pending_mutations(account_id))
+            .await
+    }
+
+    async fn acknowledge_mutation(&self, mutation: &PendingMutation) -> Result<(), BrookletError> {
+        let mutation = mutation.clone();
+        self.run(move |store| store.acknowledge_mutation(&mutation))
+            .await
+    }
+
+    async fn set_starred_local(
+        &self,
+        account_id: i64,
+        entry_id: EntryId,
+        starred: bool,
+    ) -> Result<(), BrookletError> {
+        self.run(move |store| store.set_starred_local(account_id, entry_id, starred))
+            .await
+    }
+
+    async fn set_read_many_local(
+        &self,
+        account_id: i64,
+        entry_ids: &[EntryId],
+        read: bool,
+    ) -> Result<(), BrookletError> {
+        let entry_ids = entry_ids.to_vec();
+        self.run(move |store| store.set_read_many_local(account_id, &entry_ids, read))
+            .await
+    }
+
+    async fn categories_cached(&self, account_id: i64) -> Result<Vec<Category>, BrookletError> {
+        self.run(move |store| store.categories_cached(account_id))
+            .await
+    }
+
+    async fn feeds_cached(
+        &self,
+        account_id: i64,
+        category_id: Option<i64>,
+    ) -> Result<Vec<Feed>, BrookletError> {
+        self.run(move |store| store.feeds_cached(account_id, category_id))
+            .await
+    }
+
+    async fn merge_metadata(
+        &self,
+        account_id: i64,
+        categories: &[Category],
+        feeds: &[Feed],
+    ) -> Result<(), BrookletError> {
+        let categories = categories.to_vec();
+        let feeds = feeds.to_vec();
+        self.run(move |store| store.merge_metadata(account_id, &categories, &feeds))
+            .await
+    }
+
+    async fn sync_cursor(&self, account_id: i64) -> Result<Option<i64>, BrookletError> {
+        self.run(move |store| store.sync_cursor(account_id)).await
+    }
+
+    async fn merge_changed_page(
+        &self,
+        account_id: i64,
+        entries: &[Entry],
+        removed_ids: &[EntryId],
+    ) -> Result<(), BrookletError> {
+        let entries = entries.to_vec();
+        let removed_ids = removed_ids.to_vec();
+        self.run(move |store| store.merge_changed_page(account_id, &entries, &removed_ids))
+            .await
+    }
+
+    async fn complete_sync(
+        &self,
+        account_id: i64,
+        cursor: i64,
+        now_ms: i64,
+    ) -> Result<(), BrookletError> {
+        self.run(move |store| store.complete_sync(account_id, cursor, now_ms))
+            .await
+    }
+
+    async fn record_sync_error(
+        &self,
+        account_id: i64,
+        error: &str,
+        _now_ms: i64,
+    ) -> Result<(), BrookletError> {
+        let error = error.to_owned();
+        self.run(move |store| store.record_sync_error(account_id, &error, _now_ms))
+            .await
+    }
+
+    async fn sync_status(&self, account_id: i64) -> Result<SyncStatus, BrookletError> {
+        self.run(move |store| store.sync_status(account_id)).await
+    }
+
+    async fn reader_position(
+        &self,
+        entry_id: EntryId,
+    ) -> Result<Option<ReaderPosition>, BrookletError> {
+        self.run(move |store| store.reader_position(entry_id)).await
+    }
+
+    async fn save_reader_position(
+        &self,
+        account_id: i64,
+        position: &ReaderPosition,
+    ) -> Result<(), BrookletError> {
+        let position = position.clone();
+        self.run(move |store| store.save_reader_position(account_id, &position))
+            .await
+    }
+
+    async fn queue_karakeep(&self, delivery: &KarakeepDelivery) -> Result<(), BrookletError> {
+        let delivery = delivery.clone();
+        self.run(move |store| store.queue_karakeep(&delivery)).await
+    }
+
+    async fn pending_karakeep(
+        &self,
+        account_id: i64,
+    ) -> Result<Vec<KarakeepDelivery>, BrookletError> {
+        self.run(move |store| store.pending_karakeep(account_id))
+            .await
+    }
+
+    async fn finish_karakeep(
+        &self,
+        delivery_id: i64,
+        error: Option<&str>,
+        now_ms: i64,
+    ) -> Result<(), BrookletError> {
+        let error = error.map(str::to_owned);
+        self.run(move |store| store.finish_karakeep(delivery_id, error.as_deref(), now_ms))
+            .await
+    }
+
+    async fn defer_karakeep(&self, delivery_id: i64, error: &str) -> Result<(), BrookletError> {
+        let error = error.to_owned();
+        self.run(move |store| store.defer_karakeep(delivery_id, &error))
+            .await
+    }
+
+    async fn karakeep_config(
+        &self,
+        account_id: i64,
+    ) -> Result<Option<KarakeepConfig>, BrookletError> {
+        self.run(move |store| store.karakeep_config(account_id))
+            .await
+    }
+
+    async fn save_karakeep_config(
+        &self,
+        account_id: i64,
+        config: &KarakeepConfig,
+    ) -> Result<(), BrookletError> {
+        let config = config.clone();
+        self.run(move |store| store.save_karakeep_config(account_id, &config))
+            .await
+    }
+
+    async fn storage_policy(&self, account_id: i64) -> Result<StoragePolicy, BrookletError> {
+        self.run(move |store| store.storage_policy(account_id))
+            .await
+    }
+
+    async fn save_storage_policy(
+        &self,
+        account_id: i64,
+        policy: &StoragePolicy,
+    ) -> Result<(), BrookletError> {
+        let policy = policy.clone();
+        self.run(move |store| store.save_storage_policy(account_id, &policy))
+            .await
+    }
+
+    async fn apply_retention(&self, account_id: i64, now_ms: i64) -> Result<usize, BrookletError> {
+        self.run(move |store| store.apply_retention(account_id, now_ms))
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn summaries_omit_bodies_but_preserve_content_change_detection() {
+        let repository = repository_with_entry().await;
+        let before = repository.unread_entries(1).await.unwrap().remove(0);
+        assert!(before.html.is_empty());
+        let body = repository.cached_entry(1, 42).await.unwrap().unwrap();
+        assert_eq!(body.html, "<p>Story</p>");
+        assert!(repository.cached_entry(2, 42).await.unwrap().is_none());
+        let changed = Entry {
+            html: "<p>Changed body</p>".into(),
+            ..body
+        };
+        repository
+            .merge_changed_page(1, &[changed], &[])
+            .await
+            .unwrap();
+        let after = repository
+            .entries_for_view(1, "all")
+            .await
+            .unwrap()
+            .remove(0);
+        assert!(after.html.is_empty());
+        assert_ne!(before.content_revision, after.content_revision);
+        assert!(
+            repository
+                .search_entries(1, "Changed body", None, None, None)
+                .await
+                .unwrap()[0]
+                .html
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn database_work_does_not_block_the_async_executor() {
+        let repository = Arc::new(SqliteRepository::open_in_memory().unwrap());
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let work = tokio::spawn(async move {
+            repository
+                .run(move |_| {
+                    started.send(()).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        });
+        ready.await.unwrap();
+        // A synchronous operation on this single-thread executor would finish
+        // before it could deliver the notification and run this continuation.
+        assert!(!work.is_finished());
+        tokio::task::yield_now().await;
+        assert!(!work.is_finished());
+        work.await.unwrap();
+    }
 
     #[tokio::test]
     async fn migration_and_account_round_trip_exclude_credentials() {
@@ -873,7 +1232,7 @@ mod tests {
         repository.save_account(&account).await.unwrap();
         assert_eq!(repository.account().await.unwrap(), Some(account));
 
-        let connection = repository.connection.lock().unwrap();
+        let connection = repository.store.connection.lock().unwrap();
         let mut statement = connection.prepare("PRAGMA table_info(accounts)").unwrap();
         let columns = statement
             .query_map([], |row| row.get::<_, String>(1))
@@ -886,7 +1245,7 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, MIGRATIONS.len() as u32);
     }
 
     #[tokio::test]
@@ -912,6 +1271,7 @@ mod tests {
             author: None,
             published_at_ms: id,
             html: "<p>Story</p>".into(),
+            content_revision: 0,
             read: false,
             starred: false,
             reading_minutes: 2,
@@ -1254,6 +1614,7 @@ mod tests {
             author: None,
             published_at_ms: 42,
             html: "<p>Story</p>".into(),
+            content_revision: 0,
             read: false,
             starred: false,
             reading_minutes: 2,
@@ -1284,7 +1645,7 @@ mod tests {
     fn file_database_enables_foreign_keys_and_wal() {
         let directory = tempfile::tempdir().unwrap();
         let repository = SqliteRepository::open(directory.path().join("brooklet.db")).unwrap();
-        let connection = repository.connection.lock().unwrap();
+        let connection = repository.store.connection.lock().unwrap();
         let foreign_keys: u32 = connection
             .pragma_query_value(None, "foreign_keys", |row| row.get(0))
             .unwrap();
@@ -1311,7 +1672,7 @@ mod tests {
             .await
             .unwrap();
         {
-            let connection = repository.connection.lock().unwrap();
+            let connection = repository.store.connection.lock().unwrap();
             connection
                 .execute(
                     "INSERT INTO categories (account_id, id, title) VALUES (1, 7, 'News')",
@@ -1326,7 +1687,7 @@ mod tests {
         repository.delete_account(1).await.unwrap();
 
         assert!(repository.account().await.unwrap().is_none());
-        let connection = repository.connection.lock().unwrap();
+        let connection = repository.store.connection.lock().unwrap();
         for table in [
             "entries",
             "pending_mutations",

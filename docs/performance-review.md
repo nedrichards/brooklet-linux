@@ -1,4 +1,4 @@
-# Performance and efficiency review — 29 September 2026
+# Performance and efficiency review — 29–30 September 2026
 
 The app is not yet demonstrated to sustain 60 fps. At 60 Hz, a frame has
 16.67 ms for application work, layout, and rendering together. This review
@@ -22,7 +22,39 @@ microbenchmarks from end-to-end frame and power measurements.
   one save timer remains pending instead of a timer for every scroll event.
 
 Existing reader, keyboard, Undo, and focus work was present before this pass
-and is preserved. No commits or publication were performed.
+and is preserved. This initial checkpoint was published as `0f6a1ac` and
+`9b23da9`. Private corpus exports and local review output were not published.
+
+## Follow-up implementation — 30 September
+
+- List queries now return metadata and a body revision rather than HTML. The
+  account-scoped body is fetched only when activated. Library queries run for
+  mapped views, with generation checks rejecting superseded responses.
+- Parsing runs behind one backend permit. Switching articles aborts queued
+  requests and rejects stale results. GTK construction runs in frame callbacks,
+  with at most eight tasks or approximately 4 ms per callback; table cells are
+  separate tasks. Position restoration waits for construction and layout.
+- Image work starts within one viewport of the visible region, prioritizing
+  the closest images. There are at most two fetch/decode jobs, with cancellation
+  when they leave that region or the reader closes. Decode requests use display
+  width, at most 2 Mi pixels and 4,096 pixels per side; sources above 32 Mi pixels
+  are rejected. Returned frame dimensions and buffer lengths are checked too.
+  Resident decoded payloads are capped at 64 MiB, evicting offscreen textures.
+  Oversized or unavailable images retain their external-source placeholders.
+- Reader/list callbacks capture weak widgets. Image adjustment callbacks are
+  disconnected on teardown, and dialog callbacks are scoped to closure or
+  destruction. Scroll-position geometry is coalesced to a 250 ms pause rather
+  than traversed every frame. Switching and closing still capture the position.
+- Repository operations acquire one asynchronous permit before dispatching
+  synchronous SQLite work to a blocking thread. Superseded searches cancel
+  queued work, while a transaction already running completes normally.
+
+These budgets reduce avoidable frame work; they do not guarantee 60 fps. A
+single large text block, GTK layout, or shaping can still exceed a frame budget.
+The decoded payload cap is not a process-tree RSS or GPU-memory ceiling;
+decoder helpers can allocate transiently. Database opening and migrations are
+still synchronous at startup. Optimized frame, memory, and power profiling
+remains necessary.
 
 ## Measurements
 
@@ -65,7 +97,10 @@ exceeded 16.67 ms. These numbers exclude GTK widget creation, text shaping,
 layout, image decoding, and drawing, so they cannot demonstrate smooth opening
 or scrolling. No live account mutations or network fetches were used.
 
-## Remaining findings, in priority order
+## Findings at the initial checkpoint
+
+The following findings motivated the follow-up above. They describe the
+29 September code, rather than the current implementation.
 
 1. **Article opening can stall the UI.** `ui::reader::show` parses HTML and
    creates all block widgets synchronously. Large articles and tables can
@@ -133,6 +168,17 @@ changes, removal of a selected item, and copy-on-write isolation. Smoke testing
 exercises the existing image/scroll-anchor checks, but is not interactive
 pointer/touch verification. The test sandbox emitted settings/session-bus and
 GPU initialization warnings; this is not proof of hardware rendering.
+
+The follow-up passes 69 tests (57 core, 10 GUI, 2 contracts), all-targets GUI
+Clippy, compilation, and the expanded GTK smoke test. New checks cover body-free
+summaries, account isolation, body revision changes, executor responsiveness,
+decode dimensions, rapid article replacement, construction over multiple
+frames, saved-position restoration, and widget release after teardown. The
+image smoke test decodes generated PNGs from an isolated temporary cache,
+checks that distant images remain unloaded, and releases the session. No live
+service or private article material is used. Glycin disables its additional
+sandbox in the Flatpak development environment; this does not validate decoder
+isolation in the installed app. Hosted CI passed for the published checkpoint.
 
 With the SDK environment and vendored Cargo configuration set up as described
 in the development workflow:

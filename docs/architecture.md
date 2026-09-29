@@ -130,13 +130,21 @@ the cursor advances only after all pages merge successfully. A removed remote
 entry remains local while it has pending mutation or unfinished Karakeep work.
 
 Original article HTML is retained. Reader blocks are parsed when an article is
-opened. Parsed output is never the source of truth, so parser fixes apply to
-already cached articles. Inline spans are rendered through an escaped Pango
+opened on a bounded backend task. List queries return body-free summaries with
+a content revision; activation fetches the account-scoped body. Hidden Library
+views load when mapped. Native document construction is spread across frame
+callbacks, including separate table-cell tasks. Parsed output is never the
+source of truth, so parser fixes apply to already cached articles. Inline spans
+are rendered through an escaped Pango
 allow-list. Reader position is stored as a block index plus offset.
 
 The schema advances through numbered SQL migrations embedded in the executable.
 Migration and reopen tests exercise in-memory and file-backed databases.
 Connections enable foreign keys and WAL.
+Repository operations acquire a single asynchronous permit before executing
+synchronous SQL on a blocking thread, preserving transaction boundaries without
+occupying the asynchronous backend workers. Opening and migrations happen at
+startup.
 
 ## Networking and trust zones
 
@@ -146,11 +154,16 @@ redirects. Tokens are added only at request construction and are never included
 in errors or tracing fields.
 
 Article images form a separate untrusted zone with a separate client and DNS
-resolver. It accepts only HTTPS, follows no redirects, has no persistent cache,
+resolver. It accepts only HTTPS, follows no redirects,
 disables ambient proxy use, caps responses at 20 MiB, and gives the connector
 only addresses that have already passed public-address policy. This avoids a
 check-then-resolve DNS rebinding gap. Glycin decodes bounded response bytes
-without creating a persistent image file; alt text remains on failure.
+without creating a persistent image file; alt text remains on failure. Compressed
+bytes use a disposable bounded SQLite cache. Reader sessions fetch and decode
+near the viewport, bound concurrent jobs and decoded payloads, cancel obsolete
+work, and evict offscreen textures. See the image policy in `reader-testing.md`
+for limits. Signal handlers use weak widgets or disconnect when their owner
+closes.
 
 ## Secrets
 
