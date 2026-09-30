@@ -17,6 +17,11 @@ Inbox, Saved, Library, native reading, local search, and optional Karakeep
 delivery. The repository and sync contracts have automated coverage; the next
 release gate is live-server use and visual/accessibility refinement.
 
+While the window is active, Brooklet automatically syncs about every five
+minutes and catches up after a long suspend or time away. Automatic sync pauses
+on connections reported as metered or unavailable, and slows down after failures.
+You can still refresh manually at any time.
+
 The canonical build is the Flatpak manifest at
 `flatpak/com.nedrichards.brooklet.Devel.json`. It targets GNOME 51 and is placed
 where GNOME Builder discovers it from a fresh checkout.

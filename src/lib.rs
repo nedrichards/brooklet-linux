@@ -1,4 +1,5 @@
 pub mod api;
+pub mod auto_refresh;
 pub mod config;
 #[cfg(feature = "gui")]
 pub mod controller;

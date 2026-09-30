@@ -65,6 +65,23 @@ retention after a successful pull. On startup cached rows are presented before
 network work, so loss of connectivity does not blank Inbox, Saved, or Library.
 The initial unread-snapshot repository method remains for migration-era tests.
 
+Automatic sync uses the same incremental path, without requesting a server-side
+feed refresh or prefetching article images. While the main window is active,
+cached content becomes eligible for refresh five minutes after the last completed
+sync. Startup reuses the persisted last-success time. A coalesced, sixty-second
+GLib timer checks wall-clock age so a long suspend counts as elapsed time, even
+if window activation never changes. Activation and network-property changes
+also check immediately. Inactive windows have no refresh timer; returning to
+a stale window triggers one sync, without replaying missed intervals.
+
+Automatic requests wait while GIO reports an unavailable or metered network,
+or a sync is already running. This allows private Miniflux servers on networks
+without public Internet connectivity. Failures retry after five, ten, twenty,
+then at most thirty minutes; automatic failures remain in sync status without
+repeated error toasts. Manual refresh bypasses these gates and a successful sync
+resets backoff. Timers and network handlers are removed when the window closes.
+The network gate depends on the desktop reporting its metered status.
+
 The Inbox list uses a `GtkListView` with ordinary GTK box/label children; rows
 do not use `AdwActionRow`, whose supported parent is `GtkListBox`. Selection is
 held by `GtkSingleSelection` and has no data-layer side effect. The separate

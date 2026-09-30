@@ -28,6 +28,7 @@ cargo_target = custom_target(
     'build.rs',
     'src/main.rs',
     'src/application.rs',
+    'src/auto_refresh.rs',
     'src/config.rs',
     'src/controller.rs',
     'src/error.rs',

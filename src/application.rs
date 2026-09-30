@@ -10,6 +10,7 @@ use adw::gio;
 use adw::prelude::*;
 
 use brooklet::{
+    auto_refresh::AutoRefreshPolicy,
     config,
     controller::AppController,
     error::BrookletError,
@@ -42,6 +43,7 @@ struct InboxUi {
     rebuilding: Rc<Cell<bool>>,
     emptied_place: Rc<RefCell<Option<ListPlace>>>,
     undo_toast: Rc<RefCell<Option<adw::Toast>>>,
+    refresh_policy: Rc<RefCell<AutoRefreshPolicy>>,
 }
 
 #[derive(Clone)]
@@ -65,6 +67,7 @@ struct WeakInboxUi {
     rebuilding: Rc<Cell<bool>>,
     emptied_place: Rc<RefCell<Option<ListPlace>>>,
     undo_toast: Rc<RefCell<Option<adw::Toast>>>,
+    refresh_policy: Rc<RefCell<AutoRefreshPolicy>>,
 }
 impl InboxUi {
     fn downgrade(&self) -> WeakInboxUi {
@@ -85,6 +88,7 @@ impl InboxUi {
             rebuilding: self.rebuilding.clone(),
             emptied_place: self.emptied_place.clone(),
             undo_toast: self.undo_toast.clone(),
+            refresh_policy: self.refresh_policy.clone(),
         }
     }
 }
@@ -107,6 +111,7 @@ impl WeakInboxUi {
             rebuilding: self.rebuilding.clone(),
             emptied_place: self.emptied_place.clone(),
             undo_toast: self.undo_toast.clone(),
+            refresh_policy: self.refresh_policy.clone(),
         })
     }
 }
@@ -510,6 +515,7 @@ impl BrookletApplication {
                 rebuilding: Rc::new(Cell::new(false)),
                 emptied_place: Rc::new(RefCell::new(None)),
                 undo_toast: Rc::new(RefCell::new(None)),
+                refresh_policy: Rc::new(RefCell::new(AutoRefreshPolicy::default())),
             };
             inbox_ui.model.selection.connect_selected_item_notify({
                 let weak = inbox_ui.downgrade();
@@ -1097,10 +1103,19 @@ impl BrookletApplication {
                         toast_overlay.clone(),
                         action.clone(),
                         views.clone(),
+                        false,
                     );
                 }
             });
             application.add_action(&sync_action);
+            let auto_refresh = AutoRefreshUi::install(
+                &window,
+                controller.clone(),
+                inbox_ui.clone(),
+                toast_overlay.clone(),
+                sync_action.clone(),
+                other_views.clone(),
+            );
 
             let setup_action = gio::SimpleAction::new("setup", None);
             setup_action.connect_activate({
@@ -1125,6 +1140,7 @@ impl BrookletApplication {
                         let sync_action = sync_action.clone();
                         let views = views.clone();
                         move |_account| {
+                            inbox_ui.refresh_policy.borrow_mut().account_ready = true;
                             show_account(&inbox_status, &setup_button);
                             toast_overlay.add_toast(adw::Toast::new("Miniflux account connected"));
                             begin_sync(
@@ -1133,6 +1149,7 @@ impl BrookletApplication {
                                 toast_overlay.clone(),
                                 sync_action.clone(),
                                 views.clone(),
+                                false,
                             );
                         }
                     });
@@ -1148,8 +1165,8 @@ impl BrookletApplication {
                 let controller = controller.clone();
                 let inbox_ui = inbox_ui.clone();
                 let toast_overlay = toast_overlay.clone();
-                let sync_action = sync_action.clone();
                 let views = other_views.clone();
+                let auto_refresh = auto_refresh.clone();
                 move |result| match result {
                     Ok(Some(_account)) => {
                         show_account(&inbox_status, &setup_button);
@@ -1157,7 +1174,6 @@ impl BrookletApplication {
                             let controller = controller.clone();
                             let inbox_ui = inbox_ui.clone();
                             let toast_overlay = toast_overlay.clone();
-                            let sync_action = sync_action.clone();
                             let views = views.clone();
                             move |result| {
                                 match result {
@@ -1170,7 +1186,17 @@ impl BrookletApplication {
                                     views.clone(),
                                     toast_overlay.clone(),
                                 );
-                                begin_sync(controller, inbox_ui, toast_overlay, sync_action, views);
+                                controller.sync_status(move |result| {
+                                    let mut policy = inbox_ui.refresh_policy.borrow_mut();
+                                    if let Ok(status) = result {
+                                        policy.restore_last_success(
+                                            status.last_successful_sync_at_ms,
+                                        );
+                                    }
+                                    policy.account_ready = true;
+                                    drop(policy);
+                                    auto_refresh.check();
+                                });
                             }
                         });
                     }
@@ -1706,12 +1732,137 @@ fn replace_view_entries(
     }
 }
 
+/// A coarse timer runs only while the main window is active. Wall-time policy
+/// catches suspension even when the compositor never changes window activation.
+struct AutoRefreshUi {
+    window: adw::glib::WeakRef<adw::ApplicationWindow>,
+    controller: Arc<AppController>,
+    inbox: InboxUi,
+    toast: adw::ToastOverlay,
+    action: gio::SimpleAction,
+    views: OtherViews,
+    network: gio::NetworkMonitor,
+    timer: RefCell<Option<adw::glib::SourceId>>,
+    stopped: Cell<bool>,
+}
+
+impl AutoRefreshUi {
+    fn install(
+        window: &adw::ApplicationWindow,
+        controller: Arc<AppController>,
+        inbox: InboxUi,
+        toast: adw::ToastOverlay,
+        action: gio::SimpleAction,
+        views: OtherViews,
+    ) -> Rc<Self> {
+        let state = Rc::new(Self {
+            window: window.downgrade(),
+            controller,
+            inbox,
+            toast,
+            action,
+            views,
+            network: gio::NetworkMonitor::default(),
+            timer: RefCell::new(None),
+            stopped: Cell::new(false),
+        });
+        window.connect_is_active_notify({
+            let state = Rc::downgrade(&state);
+            move |_| {
+                if let Some(state) = state.upgrade() {
+                    state.update_activity();
+                }
+            }
+        });
+        let network_signal = state.network.connect_notify_local(None, {
+            let state = Rc::downgrade(&state);
+            move |_, _| {
+                if let Some(state) = state.upgrade() {
+                    state.check();
+                }
+            }
+        });
+        window.connect_destroy({
+            let state = state.clone();
+            let signal = RefCell::new(Some(network_signal));
+            move |_| {
+                state.stopped.set(true);
+                state.stop_timer();
+                if let Some(signal) = signal.borrow_mut().take() {
+                    state.network.disconnect(signal);
+                }
+            }
+        });
+        state.update_activity();
+        state
+    }
+
+    fn stop_timer(&self) {
+        if let Some(timer) = self.timer.borrow_mut().take() {
+            timer.remove();
+        }
+    }
+
+    fn update_activity(self: &Rc<Self>) {
+        if self.stopped.get() {
+            return;
+        }
+        if !self
+            .window
+            .upgrade()
+            .is_some_and(|window| window.is_active())
+        {
+            self.stop_timer();
+            return;
+        }
+        self.check();
+        if self.timer.borrow().is_none() {
+            let weak = Rc::downgrade(self);
+            let timer = adw::glib::timeout_add_seconds_local(60, move || {
+                let Some(state) = weak.upgrade() else {
+                    return adw::glib::ControlFlow::Break;
+                };
+                state.check();
+                adw::glib::ControlFlow::Continue
+            });
+            *self.timer.borrow_mut() = Some(timer);
+        }
+    }
+
+    fn check(&self) {
+        if self.stopped.get() {
+            return;
+        }
+        let active = self
+            .window
+            .upgrade()
+            .is_some_and(|window| window.is_active());
+        if self.inbox.refresh_policy.borrow().due(
+            adw::glib::real_time() / 1000,
+            active,
+            self.network.is_network_available(),
+            self.network.is_network_metered(),
+            !self.action.is_enabled(),
+        ) {
+            begin_sync(
+                self.controller.clone(),
+                self.inbox.clone(),
+                self.toast.clone(),
+                self.action.clone(),
+                self.views.clone(),
+                true,
+            );
+        }
+    }
+}
+
 fn begin_sync(
     controller: Arc<AppController>,
     inbox_ui: InboxUi,
     toast_overlay: adw::ToastOverlay,
     sync_action: gio::SimpleAction,
     views: OtherViews,
+    automatic: bool,
 ) {
     if !sync_action.is_enabled() {
         return;
@@ -1720,6 +1871,10 @@ fn begin_sync(
     inbox_ui.spinner.set_visible(true);
     let reload_controller = controller.clone();
     controller.sync(move |result| {
+        inbox_ui
+            .refresh_policy
+            .borrow_mut()
+            .finished(adw::glib::real_time() / 1000, result.is_ok());
         sync_action.set_enabled(true);
         inbox_ui.spinner.set_visible(false);
         match result {
@@ -1733,7 +1888,11 @@ fn begin_sync(
                 }
             }
             Err(error) => {
-                toast_overlay.add_toast(adw::Toast::new(&error.sync_message()));
+                if automatic {
+                    tracing::debug!("Automatic sync failed: {error}");
+                } else {
+                    toast_overlay.add_toast(adw::Toast::new(&error.sync_message()));
+                }
             }
         }
     });
@@ -3764,6 +3923,7 @@ fn smoke_test_reader_pipeline() -> Result<(), adw::glib::BoolError> {
         rebuilding: Rc::new(Cell::new(false)),
         emptied_place: Rc::new(RefCell::new(None)),
         undo_toast: Rc::new(RefCell::new(None)),
+        refresh_policy: Rc::new(RefCell::new(AutoRefreshPolicy::default())),
     };
     let reader = ReaderUi {
         split: builder.object("inbox_split").unwrap(),
