@@ -2,3 +2,4 @@ resources/ui/window.blp
 resources/ui/setup-dialog.blp
 data/com.nedrichards.brooklet.desktop.in
 data/com.nedrichards.brooklet.metainfo.xml.in
+src/keyboard.rs

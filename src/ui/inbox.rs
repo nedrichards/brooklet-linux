@@ -370,14 +370,6 @@ pub fn select_id(list: &gtk::ListView, entry_id: i64) -> bool {
     true
 }
 
-pub fn cursor_direction(key: gtk::gdk::Key) -> Option<i32> {
-    match key {
-        gtk::gdk::Key::j | gtk::gdk::Key::Down => Some(1),
-        gtk::gdk::Key::k | gtk::gdk::Key::Up => Some(-1),
-        _ => None,
-    }
-}
-
 pub fn move_cursor(list: &gtk::ListView, direction: i32) -> bool {
     let Some(selection) = list.model().and_downcast::<gtk::SingleSelection>() else {
         return false;
@@ -461,9 +453,11 @@ fn adjacent_position(selected: u32, count: u32, direction: i32) -> Option<u32> {
         return Some(if direction < 0 { count - 1 } else { 0 });
     }
     Some(if direction < 0 {
-        selected.saturating_sub(1)
+        selected.saturating_sub(direction.unsigned_abs())
     } else {
-        selected.saturating_add(1).min(count - 1)
+        selected
+            .saturating_add(direction.unsigned_abs())
+            .min(count - 1)
     })
 }
 
@@ -705,5 +699,9 @@ mod tests {
         assert_eq!(adjacent_position(1, 3, 1), Some(2));
         assert_eq!(adjacent_position(2, 3, 1), Some(2));
         assert_eq!(adjacent_position(0, 0, 1), None);
+        assert_eq!(adjacent_position(12, 30, 8), Some(20));
+        assert_eq!(adjacent_position(12, 30, -8), Some(4));
+        assert_eq!(adjacent_position(28, 30, 8), Some(29));
+        assert_eq!(adjacent_position(2, 30, -8), Some(0));
     }
 }

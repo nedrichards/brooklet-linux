@@ -21,7 +21,7 @@ use brooklet::{
     sync::{AccountSyncService, ReqwestMinifluxApiFactory},
 };
 
-use crate::ui;
+use crate::{keyboard, ui};
 
 pub struct BrookletApplication {
     application: adw::Application,
@@ -805,7 +805,7 @@ impl BrookletApplication {
                 toast: toast_overlay.clone(),
                 undo: undo_entry.clone(),
             };
-            install_reader_actions(&window, tools.clone());
+            install_reader_actions(&window, &builder, tools.clone());
             install_window_tools(&window, application, &builder, tools);
             let destinations: adw::ViewStack =
                 builder.object("destinations").expect("destinations");
@@ -1063,29 +1063,16 @@ impl BrookletApplication {
                 let inbox = inbox_ui.list.clone();
                 let navigation = library_navigation.clone();
                 move |_, _| {
-                    if let Some(window) = window.upgrade()
-                        && let Some(dialog) = focused_dialog(window.upcast_ref())
-                    {
-                        dialog.close();
-                        return;
+                    if let Some(window) = window.upgrade() {
+                        navigate_back(
+                            &window,
+                            &reader,
+                            &reader_page,
+                            &destinations,
+                            &inbox,
+                            &navigation,
+                        );
                     }
-                    let reader_focused = window.upgrade().is_some_and(|window| {
-                        gtk::prelude::GtkWindowExt::focus(&window).is_some_and(|focus| {
-                            focus == reader_page.clone().upcast::<gtk::Widget>()
-                                || focus.is_ancestor(&reader_page)
-                        })
-                    });
-                    if (reader.split.is_collapsed() && reader.split.shows_content())
-                        || (reader_focused && reader.scroller.is_mapped())
-                    {
-                        if let Some(entry_id) = reader.active_id.get() {
-                            return_to_article_list(&reader, &destinations, &inbox, entry_id);
-                        } else if reader.split.is_collapsed() {
-                            reader.split.set_show_content(false);
-                        }
-                        return;
-                    }
-                    navigation.pop();
                 }
             });
             window.add_action(&back_action);
@@ -1236,6 +1223,7 @@ impl BrookletApplication {
                 let dialog: adw::ShortcutsDialog = builder
                     .object("shortcuts_dialog")
                     .expect("shortcuts-dialog.ui must define shortcuts_dialog");
+                keyboard::populate_dialog(&dialog);
                 dialog.connect_closed({
                     let shortcuts_dialog = shortcuts_dialog.clone();
                     move |_| {
@@ -1250,25 +1238,11 @@ impl BrookletApplication {
             }
         });
         self.application.add_action(&shortcuts);
-        self.application
-            .set_accels_for_action("app.quit", &["<primary>q"]);
-        self.application
-            .set_accels_for_action("app.sync", &["<primary>r"]);
-        self.application
-            .set_accels_for_action("app.search", &["<primary>f"]);
-        self.application
-            .set_accels_for_action("win.undo", &["<primary>z"]);
-        self.application
-            .set_accels_for_action("win.back", &["<alt>Left", "Escape"]);
-        self.application.set_accels_for_action(
-            "app.show-shortcuts",
-            &[
-                "F1",
-                "<primary>question",
-                "<primary><shift>slash",
-                "<primary>slash",
-            ],
-        );
+        for binding in keyboard::BINDINGS {
+            if let keyboard::Command::Action(action) = binding.command {
+                self.application.set_accels_for_action(action, binding.keys);
+            }
+        }
     }
 }
 
@@ -1332,7 +1306,9 @@ fn opens_shortcuts(key: gtk::gdk::Key, modifiers: gtk::gdk::ModifierType) -> boo
                 | gtk::gdk::ModifierType::HYPER_MASK
                 | gtk::gdk::ModifierType::META_MASK,
         )
-        && (key == gtk::gdk::Key::question || key == gtk::gdk::Key::slash)
+        && (key == gtk::gdk::Key::question
+            || (key == gtk::gdk::Key::slash
+                && modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK)))
 }
 
 enum ArticleKeyFocus {
@@ -1407,7 +1383,11 @@ fn article_key_focus(
             return ArticleKeyFocus::Other;
         }
         if let Ok(list) = widget.clone().downcast::<gtk::ListView>() {
-            return ArticleKeyFocus::List(list);
+            return if list.has_css_class("article-list") {
+                ArticleKeyFocus::List(list)
+            } else {
+                ArticleKeyFocus::Other
+            };
         }
         if widget == reader_page.clone().upcast::<gtk::Widget>() && reader_scroller.is_mapped() {
             return ArticleKeyFocus::Reader;
@@ -1427,6 +1407,37 @@ fn article_key_focus(
         return ArticleKeyFocus::List(list);
     }
     ArticleKeyFocus::Other
+}
+
+fn navigate_back(
+    window: &adw::ApplicationWindow,
+    reader: &ReaderUi,
+    reader_page: &adw::NavigationPage,
+    destinations: &adw::ViewStack,
+    inbox: &gtk::ListView,
+    navigation: &adw::NavigationView,
+) {
+    if let Some(dialog) = focused_dialog(window.upcast_ref()) {
+        dialog.close();
+        return;
+    }
+    let reader_focused = gtk::prelude::GtkWindowExt::focus(window).is_some_and(|focus| {
+        focus == reader_page.clone().upcast::<gtk::Widget>() || focus.is_ancestor(reader_page)
+    });
+    if (reader.split.is_collapsed() && reader.split.shows_content())
+        || (reader_focused && reader.scroller.is_mapped())
+    {
+        if let Some(entry_id) = reader.active_id.get() {
+            return_to_article_list(reader, destinations, inbox, entry_id);
+        } else if reader.split.is_collapsed() {
+            reader.split.set_show_content(false);
+        }
+        return;
+    }
+    // Back should affect Library only when Library is the current destination.
+    if destinations.visible_child_name().as_deref() == Some("library") {
+        navigation.pop();
+    }
 }
 
 fn return_to_article_list(
@@ -1464,6 +1475,72 @@ fn return_to_article_list(
     });
 }
 
+fn update_shortcut_tooltips(widget: &gtk::Widget) {
+    if let Some(button) = widget.downcast_ref::<gtk::Button>()
+        && let Some(action) = button.action_name()
+        && let Some(tooltip) = widget.tooltip_text()
+    {
+        let hint = keyboard::action_hint(&action);
+        if !hint.is_empty() {
+            widget.set_tooltip_text(Some(&format!("{tooltip} ({hint})")));
+        }
+    }
+    let mut child = widget.first_child();
+    while let Some(widget) = child {
+        update_shortcut_tooltips(&widget);
+        child = widget.next_sibling();
+    }
+}
+
+fn focus_has_popup(window: &adw::ApplicationWindow) -> bool {
+    let mut current = gtk::prelude::GtkWindowExt::focus(window);
+    while let Some(widget) = current {
+        if widget.is::<gtk::Popover>() {
+            return true;
+        }
+        current = widget.parent();
+    }
+    false
+}
+
+fn reader_navigation_is_native(window: &adw::ApplicationWindow, key: gtk::gdk::Key) -> bool {
+    let Some(focus) = gtk::prelude::GtkWindowExt::focus(window) else {
+        return false;
+    };
+    // Selectable labels own their cursor movement and selection shortcuts.
+    // J/K remain explicit reading shortcuts, regardless of text focus.
+    if key != gtk::gdk::Key::j
+        && key != gtk::gdk::Key::k
+        && focus
+            .downcast_ref::<gtk::Label>()
+            .is_some_and(|label| label.is_selectable())
+    {
+        return true;
+    }
+    key == gtk::gdk::Key::space && (focus.is::<gtk::Button>() || focus.is::<gtk::LinkButton>())
+}
+
+fn list_page_step(list: &gtk::ListView) -> i32 {
+    let row_height = ui::inbox::selected_id(list)
+        .and_then(|id| find_article_row(list.upcast_ref(), id))
+        .map(|row| row.height().max(1))
+        .unwrap_or(72);
+    (list.height() / row_height).max(1)
+}
+
+fn move_list_to(list: &gtk::ListView, position: u32) -> bool {
+    let Some(selection) = list.model().and_downcast::<gtk::SingleSelection>() else {
+        return false;
+    };
+    if selection.n_items() == 0 {
+        return false;
+    }
+    list.grab_focus();
+    selection.set_selected(position.min(selection.n_items() - 1));
+    list.scroll_to(selection.selected(), gtk::ListScrollFlags::FOCUS, None);
+    true
+}
+
 fn install_article_cursor_keys(
     window: &adw::ApplicationWindow,
     destinations: &adw::ViewStack,
@@ -1471,14 +1548,32 @@ fn install_article_cursor_keys(
     reader_scroller: &gtk::ScrolledWindow,
     read_context: ReadContext,
 ) -> gtk::EventControllerKey {
+    use keyboard::Command;
+    let bindings = keyboard::parsed_bindings();
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    // Track physical keys: navigation may repeat, state changes and activation may not.
+    let held = Rc::new(RefCell::new(HashSet::<u32>::new()));
+    keys.connect_key_released({
+        let held = held.clone();
+        move |_, _, keycode, _| {
+            held.borrow_mut().remove(&keycode);
+        }
+    });
+    window.connect_is_active_notify({
+        let held = held.clone();
+        move |window| {
+            if !window.is_active() {
+                held.borrow_mut().clear();
+            }
+        }
+    });
     keys.connect_key_pressed({
         let window = window.downgrade();
         let destinations = destinations.downgrade();
         let reader_page = reader_page.downgrade();
         let reader_scroller = reader_scroller.downgrade();
-        move |_, key, _, modifiers| {
+        move |_, key, keycode, modifiers| {
             let (Some(window), Some(destinations), Some(reader_page), Some(reader_scroller)) = (
                 window.upgrade(),
                 destinations.upgrade(),
@@ -1487,37 +1582,141 @@ fn install_article_cursor_keys(
             ) else {
                 return adw::glib::Propagation::Proceed;
             };
+            let activate = |name: &str| {
+                let _ = gtk::prelude::WidgetExt::activate_action(&window, name, None);
+                adw::glib::Propagation::Stop
+            };
             if opens_shortcuts(key, modifiers) {
-                return if gtk::prelude::WidgetExt::activate_action(
-                    &window,
-                    "app.show-shortcuts",
-                    None,
-                )
-                .is_ok()
-                {
-                    adw::glib::Propagation::Stop
-                } else {
-                    adw::glib::Propagation::Proceed
-                };
+                return activate("app.show-shortcuts");
             }
-            if modifiers.intersects(
-                gtk::gdk::ModifierType::SHIFT_MASK
-                    | gtk::gdk::ModifierType::CONTROL_MASK
-                    | gtk::gdk::ModifierType::ALT_MASK
-                    | gtk::gdk::ModifierType::SUPER_MASK
-                    | gtk::gdk::ModifierType::HYPER_MASK
-                    | gtk::gdk::ModifierType::META_MASK,
-            ) {
+            let modifiers = keyboard::modifiers(modifiers);
+            let Some(binding) = bindings
+                .iter()
+                .find(|(bound, mods, _)| *mods == modifiers && *bound == key.to_lower())
+                .map(|(_, _, binding)| *binding)
+            else {
+                return adw::glib::Propagation::Proceed;
+            };
+            let command = binding.command;
+            // Let GTK dispatch standard accelerators to actions (and text widgets).
+            if matches!(command, Command::Action(_)) {
                 return adw::glib::Propagation::Proceed;
             }
+            if keycode != 0 && held.borrow().contains(&keycode) {
+                return adw::glib::Propagation::Stop;
+            }
+            if focus_has_popup(&window) {
+                return adw::glib::Propagation::Proceed;
+            }
+            if command == Command::Back {
+                if keycode != 0 {
+                    held.borrow_mut().insert(keycode);
+                }
+                return activate("win.back");
+            }
+            let dialog = focused_dialog(window.upcast_ref()).is_some();
+            if matches!(
+                command,
+                Command::NextPane | Command::PreviousPane | Command::Destination(_) | Command::Menu
+            ) {
+                if dialog {
+                    return adw::glib::Propagation::Proceed;
+                }
+                match command {
+                    Command::Destination(name) => {
+                        if read_context.reader.split.is_collapsed() {
+                            read_context.reader.split.set_show_content(false);
+                        }
+                        destinations.set_visible_child_name(name);
+                        if let Some(list) = destinations
+                            .visible_child()
+                            .and_then(|child| mapped_article_list(&child))
+                        {
+                            list.grab_focus();
+                        } else {
+                            destinations.child_focus(gtk::DirectionType::TabForward);
+                        }
+                    }
+                    Command::Menu => {
+                        show_main_menu(&window);
+                    }
+                    _ => {
+                        if read_context.reader.split.is_collapsed() || !reader_scroller.is_mapped()
+                        {
+                            return adw::glib::Propagation::Proceed;
+                        }
+                        let focus = article_key_focus(
+                            &window,
+                            &reader_page,
+                            &reader_scroller,
+                            &destinations,
+                            false,
+                        );
+                        if matches!(focus, ArticleKeyFocus::Reader) {
+                            if let Some(list) = destinations
+                                .visible_child()
+                                .and_then(|child| mapped_article_list(&child))
+                            {
+                                list.grab_focus();
+                            } else {
+                                destinations.child_focus(gtk::DirectionType::TabForward);
+                            }
+                        } else {
+                            reader_scroller.grab_focus();
+                        }
+                    }
+                }
+                if keycode != 0 {
+                    held.borrow_mut().insert(keycode);
+                }
+                return adw::glib::Propagation::Stop;
+            }
+            let navigation = matches!(
+                command,
+                Command::Next
+                    | Command::Previous
+                    | Command::First
+                    | Command::Last
+                    | Command::PageDown
+                    | Command::PageUp
+            );
             let scope = article_key_focus(
                 &window,
                 &reader_page,
                 &reader_scroller,
                 &destinations,
-                ui::inbox::cursor_direction(key).is_some(),
+                navigation,
             );
-            if key == gtk::gdk::Key::r {
+            if matches!(scope, ArticleKeyFocus::Other) {
+                return adw::glib::Propagation::Proceed;
+            }
+            if binding.context == keyboard::Context::Reader
+                && !matches!(scope, ArticleKeyFocus::Reader)
+            {
+                return adw::glib::Propagation::Proceed;
+            }
+            if binding.context == keyboard::Context::List
+                && !matches!(scope, ArticleKeyFocus::List(_))
+            {
+                return adw::glib::Propagation::Proceed;
+            }
+            if navigation
+                && matches!(scope, ArticleKeyFocus::Reader)
+                && reader_navigation_is_native(&window, key.to_lower())
+            {
+                return adw::glib::Propagation::Proceed;
+            }
+            if command == Command::Open
+                && (!matches!(scope, ArticleKeyFocus::List(_))
+                    || gtk::prelude::GtkWindowExt::focus(&window)
+                        .is_some_and(|focus| focus.is::<gtk::Button>()))
+            {
+                return adw::glib::Propagation::Proceed;
+            }
+            if !navigation && keycode != 0 {
+                held.borrow_mut().insert(keycode);
+            }
+            if command == keyboard::Command::Read {
                 match &scope {
                     ArticleKeyFocus::List(list) => {
                         if let Some(entry) = ui::inbox::selected_from_list(list) {
@@ -1563,42 +1762,72 @@ fn install_article_cursor_keys(
                     ArticleKeyFocus::Other => {}
                 }
             }
-            if key == gtk::gdk::Key::u
-                && matches!(&scope, ArticleKeyFocus::List(_) | ArticleKeyFocus::Reader)
-            {
-                return if gtk::prelude::WidgetExt::activate_action(&window, "win.undo", None)
-                    .is_ok()
-                {
-                    adw::glib::Propagation::Stop
-                } else {
-                    adw::glib::Propagation::Proceed
-                };
+            let action = match command {
+                Command::Save => Some("win.toggle-star"),
+                Command::Browser => Some("win.open-browser"),
+                Command::Copy => Some("win.copy-link"),
+                Command::Undo => Some("win.undo"),
+                Command::NextArticle if matches!(scope, ArticleKeyFocus::Reader) => {
+                    Some("win.next-article")
+                }
+                Command::PreviousArticle if matches!(scope, ArticleKeyFocus::Reader) => {
+                    Some("win.previous-article")
+                }
+                _ => None,
+            };
+            if let Some(action) = action {
+                return activate(action);
             }
             if let ArticleKeyFocus::List(list) = &scope {
-                if (key == gtk::gdk::Key::Return || key == gtk::gdk::Key::KP_Enter)
-                    && !gtk::prelude::GtkWindowExt::focus(&window)
-                        .is_some_and(|focus| focus.is::<gtk::Button>())
-                    && let Some(selection) = list.model().and_downcast::<gtk::SingleSelection>()
-                    && selection.selected() != gtk::INVALID_LIST_POSITION
-                {
-                    list.emit_by_name::<()>("activate", &[&selection.selected()]);
-                    return adw::glib::Propagation::Stop;
+                match command {
+                    Command::Open => {
+                        if gtk::prelude::GtkWindowExt::focus(&window)
+                            .is_some_and(|focus| focus.is::<gtk::Button>())
+                        {
+                            return adw::glib::Propagation::Proceed;
+                        }
+                        if let Some(selection) = list.model().and_downcast::<gtk::SingleSelection>()
+                            && selection.selected() != gtk::INVALID_LIST_POSITION
+                        {
+                            list.emit_by_name::<()>("activate", &[&selection.selected()]);
+                        }
+                    }
+                    Command::Next | Command::Previous => {
+                        ui::inbox::move_cursor(list, if command == Command::Next { 1 } else { -1 });
+                    }
+                    Command::First => {
+                        move_list_to(list, 0);
+                    }
+                    Command::Last => {
+                        move_list_to(list, u32::MAX);
+                    }
+                    Command::PageDown | Command::PageUp => {
+                        ui::inbox::move_cursor(
+                            list,
+                            list_page_step(list)
+                                * if command == Command::PageDown { 1 } else { -1 },
+                        );
+                    }
+                    _ => return adw::glib::Propagation::Proceed,
                 }
-                if let Some(direction) = ui::inbox::cursor_direction(key)
-                    && ui::inbox::move_cursor(list, direction)
-                {
-                    return adw::glib::Propagation::Stop;
-                }
-            } else if matches!(&scope, ArticleKeyFocus::Reader)
-                && let Some(direction) = ui::inbox::cursor_direction(key)
-                && (key == gtk::gdk::Key::j || key == gtk::gdk::Key::k)
-            {
+                return adw::glib::Propagation::Stop;
+            }
+            if matches!(scope, ArticleKeyFocus::Reader) && navigation {
                 let adjustment = reader_scroller.vadjustment();
-                let target = adjustment.value() + f64::from(direction) * 80.0;
-                adjustment.set_value(target.clamp(
-                    adjustment.lower(),
-                    (adjustment.upper() - adjustment.page_size()).max(adjustment.lower()),
-                ));
+                let lower = adjustment.lower();
+                let upper = (adjustment.upper() - adjustment.page_size()).max(lower);
+                let step = adjustment.step_increment().max(40.0);
+                let page = (adjustment.page_size() * 0.9).max(step);
+                let target = match command {
+                    Command::First => lower,
+                    Command::Last => upper,
+                    Command::Next => adjustment.value() + step,
+                    Command::Previous => adjustment.value() - step,
+                    Command::PageDown => adjustment.value() + page,
+                    Command::PageUp => adjustment.value() - page,
+                    _ => unreachable!(),
+                };
+                adjustment.set_value(target.clamp(lower, upper));
                 return adw::glib::Propagation::Stop;
             }
             adw::glib::Propagation::Proceed
@@ -1606,6 +1835,45 @@ fn install_article_cursor_keys(
     });
     window.add_controller(keys.clone());
     keys
+}
+
+fn show_main_menu(window: &adw::ApplicationWindow) {
+    let Some(menu) = find_menu_button(window.upcast_ref(), "app_menu") else {
+        return;
+    };
+    if menu.is_mapped() {
+        menu.popup();
+        return;
+    }
+    // The Inbox menu button is hidden on other destinations and in a narrow
+    // reader. Present the same menu against the visible window content there.
+    let (Some(model), Some(content)) = (menu.menu_model(), window.content()) else {
+        return;
+    };
+    let popup = gtk::PopoverMenu::from_model(Some(&model));
+    popup.set_parent(&content);
+    popup.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+        content.width().saturating_sub(48),
+        24,
+        1,
+        1,
+    )));
+    popup.connect_closed(|popup| popup.unparent());
+    popup.popup();
+}
+
+fn find_menu_button(widget: &gtk::Widget, name: &str) -> Option<gtk::MenuButton> {
+    if widget.widget_name() == name {
+        return widget.clone().downcast().ok();
+    }
+    let mut child = widget.first_child();
+    while let Some(widget) = child {
+        if let Some(button) = find_menu_button(&widget, name) {
+            return Some(button);
+        }
+        child = widget.next_sibling();
+    }
+    None
 }
 
 fn focused_dialog(window: &gtk::Window) -> Option<adw::Dialog> {
@@ -1624,7 +1892,7 @@ fn mapped_article_list(widget: &gtk::Widget) -> Option<gtk::ListView> {
         return None;
     }
     if let Ok(list) = widget.clone().downcast::<gtk::ListView>() {
-        return Some(list);
+        return list.has_css_class("article-list").then_some(list);
     }
     let mut child = widget.first_child();
     while let Some(widget) = child {
@@ -2652,7 +2920,57 @@ fn load_other_views(controller: Arc<AppController>, views: OtherViews, toast: ad
     });
 }
 
-fn install_reader_actions(window: &adw::ApplicationWindow, tools: WindowTools) {
+fn update_visible_starred(widget: &gtk::Widget, entry_id: i64, starred: bool) {
+    if let Some(list) = widget.downcast_ref::<gtk::ListView>()
+        && list.has_css_class("article-list")
+        && let Some(position) = ui::inbox::position_of_id(list, entry_id)
+        && let Some(selection) = list.model().and_downcast::<gtk::SingleSelection>()
+        && let Some(object) = selection
+            .item(position)
+            .and_downcast::<ui::entry_object::EntryObject>()
+        && let Some(store) = selection.model().and_downcast::<gio::ListStore>()
+    {
+        let selected_id = ui::inbox::selected_id(list);
+        let scroller = list.parent().and_downcast::<gtk::ScrolledWindow>();
+        let place = scroller
+            .as_ref()
+            .map(|scroller| capture_list_place(list, scroller));
+        let mut entry = object.entry().clone();
+        entry.starred = starred;
+        store.splice(position, 1, &[ui::entry_object::EntryObject::new(entry)]);
+        if let Some(id) = selected_id {
+            ui::inbox::select_id(list, id);
+        }
+        if let (Some(scroller), Some(place)) = (scroller, place) {
+            restore_list_place(list, &scroller, place);
+        }
+    }
+    let mut child = widget.first_child();
+    while let Some(widget) = child {
+        update_visible_starred(&widget, entry_id, starred);
+        child = widget.next_sibling();
+    }
+}
+
+fn article_action_target(
+    window: &adw::ApplicationWindow,
+    page: &adw::NavigationPage,
+    scroller: &gtk::ScrolledWindow,
+    destinations: &adw::ViewStack,
+    current: &RefCell<Option<Entry>>,
+) -> Option<Entry> {
+    match article_key_focus(window, page, scroller, destinations, false) {
+        ArticleKeyFocus::List(list) => ui::inbox::selected_from_list(&list),
+        // Reader menu activation has popup focus, rather than reader focus.
+        _ => current.borrow().clone(),
+    }
+}
+
+fn install_reader_actions(
+    window: &adw::ApplicationWindow,
+    builder: &gtk::Builder,
+    tools: WindowTools,
+) {
     let WindowTools {
         controller,
         reader,
@@ -2662,6 +2980,30 @@ fn install_reader_actions(window: &adw::ApplicationWindow, tools: WindowTools) {
         toast,
         undo,
     } = tools;
+    let target: Rc<dyn Fn() -> Option<Entry>> = Rc::new({
+        let window = window.downgrade();
+        let destinations = builder
+            .object::<adw::ViewStack>("destinations")
+            .unwrap()
+            .downgrade();
+        let page = builder
+            .object::<adw::NavigationPage>("reader_page")
+            .unwrap()
+            .downgrade();
+        let scroller = reader.scroller.downgrade();
+        let current = current.clone();
+        move || {
+            let (Some(window), Some(destinations), Some(page), Some(scroller)) = (
+                window.upgrade(),
+                destinations.upgrade(),
+                page.upgrade(),
+                scroller.upgrade(),
+            ) else {
+                return None;
+            };
+            article_action_target(&window, &page, &scroller, &destinations, &current)
+        }
+    });
     for (name, step) in [("previous-article", -1_isize), ("next-article", 1_isize)] {
         let action = gio::SimpleAction::new(name, None);
         action.connect_activate({
@@ -2691,8 +3033,13 @@ fn install_reader_actions(window: &adw::ApplicationWindow, tools: WindowTools) {
                 };
                 reader.origin_index.set(next);
                 *current.borrow_mut() = Some(entry.clone());
-                if reader.origin_inbox.get() {
-                    ui::inbox::select_id(&inbox.list, entry.id);
+                if let Some(source) = reader
+                    .source_list
+                    .borrow()
+                    .as_ref()
+                    .and_then(|source| source.upgrade())
+                {
+                    ui::inbox::select_id(&source, entry.id);
                 }
                 open_article(&reader, &inbox, &entry);
                 if !entry.read {
@@ -2742,13 +3089,15 @@ fn install_reader_actions(window: &adw::ApplicationWindow, tools: WindowTools) {
     let star = gio::SimpleAction::new("toggle-star", None);
     let star_in_flight = Rc::new(RefCell::new(HashSet::new()));
     star.connect_activate({
+        let target = target.clone();
+        let window = window.downgrade();
         let controller = controller.clone();
         let current = current.clone();
         let views = views.clone();
         let toast = toast.clone();
         let star_in_flight = star_in_flight.clone();
         move |_, _| {
-            let Some(entry) = current.borrow().clone() else {
+            let Some(entry) = target() else {
                 return;
             };
             if !star_in_flight.borrow_mut().insert(entry.id) {
@@ -2758,6 +3107,7 @@ fn install_reader_actions(window: &adw::ApplicationWindow, tools: WindowTools) {
             let desired = !entry.starred;
             controller.set_starred_local(entry_id, desired, {
                 let current = current.clone();
+                let window = window.clone();
                 let controller = controller.clone();
                 let views = views.clone();
                 let toast = toast.clone();
@@ -2780,6 +3130,9 @@ fn install_reader_actions(window: &adw::ApplicationWindow, tools: WindowTools) {
                             .find(|item| item.id == entry_id)
                         {
                             Arc::make_mut(origin).starred = desired;
+                        }
+                        if let Some(window) = window.upgrade() {
+                            update_visible_starred(window.upcast_ref(), entry_id, desired);
                         }
                         load_other_views(controller, views, toast.clone());
                         toast.add_toast(adw::Toast::new(if desired {
@@ -2818,12 +3171,10 @@ fn install_reader_actions(window: &adw::ApplicationWindow, tools: WindowTools) {
     window.add_action(&send);
     let copy = gio::SimpleAction::new("copy-link", None);
     copy.connect_activate({
-        let current = current.clone();
+        let target = target.clone();
         let toast = toast.clone();
         move |_, _| {
-            if let (Some(entry), Some(display)) =
-                (current.borrow().as_ref(), gtk::gdk::Display::default())
-            {
+            if let (Some(entry), Some(display)) = (target(), gtk::gdk::Display::default()) {
                 display.clipboard().set_text(&entry.url);
                 toast.add_toast(adw::Toast::new("Link copied"));
             }
@@ -2832,11 +3183,11 @@ fn install_reader_actions(window: &adw::ApplicationWindow, tools: WindowTools) {
     window.add_action(&copy);
     let browser = gio::SimpleAction::new("open-browser", None);
     browser.connect_activate({
-        let current = current.clone();
+        let target = target.clone();
         let window = window.downgrade();
         let toast = toast.clone();
         move |_, _| {
-            if let (Some(entry), Some(window)) = (current.borrow().as_ref(), window.upgrade()) {
+            if let (Some(entry), Some(window)) = (target(), window.upgrade()) {
                 let launcher = gtk::UriLauncher::new(&entry.url);
                 launcher.launch(Some(&window), gio::Cancellable::NONE, {
                     let toast = toast.clone();
@@ -2867,6 +3218,17 @@ fn install_window_tools(
         toast,
         undo,
     } = tools;
+    let close = gio::SimpleAction::new("close", None);
+    close.connect_activate({
+        let window = window.downgrade();
+        move |_, _| {
+            if let Some(window) = window.upgrade() {
+                window.close();
+            }
+        }
+    });
+    window.add_action(&close);
+    update_shortcut_tooltips(window.upcast_ref());
     let menu_button: gtk::MenuButton = builder.object("app_menu").expect("app_menu");
     let menu = gio::Menu::new();
     menu.append(Some("Mark All Read"), Some("win.mark-all-read"));
@@ -2879,6 +3241,7 @@ fn install_window_tools(
     ] {
         menu.append(Some(label), Some(action));
     }
+    menu_button.set_widget_name("app_menu");
     menu_button.set_menu_model(Some(&menu));
 
     let search_dialog = Rc::new(RefCell::new(None::<(adw::Dialog, gtk::SearchEntry)>));
@@ -3655,6 +4018,12 @@ fn smoke_test_article_keyboard(
             deadline.remove();
         }
     }
+    let keyboard_window_title = format!(
+        "Brooklet Keyboard Regression {}",
+        adw::glib::uuid_string_random()
+    );
+    window.set_title(Some(&keyboard_window_title));
+    reader.scroller.set_focusable(true);
     let destinations: adw::ViewStack = builder.object("destinations").unwrap();
     let reader_page: adw::NavigationPage = builder.object("reader_page").unwrap();
     let keys = install_article_cursor_keys(
@@ -3832,6 +4201,7 @@ fn smoke_test_article_keyboard(
         Some(collection_selection),
         Some(gtk::SignalListItemFactory::new()),
     );
+    collection.add_css_class("article-list");
     let collection_dialog = adw::Dialog::new();
     collection_dialog.set_child(Some(&collection));
     collection_dialog.present(Some(window));
@@ -3855,15 +4225,353 @@ fn smoke_test_article_keyboard(
     {
         return Err(adw::glib::bool_error!("Undo failed in the reader"));
     }
+    // Reader arrows must change the adjustment, including reader header focus.
+    reader_focus.set_height_request(3000);
+    layout(window);
+    reader.scroller.grab_focus();
+    reader.scroller.vadjustment().set_value(0.0);
+    if !press(Key::Down, Modifiers::empty()) || reader.scroller.vadjustment().value() <= 0.0 {
+        return Err(adw::glib::bool_error!("Reader Down did not scroll"));
+    }
+    if !press(Key::Up, Modifiers::empty()) || reader.scroller.vadjustment().value() != 0.0 {
+        return Err(adw::glib::bool_error!("Reader Up did not scroll"));
+    }
+    if !press(Key::space, Modifiers::empty())
+        || reader.scroller.vadjustment().value() <= 0.0
+        || !press(Key::space, Modifiers::SHIFT_MASK)
+        || reader.scroller.vadjustment().value() != 0.0
+    {
+        return Err(adw::glib::bool_error!("Reader Space paging failed"));
+    }
+    for key in [Key::End, Key::Home, Key::Page_Down, Key::Page_Up] {
+        if !press(key, Modifiers::empty()) {
+            return Err(adw::glib::bool_error!("Reader paging failed for {key:?}"));
+        }
+    }
+    reader_focus.grab_focus();
+    if press(Key::space, Modifiers::empty()) || press(Key::Return, Modifiers::empty()) {
+        return Err(adw::glib::bool_error!(
+            "Reader intercepted button activation"
+        ));
+    }
+    let text = gtk::Label::new(Some("Selectable reader text"));
+    text.set_selectable(true);
+    reader.content.prepend(&text);
+    layout(window);
+    text.grab_focus();
+    for key in [Key::Up, Key::Down, Key::Home, Key::End] {
+        if press(key, Modifiers::empty()) {
+            return Err(adw::glib::bool_error!(
+                "Reader intercepted text cursor {key:?}"
+            ));
+        }
+    }
+    if press(Key::Right, Modifiers::SHIFT_MASK) || press(Key::c, Modifiers::CONTROL_MASK) {
+        return Err(adw::glib::bool_error!(
+            "Reader intercepted text selection or copy"
+        ));
+    }
+    reader.content.remove(&text);
+    inbox.list.grab_focus();
+    for (key, expected) in [
+        (Key::End, 1),
+        (Key::Home, 0),
+        (Key::Page_Down, 1),
+        (Key::Page_Up, 0),
+    ] {
+        if !press(key, Modifiers::empty()) || inbox.model.selection.selected() != expected {
+            return Err(adw::glib::bool_error!("List paging failed for {key:?}"));
+        }
+    }
+    let open = RefCell::new(ui::inbox::entry_at(&inbox.model, 1));
+    if article_action_target(window, &reader_page, &reader.scroller, &destinations, &open)
+        .map(|entry| entry.id)
+        != ui::inbox::selected_id(&inbox.list)
+    {
+        return Err(adw::glib::bool_error!(
+            "List action targeted the open article"
+        ));
+    }
+    reader.scroller.grab_focus();
+    if article_action_target(window, &reader_page, &reader.scroller, &destinations, &open)
+        .map(|entry| entry.id)
+        != open.borrow().as_ref().map(|entry| entry.id)
+    {
+        return Err(adw::glib::bool_error!(
+            "Reader action targeted the list selection"
+        ));
+    }
+    // A held mutation shortcut is consumed once, until the physical release.
+    let physical_press =
+        || keys.emit_by_name::<bool>("key-pressed", &[&Key::u, &42_u32, &Modifiers::empty()]);
+    if !physical_press() || !physical_press() || undos.get() != 5 {
+        return Err(adw::glib::bool_error!("Held Undo repeated"));
+    }
+    keys.emit_by_name::<()>("key-released", &[&Key::u, &42_u32, &Modifiers::empty()]);
+    if !physical_press() || undos.get() != 6 {
+        return Err(adw::glib::bool_error!("Undo did not reset on release"));
+    }
+    keys.emit_by_name::<()>("key-released", &[&Key::u, &42_u32, &Modifiers::empty()]);
+    let back = gio::SimpleAction::new("back", None);
+    back.connect_activate({
+        let window = window.downgrade();
+        let reader = reader.clone();
+        let page = reader_page.clone();
+        let destinations = destinations.clone();
+        let inbox = inbox.list.clone();
+        let navigation: adw::NavigationView = builder.object("library_navigation").unwrap();
+        move |_, _| {
+            if let Some(window) = window.upgrade() {
+                navigate_back(&window, &reader, &page, &destinations, &inbox, &navigation);
+            }
+        }
+    });
+    window.add_action(&back);
+    // Physical delivery supplements handler assertions in the required X11 CI gate.
+    if let Some(driver) = std::env::var_os("BROOKLET_KEYBOARD_DRIVER") {
+        let real_event = |key: &str,
+                          mode: &str,
+                          modifiers: &[&str]|
+         -> Result<(), adw::glib::BoolError> {
+            let status = std::process::Command::new("python3")
+                .arg(&driver)
+                .arg(&keyboard_window_title)
+                .arg(key)
+                .arg(mode)
+                .args(modifiers)
+                .status()
+                .map_err(|error| adw::glib::bool_error!("Keyboard event driver failed: {error}"))?;
+            if !status.success() {
+                return Err(adw::glib::bool_error!(
+                    "Keyboard event driver failed for {key}"
+                ));
+            }
+            layout(window);
+            Ok(())
+        };
+        let real_key = |key: &str, modifiers: &[&str]| real_event(key, "both", modifiers);
+        inbox.list.grab_focus();
+        inbox.model.selection.set_selected(0);
+        layout(window);
+        header.grab_focus();
+        layout(window);
+        real_key("Down", &[])?;
+        if inbox.model.selection.selected() != 1 {
+            return Err(adw::glib::bool_error!("Physical Down failed from header"));
+        }
+        real_key("Up", &[])?;
+        if inbox.model.selection.selected() != 0 {
+            return Err(adw::glib::bool_error!("Physical Up failed in list"));
+        }
+        let before = activations.get();
+        real_key("Return", &[])?;
+        if activations.get() != before + 1 {
+            return Err(adw::glib::bool_error!("Physical Enter failed to activate"));
+        }
+        reader.scroller.grab_focus();
+        reader.scroller.vadjustment().set_value(0.0);
+        real_key("Down", &[])?;
+        if reader.scroller.vadjustment().value() <= 0.0 {
+            return Err(adw::glib::bool_error!(
+                "Physical reader Down did not scroll"
+            ));
+        }
+        real_key("Up", &[])?;
+        if reader.scroller.vadjustment().value() != 0.0 {
+            return Err(adw::glib::bool_error!("Physical reader Up did not scroll"));
+        }
+        real_key("F6", &[])?;
+        if !matches!(
+            article_key_focus(window, &reader_page, &reader.scroller, &destinations, false),
+            ArticleKeyFocus::List(_)
+        ) {
+            return Err(adw::glib::bool_error!("Physical F6 did not focus list"));
+        }
+        real_key("F6", &["Shift_L"])?;
+        if !matches!(
+            article_key_focus(window, &reader_page, &reader.scroller, &destinations, false),
+            ArticleKeyFocus::Reader
+        ) {
+            return Err(adw::glib::bool_error!(
+                "Physical Shift+F6 did not focus reader"
+            ));
+        }
+        let held_before = undos.get();
+        real_event("u", "press", &[])?;
+        let repeat_loop = adw::glib::MainLoop::new(None, false);
+        adw::glib::timeout_add_local_once(Duration::from_millis(900), {
+            let repeat_loop = repeat_loop.clone();
+            move || repeat_loop.quit()
+        });
+        repeat_loop.run();
+        real_event("u", "release", &[])?;
+        if undos.get() != held_before + 1 {
+            return Err(adw::glib::bool_error!("Physical held Undo repeated"));
+        }
+        let before = undos.get();
+        real_key("z", &["Control_L"])?;
+        if undos.get() != before + 1 {
+            return Err(adw::glib::bool_error!("Physical Ctrl+Z failed"));
+        }
+        let dialog = adw::Dialog::new();
+        let input = gtk::Entry::new();
+        dialog.set_child(Some(&input));
+        dialog.present(Some(window));
+        layout(window);
+        input.grab_focus();
+        real_key("r", &[])?;
+        if input.text() != "r" {
+            return Err(adw::glib::bool_error!("Physical R intercepted text entry"));
+        }
+        real_key("Down", &[])?;
+        if undos.get() != before + 1 {
+            return Err(adw::glib::bool_error!("Dialog key changed article state"));
+        }
+        real_key("Escape", &[])?;
+        // Dialog closing is animated; wait for it to leave the window completely.
+        for _ in 0..10 {
+            if dialog.parent().is_none() {
+                break;
+            }
+            layout(window);
+        }
+        if dialog.parent().is_some() {
+            return Err(adw::glib::bool_error!(
+                "Physical Escape did not dismiss dialog"
+            ));
+        }
+        reader.active_id.set(ui::inbox::selected_id(&inbox.list));
+        *reader.source_list.borrow_mut() = Some(inbox.list.downgrade());
+        reader.scroller.grab_focus();
+        real_key("Escape", &[])?;
+        if !matches!(
+            article_key_focus(window, &reader_page, &reader.scroller, &destinations, false),
+            ArticleKeyFocus::List(_)
+        ) {
+            return Err(adw::glib::bool_error!(
+                "Physical Escape did not restore source-list focus"
+            ));
+        }
+        real_key("Down", &[])?;
+        if inbox.model.selection.selected() != 1 {
+            return Err(adw::glib::bool_error!("Physical Down failed after Escape"));
+        }
+        let menu: gtk::MenuButton = builder.object("app_menu").unwrap();
+        menu.set_widget_name("app_menu");
+        let model = gio::Menu::new();
+        model.append(Some("Undo"), Some("win.undo"));
+        menu.set_menu_model(Some(&model));
+        real_key("F10", &[])?;
+        if !menu.popover().is_some_and(|popover| popover.is_visible()) {
+            return Err(adw::glib::bool_error!(
+                "Physical F10 did not open main menu"
+            ));
+        }
+        real_key("Escape", &[])?;
+        if menu.popover().is_some_and(|popover| popover.is_visible()) {
+            return Err(adw::glib::bool_error!("Physical Escape did not close menu"));
+        }
+        // Saved and Library use the same article-list contract, with their own selection.
+        let saved: gtk::ListView = builder.object("saved_list").unwrap();
+        let saved_model = ui::inbox::configure_with_action(&saved, false, Rc::new(Cell::new(None)));
+        ui::inbox::replace(&saved_model, inbox_snapshot(inbox));
+        builder
+            .object::<adw::StatusPage>("saved_status")
+            .unwrap()
+            .set_visible(false);
+        builder
+            .object::<gtk::ScrolledWindow>("saved_scroller")
+            .unwrap()
+            .set_visible(true);
+        real_key("2", &["Control_L"])?;
+        real_key("Home", &[])?;
+        real_key("Down", &[])?;
+        if destinations.visible_child_name().as_deref() != Some("saved")
+            || saved_model.selection.selected() != 1
+        {
+            return Err(adw::glib::bool_error!("Physical Saved shortcuts failed"));
+        }
+        real_key("F10", &[])?;
+        if !focus_has_popup(window) {
+            return Err(adw::glib::bool_error!("Physical F10 failed outside Inbox"));
+        }
+        real_key("Escape", &[])?;
+        let library: gtk::ListView = builder.object("library_all_list").unwrap();
+        let library_model =
+            ui::inbox::configure_with_action(&library, false, Rc::new(Cell::new(None)));
+        ui::inbox::replace(&library_model, inbox_snapshot(inbox));
+        builder
+            .object::<adw::StatusPage>("library_all_status")
+            .unwrap()
+            .set_visible(false);
+        builder
+            .object::<gtk::ScrolledWindow>("library_all_scroller")
+            .unwrap()
+            .set_visible(true);
+        real_key("3", &["Control_L"])?;
+        let navigation: adw::NavigationView = builder.object("library_navigation").unwrap();
+        navigation.push_by_tag("library-all");
+        layout(window);
+        library.grab_focus();
+        real_key("Home", &[])?;
+        real_key("j", &[])?;
+        real_key("k", &[])?;
+        if destinations.visible_child_name().as_deref() != Some("library")
+            || library_model.selection.selected() != 0
+        {
+            return Err(adw::glib::bool_error!("Physical Library shortcuts failed"));
+        }
+        real_key("Left", &["Alt_L"])?;
+        real_key("1", &["Control_L"])?;
+        if destinations.visible_child_name().as_deref() != Some("inbox") {
+            return Err(adw::glib::bool_error!("Physical Inbox shortcut failed"));
+        }
+        // The same return contract must hold when the list is hidden in a narrow window.
+        window.set_default_size(550, 700);
+        // Window managers may ignore resizing an already mapped window. Exercise
+        // the breakpoint's collapsed mode explicitly, independently of that policy.
+        reader.split.set_collapsed(true);
+        reader.active_id.set(ui::inbox::selected_id(&inbox.list));
+        layout(window);
+        if !reader.split.is_collapsed() {
+            return Err(adw::glib::bool_error!(
+                "Narrow keyboard fixture did not collapse"
+            ));
+        }
+        reader.split.set_show_content(true);
+        layout(window);
+        reader.scroller.grab_focus();
+        real_key("Escape", &[])?;
+        layout(window);
+        if reader.split.shows_content()
+            || !matches!(
+                article_key_focus(window, &reader_page, &reader.scroller, &destinations, false),
+                ArticleKeyFocus::List(_)
+            )
+        {
+            return Err(adw::glib::bool_error!(
+                "Narrow Escape lost source-list focus"
+            ));
+        }
+        real_key("Up", &[])?;
+        if inbox.model.selection.selected() != 0 {
+            return Err(adw::glib::bool_error!("Narrow list Up failed"));
+        }
+        window.set_default_size(1080, 720);
+        reader.active_id.set(None);
+        layout(window);
+        println!("Physical keyboard event regression passed (wide and narrow)");
+    }
     reader.content.remove(&reader_focus);
     window.remove_action("undo");
     window.remove_action("keep-unread");
+    window.remove_action("back");
     inbox.list.disconnect(activation_signal);
     window.remove_controller(&keys);
     Ok(())
 }
 
-fn smoke_test_reader_pipeline() -> Result<(), adw::glib::BoolError> {
+fn smoke_test_reader_pipeline(keyboard_only: bool) -> Result<(), adw::glib::BoolError> {
     use brooklet::services::traits::Repository;
     let repository = Arc::new(
         SqliteRepository::open_in_memory().map_err(|error| adw::glib::bool_error!("{error}"))?,
@@ -4019,6 +4727,15 @@ fn smoke_test_reader_pipeline() -> Result<(), adw::glib::BoolError> {
         &reader,
         vec![long.clone(), replacement.clone()],
     )?;
+    if keyboard_only {
+        window.destroy();
+        drop(reader);
+        drop(inbox);
+        drop(window);
+        drop(builder);
+        let _ = std::fs::remove_dir_all(cache_directory);
+        return Ok(());
+    }
     window.present();
     open_article(&reader, &inbox, &long);
     open_article(&reader, &inbox, &replacement);
@@ -4106,6 +4823,12 @@ fn smoke_test_reader_pipeline() -> Result<(), adw::glib::BoolError> {
     result
 }
 
+pub fn keyboard_test() -> Result<(), adw::glib::BoolError> {
+    adw::init()?;
+    register_resources();
+    smoke_test_reader_pipeline(true)
+}
+
 pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
     let texture = gtk::gdk::MemoryTexture::new(
@@ -4134,9 +4857,10 @@ pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
         .object("setup_dialog")
         .expect("setup-dialog.ui must define the setup dialog");
     let shortcuts = gtk::Builder::from_resource("/com/nedrichards/brooklet/ui/shortcuts-dialog.ui");
-    let _: adw::ShortcutsDialog = shortcuts
+    let shortcuts_dialog: adw::ShortcutsDialog = shortcuts
         .object("shortcuts_dialog")
         .expect("shortcuts-dialog.ui must define the shortcuts dialog");
+    keyboard::populate_dialog(&shortcuts_dialog);
     let list: gtk::ListView = builder.object("inbox_list").expect("inbox_list");
     let selection = gtk::SingleSelection::new(Some(gtk::StringList::new(&["Launch focus test"])));
     selection.set_autoselect(false);
@@ -4185,7 +4909,7 @@ pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
     }
     smoke_test_image_anchor()?;
     ui::signal_scope::smoke_test()?;
-    smoke_test_reader_pipeline()
+    smoke_test_reader_pipeline(false)
 }
 
 fn register_resources() {
@@ -4206,7 +4930,11 @@ mod shortcut_tests {
                 Modifiers::SHIFT_MASK,
                 Modifiers::LOCK_MASK,
             ] {
-                assert!(opens_shortcuts(key, Modifiers::CONTROL_MASK | extra));
+                let expected = key == Key::question || extra.contains(Modifiers::SHIFT_MASK);
+                assert_eq!(
+                    opens_shortcuts(key, Modifiers::CONTROL_MASK | extra),
+                    expected
+                );
             }
             assert!(!opens_shortcuts(key, Modifiers::empty()));
             assert!(!opens_shortcuts(

@@ -26,6 +26,9 @@ The canonical build is the Flatpak manifest at
 `flatpak/com.nedrichards.brooklet.Devel.json`. It targets GNOME 51 and is placed
 where GNOME Builder discovers it from a fresh checkout.
 
+For the complete keyboard system and regression checks, see
+[Keyboard shortcuts](docs/keyboard-shortcuts.md).
+
 ## Native build
 
 ```sh
