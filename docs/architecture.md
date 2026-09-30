@@ -129,8 +129,10 @@ it suppresses that result and restores the unread intention afterward.
 `AdwToastOverlay` owns the current reversible local action. Mark Read and Mark
 All Read update the repository first, update the list immediately, and then
 offer Undo. Opening an unread article in any collection also offers Undo.
-`win.undo` is the single semantic action behind both Ctrl+Z and the toast
-button; it restores read state without reopening the reader.
+`win.undo` is the single semantic action behind Ctrl+Z, the toast button, and
+`u` in the same article-list and reader contexts as `r`; it restores read state
+without reopening the reader. Single-key actions ignore text fields and other
+editing controls. Keep Unread remains available in the reader header and menu.
 
 ## Data and consistency
 

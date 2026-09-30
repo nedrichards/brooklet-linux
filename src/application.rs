@@ -1563,8 +1563,10 @@ fn install_article_cursor_keys(
                     ArticleKeyFocus::Other => {}
                 }
             }
-            if key == gtk::gdk::Key::u && matches!(&scope, ArticleKeyFocus::Reader) {
-                return if gtk::prelude::WidgetExt::activate_action(&window, "win.keep-unread", None)
+            if key == gtk::gdk::Key::u
+                && matches!(&scope, ArticleKeyFocus::List(_) | ArticleKeyFocus::Reader)
+            {
+                return if gtk::prelude::WidgetExt::activate_action(&window, "win.undo", None)
                     .is_ok()
                 {
                     adw::glib::Propagation::Stop
@@ -3679,6 +3681,21 @@ fn smoke_test_article_keyboard(
         let activations = activations.clone();
         move |_, _| activations.set(activations.get() + 1)
     });
+    let undos = Rc::new(Cell::new(0));
+    let undo = gio::SimpleAction::new("undo", None);
+    undo.connect_activate({
+        let undos = undos.clone();
+        move |_, _| undos.set(undos.get() + 1)
+    });
+    window.add_action(&undo);
+    // A separate action catches regressions to the previous reader-only binding.
+    let keeps = Rc::new(Cell::new(0));
+    let keep = gio::SimpleAction::new("keep-unread", None);
+    keep.connect_activate({
+        let keeps = keeps.clone();
+        move |_, _| keeps.set(keeps.get() + 1)
+    });
+    window.add_action(&keep);
     // Match startup: setup is initially focused, then account discovery hides
     // it before the asynchronous cached inbox arrives and maps its rows.
     let setup: gtk::Button = builder.object("setup_button").unwrap();
@@ -3713,6 +3730,15 @@ fn smoke_test_article_keyboard(
         keys.emit_by_name::<bool>("key-pressed", &[&key, &0_u32, &modifiers])
     };
     use gtk::gdk::{Key, ModifierType as Modifiers};
+    if !press(Key::u, Modifiers::empty())
+        || !press(Key::u, Modifiers::LOCK_MASK)
+        || undos.get() != 2
+        || press(Key::u, Modifiers::CONTROL_MASK)
+        || press(Key::u, Modifiers::SHIFT_MASK)
+        || inbox.model.selection.selected() != 0
+    {
+        return Err(adw::glib::bool_error!("Undo shortcut failed in the Inbox"));
+    }
     for (key, modifiers, expected) in [
         (Key::Down, Modifiers::empty(), 1),
         (Key::Up, Modifiers::LOCK_MASK, 0),
@@ -3734,6 +3760,9 @@ fn smoke_test_article_keyboard(
         return Err(adw::glib::bool_error!(
             "Header focus fixture was unavailable"
         ));
+    }
+    if press(Key::u, Modifiers::empty()) || undos.get() != 2 {
+        return Err(adw::glib::bool_error!("Undo intercepted header focus"));
     }
     if !press(Key::Down, Modifiers::LOCK_MASK) || inbox.model.selection.selected() != 1 {
         return Err(adw::glib::bool_error!(
@@ -3757,7 +3786,11 @@ fn smoke_test_article_keyboard(
             "Editing focus fixture was unavailable"
         ));
     }
-    if press(Key::Up, Modifiers::empty()) || inbox.model.selection.selected() != 1 {
+    if press(Key::Up, Modifiers::empty())
+        || press(Key::u, Modifiers::empty())
+        || undos.get() != 2
+        || inbox.model.selection.selected() != 1
+    {
         return Err(adw::glib::bool_error!(
             "Article keys intercepted dialog editing"
         ));
@@ -3791,6 +3824,40 @@ fn smoke_test_article_keyboard(
             "Enter did not deliberately activate the keyboard selection"
         ));
     }
+    // Search and other collections use their own ListView. A list inside a
+    // dialog is eligible, while the dialog's editable controls are not.
+    let collection_selection =
+        gtk::SingleSelection::new(Some(gtk::StringList::new(&["Other collection"])));
+    let collection = gtk::ListView::new(
+        Some(collection_selection),
+        Some(gtk::SignalListItemFactory::new()),
+    );
+    let collection_dialog = adw::Dialog::new();
+    collection_dialog.set_child(Some(&collection));
+    collection_dialog.present(Some(window));
+    layout(window);
+    if !collection.grab_focus() || !press(Key::u, Modifiers::empty()) || undos.get() != 3 {
+        return Err(adw::glib::bool_error!(
+            "Undo failed in another article list"
+        ));
+    }
+    collection_dialog.force_close();
+    reader.placeholder.set_visible(false);
+    reader.scroller.set_visible(true);
+    reader.split.set_show_content(true);
+    let reader_focus = gtk::Button::with_label("Reader focus fixture");
+    reader.content.append(&reader_focus);
+    layout(window);
+    if !reader_focus.grab_focus()
+        || !press(Key::u, Modifiers::empty())
+        || undos.get() != 4
+        || keeps.get() != 0
+    {
+        return Err(adw::glib::bool_error!("Undo failed in the reader"));
+    }
+    reader.content.remove(&reader_focus);
+    window.remove_action("undo");
+    window.remove_action("keep-unread");
     inbox.list.disconnect(activation_signal);
     window.remove_controller(&keys);
     Ok(())

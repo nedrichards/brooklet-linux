@@ -54,6 +54,12 @@ Adw.ShortcutsDialog shortcuts_dialog {
     }
 
     Adw.ShortcutsItem {
+      title: _("Undo Mark Read");
+      accelerator: "u";
+      subtitle: _("In an article list, outside text fields");
+    }
+
+    Adw.ShortcutsItem {
       title: _("Move to next article");
       accelerator: "j";
       subtitle: _("At startup or with an article list focused");
@@ -94,6 +100,12 @@ Adw.ShortcutsDialog shortcuts_dialog {
     }
 
     Adw.ShortcutsItem {
+      title: _("Undo Mark Read");
+      accelerator: "u";
+      subtitle: _("While reading, outside text fields");
+    }
+
+    Adw.ShortcutsItem {
       title: _("Scroll article down");
       accelerator: "j";
       subtitle: _("When the reader has focus");
@@ -108,13 +120,6 @@ Adw.ShortcutsDialog shortcuts_dialog {
 
   Adw.ShortcutsSection {
     title: _("Navigation");
-
-    Adw.ShortcutsItem {
-      title: _("Keep current article unread");
-      action-name: "win.keep-unread";
-      accelerator: "u";
-      subtitle: _("While reading, outside text fields");
-    }
 
     Adw.ShortcutsItem {
       title: _("Go back");
