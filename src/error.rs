@@ -25,6 +25,12 @@ pub enum BrookletError {
     SecretStore(String),
     #[error("setup information is incomplete: {0}")]
     InvalidSetup(&'static str),
+    #[error(
+        "This token belongs to a different Miniflux user. Enter a token for the connected account."
+    )]
+    AccountMismatch,
+    #[error("An account is already connected. Use Reconnect to replace its API token.")]
+    AccountAlreadyConfigured,
 }
 
 impl BrookletError {
@@ -34,12 +40,15 @@ impl BrookletError {
             Self::Http { kind, .. } | Self::Transport { kind, .. } => *kind,
             Self::UnsupportedServer { .. } => FailureKind::UnsupportedServer,
             Self::Database(_) | Self::Storage(_) | Self::SecretStore(_) => FailureKind::Retryable,
-            Self::InvalidSetup(_) => FailureKind::MalformedRequest,
+            Self::InvalidSetup(_) | Self::AccountMismatch | Self::AccountAlreadyConfigured => {
+                FailureKind::MalformedRequest
+            }
         }
     }
 
     pub fn setup_message(&self) -> String {
         match self {
+            Self::AccountMismatch | Self::AccountAlreadyConfigured => self.to_string(),
             Self::InvalidServiceUrl(detail) => format!("Check the Miniflux address: {detail}."),
             Self::InvalidSetup(detail) => format!("Please enter {detail}."),
             Self::Http { status: 401 | 403, .. } => {
@@ -94,9 +103,11 @@ impl BrookletError {
             Self::Database(_) | Self::Storage(_) => {
                 "Brooklet could not update its local article cache.".into()
             }
-            Self::InvalidServiceUrl(_) | Self::InvalidSetup(_) | Self::Http { .. } => {
-                self.setup_message()
-            }
+            Self::InvalidServiceUrl(_)
+            | Self::InvalidSetup(_)
+            | Self::Http { .. }
+            | Self::AccountMismatch
+            | Self::AccountAlreadyConfigured => self.setup_message(),
         }
     }
 }

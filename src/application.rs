@@ -3621,6 +3621,38 @@ fn install_window_tools(
             account_row.set_use_markup(false);
             account_row.set_title("Loading account…");
             account_group.add(&account_row);
+            let connected_account = Rc::new(RefCell::new(None::<brooklet::model::Account>));
+            let reconnect_row = adw::ActionRow::new();
+            reconnect_row.set_title("Reconnect account");
+            reconnect_row.set_subtitle("Replace the API token while keeping cached articles and pending changes");
+            let reconnect_button = gtk::Button::with_label("Reconnect…");
+            reconnect_button.set_valign(gtk::Align::Center);
+            reconnect_button.set_sensitive(false);
+            reconnect_row.add_suffix(&reconnect_button);
+            reconnect_row.set_activatable_widget(Some(&reconnect_button));
+            account_group.add(&reconnect_row);
+            signals.track(&reconnect_button, reconnect_button.connect_clicked({
+                let account = connected_account.clone();
+                let controller = controller.clone();
+                let window = window.downgrade();
+                let dialog = dialog.clone();
+                let toast = toast.clone();
+                move |_| {
+                    let Some(window) = window.upgrade() else { return; };
+                    let Some(account) = account.borrow().clone() else { return; };
+                    dialog.close();
+                    ui::reconnect::present(&window, controller.clone(), &account, {
+                        let window = window.downgrade();
+                        let toast = toast.clone();
+                        move |_| {
+                            toast.add_toast(adw::Toast::new("Account reconnected"));
+                            if let Some(window) = window.upgrade() {
+                                ui::reconnect::sync_when_ready(&window);
+                            }
+                        }
+                    });
+                }
+            }));
             let logout_row = adw::ActionRow::new();
             logout_row.set_title("Log out and clear data");
             logout_row.set_subtitle("Remove this account, cached articles, pending changes, and saved credentials");
@@ -3751,6 +3783,8 @@ fn install_window_tools(
             dialog.add(&page);
             controller.existing_account(move |result| match result {
                 Ok(Some(account)) => {
+                    *connected_account.borrow_mut() = Some(account.clone());
+                    reconnect_button.set_sensitive(true);
                     account_row.set_title(&account.username);
                     account_row.set_subtitle(&format!(
                         "{} · Miniflux {}",
@@ -4909,6 +4943,7 @@ pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
     }
     smoke_test_image_anchor()?;
     ui::signal_scope::smoke_test()?;
+    ui::reconnect::smoke_test()?;
     smoke_test_reader_pipeline(false)
 }
 

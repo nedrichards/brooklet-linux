@@ -10,7 +10,7 @@ this plan.
    category payloads, and failure handling.
 2. **Complete:** Separate upload failures from incoming sync: preserve pending intentions
    while allowing incoming articles during delivery failures.
-3. Repair Miniflux credentials without clearing local data.
+3. **Complete:** Repair Miniflux credentials without clearing local data.
 4. Expose and recover failed Karakeep deliveries; validate direct settings.
 5. Refresh visible Library drill-down pages while preserving context.
 6. Follow up asynchronous server feed refresh with a bounded incoming pull.
@@ -51,3 +51,20 @@ remote deletion, and refresh inside a feed.
   isolated Clippy, GUI Clippy with warnings denied, GUI build, and GUI smoke
   passed. Smoke emitted development-runtime portal/session-bus and Glycin
   warnings. Real-service outage and recovery were not exercised.
+- Checkpoint 3: Preferences now offers Reconnect for the existing server and
+  username. Validation precedes replacing only the Miniflux keyring item; cached
+  data, pending work, reader positions, Karakeep settings/secrets, retention and
+  sync status stay intact. Missing old secrets can be repaired without loading
+  them. Setup cannot overwrite an account. Controller account operations are
+  serialized with logout, and successful reconnect triggers one sync after any
+  old in-flight request completes.
+- Checkpoint 3 verification: all 103 working-tree tests and 79 isolated-commit
+  tests passed. Seven new integration tests cover replacement, missing tokens,
+  validation/identity/keyring failures, retained data after reopen, setup
+  overwrite rejection, logout, and resumption of persisted outgoing work.
+  Working-tree and isolated SDK formatting, Clippy with warnings denied, GUI
+  build and GUI smoke passed. Reconnect UI smoke exercises the displayed form,
+  blank-token rejection, duplicate submission, failure/retry, controller/logout
+  ordering, and deferred sync exactly once. Smoke emitted development-runtime
+  portal/session-bus and Glycin warnings. A real account/keyring repair was not
+  exercised.

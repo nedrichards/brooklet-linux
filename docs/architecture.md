@@ -184,6 +184,25 @@ work, and evict offscreen textures. See the image policy in `reader-testing.md`
 for limits. Signal handlers use weak widgets or disconnect when their owner
 closes.
 
+## Credential repair
+
+Preferences offers a reconnect dialog with the existing server and username
+fixed. `SetupService::reconnect` validates a replacement token against that
+identity before replacing only the Miniflux keyring item. It neither loads the
+old token nor writes account metadata, and preserves article HTML, reader
+positions, pending mutations, Karakeep configuration and credentials, delivery
+work, retention preferences, and sync status. Setup refuses to overwrite an
+existing account. Identity mismatch or validation failure never writes the
+replacement credential; secret-store failure leaves local data available for
+retry.
+
+The controller serializes setup, reconnect, and logout with an account-operation
+mutex. Logout therefore cannot clear an account while reconnect is validating
+and then leave a newly written token behind. The dialog clears its password row
+on submit, prevents duplicate submission and closing while validation runs, and
+returns to an editable form after failure. Success triggers one manual sync,
+waiting for an old in-flight sync to re-enable its action if necessary.
+
 ## Secrets
 
 Service secrets live behind `SecretStore`; the production implementation uses

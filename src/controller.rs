@@ -14,6 +14,7 @@ use crate::{
 
 pub struct AppController {
     runtime: tokio::runtime::Runtime,
+    account_operations: Arc<tokio::sync::Mutex<()>>,
     setup_service: Arc<dyn SetupService>,
     sync_service: Arc<dyn SyncService>,
     image_cache: Arc<crate::services::image_cache::ImageCache>,
@@ -85,6 +86,7 @@ impl AppController {
             .build()?;
         Ok(Self {
             runtime,
+            account_operations: Arc::new(tokio::sync::Mutex::new(())),
             setup_service,
             sync_service,
             image_cache,
@@ -107,7 +109,33 @@ impl AppController {
         callback: impl FnOnce(Result<Account, BrookletError>) + 'static,
     ) {
         let service = self.setup_service.clone();
-        self.dispatch(async move { service.configure(request).await }, callback);
+        self.dispatch_account(async move { service.configure(request).await }, callback);
+    }
+
+    /// Account changes share a lock with logout. A reconnect that was queued
+    /// behind logout must observe the missing account rather than revive it.
+    pub fn reconnect(
+        &self,
+        token: String,
+        callback: impl FnOnce(Result<Account, BrookletError>) + 'static,
+    ) {
+        let service = self.setup_service.clone();
+        self.dispatch_account(async move { service.reconnect(token).await }, callback);
+    }
+
+    fn dispatch_account<T: Send + 'static>(
+        &self,
+        future: impl std::future::Future<Output = Result<T, BrookletError>> + Send + 'static,
+        callback: impl FnOnce(Result<T, BrookletError>) + 'static,
+    ) {
+        let operations = self.account_operations.clone();
+        self.dispatch(
+            async move {
+                let _guard = operations.lock().await;
+                future.await
+            },
+            callback,
+        );
     }
 
     pub fn cached_inbox(&self, callback: impl FnOnce(Result<Vec<Entry>, BrookletError>) + 'static) {
@@ -135,9 +163,11 @@ impl AppController {
 
     pub fn disconnect(&self, callback: impl FnOnce(Result<(), BrookletError>) + 'static) {
         let service = self.sync_service.clone();
+        let operations = self.account_operations.clone();
         let cache = self.image_cache.clone();
         self.dispatch(
             async move {
+                let _guard = operations.lock().await;
                 service.disconnect().await?;
                 cache.clear().await
             },

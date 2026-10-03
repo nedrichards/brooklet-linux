@@ -27,6 +27,10 @@ read/star changes stay queued and protected from remote state; Karakeep outages
 also leave delivery queued. Sync diagnostics retain delivery failures even when
 article refresh succeeds. Local storage errors still stop sync.
 
+To replace a rejected or missing Miniflux token, open Preferences → Reconnect
+account. Brooklet checks the token for the connected server and username, keeps
+cached articles and pending work, and retries sync after reconnecting.
+
 The canonical build is the Flatpak manifest at
 `flatpak/com.nedrichards.brooklet.Devel.json`. It targets GNOME 51 and is placed
 where GNOME Builder discovers it from a fresh checkout.

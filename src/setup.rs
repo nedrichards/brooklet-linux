@@ -45,6 +45,7 @@ impl IdentityValidator for MinifluxIdentityValidator {
 pub trait SetupService: Send + Sync {
     async fn existing_account(&self) -> Result<Option<Account>, BrookletError>;
     async fn configure(&self, request: SetupRequest) -> Result<Account, BrookletError>;
+    async fn reconnect(&self, token: String) -> Result<Account, BrookletError>;
 }
 
 pub struct AccountSetupService {
@@ -74,6 +75,9 @@ impl SetupService for AccountSetupService {
     }
 
     async fn configure(&self, request: SetupRequest) -> Result<Account, BrookletError> {
+        if self.repository.account().await?.is_some() {
+            return Err(BrookletError::AccountAlreadyConfigured);
+        }
         let token = request.token.trim().to_owned();
         if token.is_empty() {
             return Err(BrookletError::InvalidSetup("an API token"));
@@ -99,6 +103,32 @@ impl SetupService for AccountSetupService {
             let _ = self.secrets.delete_account_secrets(account.id).await;
             return Err(error);
         }
+        Ok(account)
+    }
+
+    async fn reconnect(&self, token: String) -> Result<Account, BrookletError> {
+        let token = token.trim().to_owned();
+        if token.is_empty() {
+            return Err(BrookletError::InvalidSetup("an API token"));
+        }
+        let account = self
+            .repository
+            .account()
+            .await?
+            .ok_or(BrookletError::InvalidSetup("a configured Miniflux account"))?;
+        let identity = self
+            .validator
+            .validate(&account.server_url, token.clone())
+            .await?;
+        if identity.user.username != account.username {
+            return Err(BrookletError::AccountMismatch);
+        }
+        // Repair only the credential: no account metadata write or deletion is
+        // needed, so a missing old secret can be repaired without loading it and
+        // cached articles, reader positions, pending work and Karakeep stay intact.
+        self.secrets
+            .store_miniflux_token(account.id, &token)
+            .await?;
         Ok(account)
     }
 }
