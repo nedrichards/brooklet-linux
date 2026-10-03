@@ -97,14 +97,38 @@ impl KarakeepApi for ReqwestKarakeepApi {
                 source,
             })?;
         let status = response.status();
-        if status.is_success() {
-            Ok(())
-        } else {
-            Err(BrookletError::Http {
+        if status != reqwest::StatusCode::OK && status != reqwest::StatusCode::CREATED {
+            return Err(BrookletError::Http {
                 status: status.as_u16(),
                 kind: classify_http_status(status.as_u16()),
-            })
+            });
         }
+        #[derive(serde::Deserialize)]
+        struct SavedBookmark {
+            id: String,
+            content: Link,
+        }
+        #[derive(serde::Deserialize)]
+        struct Link {
+            #[serde(rename = "type")]
+            kind: String,
+            url: String,
+        }
+        let saved = response.json::<SavedBookmark>().await.map_err(|_| {
+            BrookletError::KarakeepResponse("the endpoint returned an invalid bookmark response")
+        })?;
+        let returned_url = crate::services::url_policy::canonical_url(&saved.content.url).ok();
+        let requested_url = crate::services::url_policy::canonical_url(canonical_url).ok();
+        if saved.id.trim().is_empty()
+            || saved.content.kind != "link"
+            || requested_url.is_none()
+            || returned_url != requested_url
+        {
+            return Err(BrookletError::KarakeepResponse(
+                "the response did not identify the requested link",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -165,7 +189,10 @@ mod tests {
 
     #[tokio::test]
     async fn direct_delivery_uses_bearer_json_and_accepts_existing_bookmark() {
-        let (endpoint, requests) = serve(200);
+        let (endpoint, requests) = serve_body(
+            200,
+            r#"{"id":"existing","content":{"type":"link","url":"https://example.com/article"}}"#,
+        );
         let api = ReqwestKarakeepApi::new(&endpoint, "secret".into()).unwrap();
         api.save("https://example.com/article", "Article")
             .await
@@ -179,6 +206,48 @@ mod tests {
         );
         assert!(request.contains("\"url\":\"https://example.com/article\""));
         assert!(!request.contains("\"source\""));
+    }
+
+    #[tokio::test]
+    async fn successful_status_requires_a_matching_bookmark_acknowledgement() {
+        let valid =
+            r#"{"id":"created","content":{"type":"link","url":"https://example.com/article/"}}"#;
+        let (endpoint, requests) = serve_body(201, valid);
+        ReqwestKarakeepApi::new(&endpoint, "secret".into())
+            .unwrap()
+            .save("https://example.com/article", "Article")
+            .await
+            .unwrap();
+        assert!(requests.recv().unwrap().starts_with("POST "));
+        for (status, body) in [
+            (200, ""),
+            (201, "<html>OK</html>"),
+            (200, "{}"),
+            (200, r#"{"bookmarks":[]}"#),
+            (
+                201,
+                r#"{"id":"","content":{"type":"link","url":"https://example.com/article"}}"#,
+            ),
+            (
+                201,
+                r#"{"id":"wrong","content":{"type":"link","url":"https://example.com/other"}}"#,
+            ),
+            (
+                201,
+                r#"{"id":"wrong","content":{"type":"text","url":"https://example.com/article"}}"#,
+            ),
+            (202, valid),
+            (204, ""),
+        ] {
+            let (endpoint, requests) = serve_body(status, body);
+            let error = ReqwestKarakeepApi::new(&endpoint, "secret".into())
+                .unwrap()
+                .save("https://example.com/article", "Article")
+                .await
+                .unwrap_err();
+            assert_eq!(error.failure_kind(), FailureKind::MalformedRequest);
+            assert!(requests.recv().unwrap().starts_with("POST "));
+        }
     }
 
     #[tokio::test]

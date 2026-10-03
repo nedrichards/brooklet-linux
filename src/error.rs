@@ -41,14 +41,16 @@ pub enum BrookletError {
     RefreshFollowUpTimeout,
     #[error("Sync could not finish: {0}. Cached articles remain available; try Sync again.")]
     SyncResponse(&'static str),
+    #[error("Karakeep did not confirm the saved bookmark: {0}")]
+    KarakeepResponse(&'static str),
 }
 
 impl BrookletError {
     pub fn failure_kind(&self) -> FailureKind {
         match self {
-            Self::InvalidServiceUrl(_) | Self::UnsupportedDatabase { .. } => {
-                FailureKind::MalformedRequest
-            }
+            Self::InvalidServiceUrl(_)
+            | Self::UnsupportedDatabase { .. }
+            | Self::KarakeepResponse(_) => FailureKind::MalformedRequest,
             Self::Http { kind, .. } | Self::Transport { kind, .. } => *kind,
             Self::UnsupportedServer { .. } => FailureKind::UnsupportedServer,
             Self::Database(_)
@@ -64,6 +66,7 @@ impl BrookletError {
 
     pub fn setup_message(&self) -> String {
         match self {
+            Self::KarakeepResponse(_) => self.to_string(),
             Self::AccountMismatch | Self::AccountAlreadyConfigured | Self::RefreshFollowUpTimeout | Self::SyncResponse(_) | Self::UnsupportedDatabase { .. } => self.to_string(),
             Self::InvalidServiceUrl(detail) => format!("Check the Miniflux address: {detail}."),
             Self::InvalidSetup(detail) => format!("Please enter {detail}."),
@@ -93,6 +96,7 @@ impl BrookletError {
 
     pub fn karakeep_message(&self) -> String {
         match self {
+            Self::KarakeepResponse(_) => self.to_string(),
             Self::Http { status: 401 | 403, .. } => "Karakeep rejected the API key. Update it in Preferences, then retry the delivery.".into(),
             Self::Http { status, .. } => format!("Karakeep returned HTTP {status}. Check the endpoint or Miniflux integration, then retry."),
             Self::InvalidServiceUrl(detail) => format!("Check the Karakeep endpoint: {detail}."),
@@ -133,6 +137,7 @@ impl BrookletError {
                 "Brooklet could not update its local article cache.".into()
             }
             Self::RefreshFollowUpTimeout
+            | Self::KarakeepResponse(_)
             | Self::SyncResponse(_)
             | Self::UnsupportedDatabase { .. } => self.to_string(),
             Self::InvalidServiceUrl(_)

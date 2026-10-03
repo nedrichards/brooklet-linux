@@ -817,7 +817,7 @@ impl SqliteStore {
             "miniflux"
         };
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
-        connection.execute("INSERT INTO karakeep_deliveries(account_id,entry_id,canonical_url,title,route,state) VALUES(?1,?2,?3,?4,?5,'queued') ON CONFLICT(account_id,canonical_url) DO UPDATE SET entry_id=excluded.entry_id,title=excluded.title,route=excluded.route,state=CASE WHEN karakeep_deliveries.state='saved' THEN 'saved' ELSE 'queued' END,last_error=NULL",params![delivery.account_id,delivery.entry_id,delivery.canonical_url,delivery.title,route])?;
+        connection.execute("INSERT INTO karakeep_deliveries(account_id,entry_id,canonical_url,title,route,state) VALUES(?1,?2,?3,?4,?5,'queued') ON CONFLICT(account_id,canonical_url) DO UPDATE SET entry_id=excluded.entry_id,title=excluded.title,route=excluded.route,state=CASE WHEN karakeep_deliveries.state='saved' AND excluded.route!='direct' THEN 'saved' ELSE 'queued' END,last_error=NULL,completed_at_ms=CASE WHEN karakeep_deliveries.state='saved' AND excluded.route!='direct' THEN karakeep_deliveries.completed_at_ms ELSE NULL END",params![delivery.account_id,delivery.entry_id,delivery.canonical_url,delivery.title,route])?;
         Ok(())
     }
 
@@ -1772,6 +1772,39 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_direct_send_requeues_a_saved_receipt_but_integration_stays_coalesced() {
+        for route in [KarakeepRoute::Direct, KarakeepRoute::Miniflux] {
+            let repository = repository_with_entry().await;
+            let delivery = KarakeepDelivery {
+                id: 0,
+                account_id: 1,
+                entry_id: 42,
+                canonical_url: "https://example.com/42".into(),
+                title: "Story".into(),
+                route,
+                state: DeliveryState::Queued,
+                error: None,
+            };
+            repository.queue_karakeep(&delivery).await.unwrap();
+            let id = repository.pending_karakeep(1).await.unwrap()[0].id;
+            repository.finish_karakeep(id, None, 100).await.unwrap();
+            assert!(repository.pending_karakeep(1).await.unwrap().is_empty());
+            repository.queue_karakeep(&delivery).await.unwrap();
+            let pending = repository.pending_karakeep(1).await.unwrap();
+            if route == KarakeepRoute::Direct {
+                assert_eq!(pending.len(), 1);
+                assert_eq!(pending[0].id, id);
+                repository.queue_karakeep(&delivery).await.unwrap();
+                assert_eq!(repository.pending_karakeep(1).await.unwrap().len(), 1);
+                repository.finish_karakeep(id, None, 200).await.unwrap();
+            } else {
+                assert!(pending.is_empty());
+            }
+            assert!(repository.unfinished_karakeep(1).await.unwrap().is_empty());
+        }
     }
 
     #[tokio::test]

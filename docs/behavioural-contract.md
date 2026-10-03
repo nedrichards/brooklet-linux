@@ -43,8 +43,11 @@ authenticated client policy, article image policy), `core-database`
   unfinished Karakeep delivery.
 - Canonical URLs lowercase their origin, remove default ports and fragments,
   remove a trailing non-root slash, and retain query parameters.
-- Repeated Karakeep requests for one canonical URL coalesce. Successful receipts
-  remain visible for 30 days before pruning.
+- Unfinished Karakeep requests for one canonical URL coalesce. An explicit direct
+  send retries a previously saved URL; Karakeep returns an existing bookmark if
+  it is already present. Background sync does not replay completed saves.
+  Successful receipts remain visible for 30 days before pruning. Direct delivery
+  requires a 200/201 response identifying the requested link before acknowledging it.
 - Ordinary read articles default to 30-day retention with an upper bound of
   5,000. Unread, starred, recently opened, pending-mutation, and pending-
   Karakeep entries are protected.
