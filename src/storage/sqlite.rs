@@ -778,10 +778,18 @@ impl SqliteStore {
     }
 
     fn pending_karakeep(&self, account_id: i64) -> Result<Vec<KarakeepDelivery>, BrookletError> {
+        self.karakeep_deliveries(account_id, true)
+    }
+
+    fn karakeep_deliveries(
+        &self,
+        account_id: i64,
+        queued_only: bool,
+    ) -> Result<Vec<KarakeepDelivery>, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
-        let mut statement = connection.prepare("SELECT id,account_id,entry_id,canonical_url,title,route,state,last_error FROM karakeep_deliveries WHERE account_id=?1 AND state='queued' ORDER BY id")?;
+        let mut statement = connection.prepare("SELECT id,account_id,entry_id,canonical_url,title,route,state,last_error FROM karakeep_deliveries WHERE account_id=?1 AND state!='saved' AND (?2=0 OR state='queued') ORDER BY id")?;
         statement
-            .query_map([account_id], |row| {
+            .query_map(params![account_id, queued_only], |row| {
                 let route: String = row.get(5)?;
                 let state: String = row.get(6)?;
                 Ok(KarakeepDelivery {
@@ -805,6 +813,24 @@ impl SqliteStore {
             })?
             .collect::<Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    fn recover_karakeep(
+        &self,
+        account_id: i64,
+        delivery_id: i64,
+        route: Option<KarakeepRoute>,
+    ) -> Result<(), BrookletError> {
+        let connection = self.connection.lock().expect("SQLite mutex poisoned");
+        if let Some(route) = route {
+            connection.execute("UPDATE karakeep_deliveries SET state='queued',route=?3,last_error=NULL,completed_at_ms=NULL WHERE account_id=?1 AND id=?2 AND state!='saved'", params![account_id,delivery_id,if route == KarakeepRoute::Direct { "direct" } else { "miniflux" }])?;
+        } else {
+            connection.execute(
+                "DELETE FROM karakeep_deliveries WHERE account_id=?1 AND id=?2 AND state!='saved'",
+                params![account_id, delivery_id],
+            )?;
+        }
+        Ok(())
     }
 
     fn finish_karakeep(
@@ -1126,6 +1152,23 @@ impl Repository for SqliteRepository {
         account_id: i64,
     ) -> Result<Vec<KarakeepDelivery>, BrookletError> {
         self.run(move |store| store.pending_karakeep(account_id))
+            .await
+    }
+
+    async fn unfinished_karakeep(
+        &self,
+        account_id: i64,
+    ) -> Result<Vec<KarakeepDelivery>, BrookletError> {
+        self.run(move |store| store.karakeep_deliveries(account_id, false))
+            .await
+    }
+    async fn recover_karakeep(
+        &self,
+        account_id: i64,
+        delivery_id: i64,
+        route: Option<KarakeepRoute>,
+    ) -> Result<(), BrookletError> {
+        self.run(move |store| store.recover_karakeep(account_id, delivery_id, route))
             .await
     }
 

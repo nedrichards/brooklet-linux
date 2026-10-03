@@ -327,3 +327,304 @@ async fn failed_delivery_before_first_pull_does_not_prevent_bootstrap() {
             .contains("503")
     );
 }
+
+#[tokio::test]
+async fn karakeep_terminal_failure_is_visible_after_reopen_and_retry_uses_current_route() {
+    use brooklet::model::{DeliveryState, KarakeepConfig, KarakeepRoute};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cache.db");
+    let (repo, service, server) =
+        fixture_with_repository(Arc::new(SqliteRepository::open(&path).unwrap())).await;
+    service
+        .queue_karakeep(&repo.cached_entry(1, 42).await.unwrap().unwrap())
+        .await
+        .unwrap();
+    server.save_status.store(403, Ordering::Release);
+    service.sync().await.unwrap();
+    let failed = service.unfinished_karakeep().await.unwrap().remove(0);
+    assert_eq!(failed.state, DeliveryState::NeedsAttention);
+    assert!(failed.error.as_deref().unwrap().contains("token"));
+    assert!(repo.pending_karakeep(1).await.unwrap().is_empty());
+    let reopened = SqliteRepository::open(&path).unwrap();
+    assert_eq!(
+        reopened.unfinished_karakeep(1).await.unwrap(),
+        vec![failed.clone()]
+    );
+    // A stored direct failure can deliberately switch to the current integration route.
+    repo.recover_karakeep(1, failed.id, Some(KarakeepRoute::Direct))
+        .await
+        .unwrap();
+    repo.finish_karakeep(failed.id, Some("direct failure"), 0)
+        .await
+        .unwrap();
+    service
+        .save_karakeep_config(
+            &KarakeepConfig {
+                route: KarakeepRoute::Miniflux,
+                direct_endpoint: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    service.recover_karakeep(failed.id, true).await.unwrap();
+    let queued = repo.pending_karakeep(1).await.unwrap().remove(0);
+    assert_eq!(queued.route, KarakeepRoute::Miniflux);
+    assert_eq!(queued.error, None);
+    server.save_status.store(0, Ordering::Release);
+    service.sync().await.unwrap();
+    assert!(service.unfinished_karakeep().await.unwrap().is_empty());
+    // Stale controls cannot replay a receipt that has succeeded.
+    service.recover_karakeep(failed.id, true).await.unwrap();
+    service.recover_karakeep(failed.id, false).await.unwrap();
+    assert!(repo.pending_karakeep(1).await.unwrap().is_empty());
+    assert_eq!(
+        repo.cached_entry(1, 42)
+            .await
+            .unwrap()
+            .unwrap()
+            .delivery_state,
+        Some(DeliveryState::Saved)
+    );
+}
+
+#[tokio::test]
+async fn karakeep_dismiss_is_account_scoped_and_preserves_article_and_pending_edits() {
+    let (repo, service, server) = fixture().await;
+    service
+        .queue_karakeep(&repo.cached_entry(1, 42).await.unwrap().unwrap())
+        .await
+        .unwrap();
+    service.set_read_local(42, true).await.unwrap();
+    server.save_status.store(503, Ordering::Release);
+    service.sync().await.unwrap();
+    let delivery = service.unfinished_karakeep().await.unwrap().remove(0);
+    assert!(delivery.error.is_some());
+    repo.recover_karakeep(99, delivery.id, None).await.unwrap();
+    assert_eq!(service.unfinished_karakeep().await.unwrap().len(), 1);
+    let before = repo.cached_entry(1, 42).await.unwrap().unwrap();
+    // Create a fresh unsent intention before dismissing only the receipt.
+    service.set_starred_local(42, true).await.unwrap();
+    service.recover_karakeep(delivery.id, false).await.unwrap();
+    assert!(service.unfinished_karakeep().await.unwrap().is_empty());
+    let article = repo.cached_entry(1, 42).await.unwrap().unwrap();
+    assert_eq!(article.read, before.read);
+    assert!(article.starred);
+    assert_eq!(article.delivery_state, None);
+    assert_eq!(repo.pending_mutations(1).await.unwrap().len(), 1);
+    server.calls.lock().unwrap().clear();
+    service.sync().await.unwrap();
+    assert!(
+        !server
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "save")
+    );
+}
+
+#[derive(Default)]
+struct KarakeepSecrets {
+    key: Mutex<Option<String>>,
+    fail: std::sync::atomic::AtomicBool,
+}
+#[async_trait]
+impl SecretStore for KarakeepSecrets {
+    async fn load_miniflux_token(&self, _: i64) -> Result<Option<String>, BrookletError> {
+        Ok(Some("miniflux-token".into()))
+    }
+    async fn store_miniflux_token(&self, _: i64, _: &str) -> Result<(), BrookletError> {
+        unreachable!()
+    }
+    async fn delete_account_secrets(&self, _: i64) -> Result<(), BrookletError> {
+        unreachable!()
+    }
+    async fn load_karakeep_key(&self, _: i64) -> Result<Option<String>, BrookletError> {
+        Ok(self.key.lock().unwrap().clone())
+    }
+    async fn store_karakeep_key(&self, _: i64, key: &str) -> Result<(), BrookletError> {
+        if self.fail.load(Ordering::Acquire) {
+            return Err(BrookletError::SecretStore("unavailable".into()));
+        }
+        *self.key.lock().unwrap() = Some(key.into());
+        Ok(())
+    }
+    async fn delete_karakeep_key(&self, _: i64) -> Result<(), BrookletError> {
+        *self.key.lock().unwrap() = None;
+        Ok(())
+    }
+}
+#[derive(Default)]
+struct KarakeepServer {
+    status: AtomicU16,
+    calls: Mutex<Vec<(String, String)>>,
+}
+struct KarakeepClient(Arc<KarakeepServer>);
+#[async_trait]
+impl brooklet::services::traits::KarakeepApi for KarakeepClient {
+    async fn validate(&self) -> Result<(), BrookletError> {
+        let status = self.0.status.load(Ordering::Acquire);
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(BrookletError::Http {
+                status,
+                kind: classify_http_status(status),
+            })
+        }
+    }
+    async fn save(&self, _: &str, _: &str) -> Result<(), BrookletError> {
+        unreachable!("settings validation must never create a bookmark")
+    }
+}
+struct KarakeepFactory(Arc<KarakeepServer>);
+impl brooklet::sync::KarakeepApiFactory for KarakeepFactory {
+    fn create(
+        &self,
+        endpoint: &str,
+        key: String,
+    ) -> Result<Box<dyn brooklet::services::traits::KarakeepApi>, BrookletError> {
+        self.0.calls.lock().unwrap().push((endpoint.into(), key));
+        Ok(Box::new(KarakeepClient(self.0.clone())))
+    }
+}
+
+#[tokio::test]
+async fn direct_settings_require_valid_endpoint_key_and_server_before_persistence() {
+    use brooklet::model::{KarakeepConfig, KarakeepRoute};
+    let (repo, _, server) = fixture().await;
+    let secrets = Arc::new(KarakeepSecrets::default());
+    let direct_server = Arc::new(KarakeepServer::default());
+    let service = AccountSyncService::new(repo.clone(), secrets.clone(), Arc::new(Factory(server)))
+        .with_karakeep_factory(Arc::new(KarakeepFactory(direct_server.clone())));
+    let mut config = KarakeepConfig {
+        route: KarakeepRoute::Direct,
+        direct_endpoint: Some("http://insecure.example/api/v1/bookmarks".into()),
+    };
+    assert!(
+        service
+            .save_karakeep_config(&config, Some("new-key".into()))
+            .await
+            .is_err()
+    );
+    config.direct_endpoint = Some("https://karakeep.example/api/v1/bookmarks".into());
+    assert!(service.save_karakeep_config(&config, None).await.is_err());
+    assert!(direct_server.calls.lock().unwrap().is_empty());
+    direct_server.status.store(401, Ordering::Release);
+    assert!(
+        service
+            .save_karakeep_config(&config, Some("bad-key".into()))
+            .await
+            .is_err()
+    );
+    assert_eq!(repo.karakeep_config(1).await.unwrap(), None);
+    assert_eq!(*secrets.key.lock().unwrap(), None);
+    direct_server.status.store(0, Ordering::Release);
+    service
+        .save_karakeep_config(&config, Some("good-key".into()))
+        .await
+        .unwrap();
+    assert_eq!(repo.karakeep_config(1).await.unwrap(), Some(config.clone()));
+    config.direct_endpoint = Some("https://karakeep.example/new/api/v1/bookmarks".into());
+    direct_server.status.store(403, Ordering::Release);
+    assert!(
+        service
+            .save_karakeep_config(&config, Some("replacement".into()))
+            .await
+            .is_err()
+    );
+    assert_eq!(*secrets.key.lock().unwrap(), Some("good-key".into()));
+    assert_ne!(repo.karakeep_config(1).await.unwrap(), Some(config.clone()));
+    direct_server.status.store(0, Ordering::Release);
+    secrets.fail.store(true, Ordering::Release);
+    assert!(
+        service
+            .save_karakeep_config(&config, Some("replacement".into()))
+            .await
+            .is_err()
+    );
+    assert_ne!(repo.karakeep_config(1).await.unwrap(), Some(config.clone()));
+    // Retaining a readable saved key needs no keyring write.
+    service.save_karakeep_config(&config, None).await.unwrap();
+    assert_eq!(
+        direct_server.calls.lock().unwrap().last().unwrap().1,
+        "good-key"
+    );
+    assert_eq!(*secrets.key.lock().unwrap(), Some("good-key".into()));
+}
+
+#[tokio::test]
+async fn failed_settings_database_write_restores_only_karakeep_secret() {
+    use brooklet::model::{KarakeepConfig, KarakeepRoute};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cache.db");
+    let (repo, _, server) =
+        fixture_with_repository(Arc::new(SqliteRepository::open(&path).unwrap())).await;
+    let secrets = Arc::new(KarakeepSecrets::default());
+    let direct = Arc::new(KarakeepServer::default());
+    let service = AccountSyncService::new(repo.clone(), secrets.clone(), Arc::new(Factory(server)))
+        .with_karakeep_factory(Arc::new(KarakeepFactory(direct)));
+    let config = KarakeepConfig {
+        route: KarakeepRoute::Direct,
+        direct_endpoint: Some("https://karakeep.example/api/v1/bookmarks".into()),
+    };
+    rusqlite::Connection::open(&path).unwrap().execute_batch("CREATE TRIGGER reject_config BEFORE INSERT ON karakeep_config BEGIN SELECT RAISE(FAIL,'disk failure'); END;").unwrap();
+    for old in [None, Some("old-key".to_string())] {
+        *secrets.key.lock().unwrap() = old.clone();
+        assert!(matches!(
+            service
+                .save_karakeep_config(&config, Some("new-key".into()))
+                .await,
+            Err(BrookletError::Database(_))
+        ));
+        assert_eq!(*secrets.key.lock().unwrap(), old);
+        assert_eq!(repo.karakeep_config(1).await.unwrap(), None);
+        assert!(repo.cached_entry(1, 42).await.unwrap().is_some());
+    }
+}
+
+#[tokio::test]
+async fn direct_delivery_missing_key_is_actionable_without_breaking_integration_route() {
+    use brooklet::model::{DeliveryState, KarakeepConfig, KarakeepRoute};
+    let (repo, service, server) = fixture().await;
+    // Legacy direct settings may lack their secret after a keyring loss.
+    repo.save_karakeep_config(
+        1,
+        &KarakeepConfig {
+            route: KarakeepRoute::Direct,
+            direct_endpoint: Some("https://karakeep.example/api/v1/bookmarks".into()),
+        },
+    )
+    .await
+    .unwrap();
+    service
+        .queue_karakeep(&repo.cached_entry(1, 42).await.unwrap().unwrap())
+        .await
+        .unwrap();
+    service.sync().await.unwrap();
+    let failed = service.unfinished_karakeep().await.unwrap().remove(0);
+    assert_eq!(failed.state, DeliveryState::NeedsAttention);
+    assert!(failed.error.unwrap().contains("Karakeep API key"));
+    service
+        .save_karakeep_config(
+            &KarakeepConfig {
+                route: KarakeepRoute::Miniflux,
+                direct_endpoint: Some("https://karakeep.example/api/v1/bookmarks".into()),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    service.recover_karakeep(failed.id, true).await.unwrap();
+    service.sync().await.unwrap();
+    assert!(service.unfinished_karakeep().await.unwrap().is_empty());
+    assert!(
+        server
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "save")
+    );
+}

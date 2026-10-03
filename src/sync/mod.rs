@@ -37,6 +37,16 @@ pub trait MinifluxApiFactory: Send + Sync {
     ) -> Result<Box<dyn MinifluxApi>, BrookletError>;
 }
 
+pub trait KarakeepApiFactory: Send + Sync {
+    fn create(&self, endpoint: &str, key: String) -> Result<Box<dyn KarakeepApi>, BrookletError>;
+}
+pub struct ReqwestKarakeepApiFactory;
+impl KarakeepApiFactory for ReqwestKarakeepApiFactory {
+    fn create(&self, endpoint: &str, key: String) -> Result<Box<dyn KarakeepApi>, BrookletError> {
+        Ok(Box::new(ReqwestKarakeepApi::new(endpoint, key)?))
+    }
+}
+
 pub struct ReqwestMinifluxApiFactory;
 
 impl MinifluxApiFactory for ReqwestMinifluxApiFactory {
@@ -82,6 +92,14 @@ pub trait SyncService: Send + Sync {
     ) -> Result<Option<ReaderPosition>, BrookletError>;
     async fn save_reader_position(&self, position: &ReaderPosition) -> Result<(), BrookletError>;
     async fn queue_karakeep(&self, entry: &Entry) -> Result<(), BrookletError>;
+    async fn unfinished_karakeep(&self) -> Result<Vec<KarakeepDelivery>, BrookletError> {
+        Ok(Vec::new())
+    }
+    /// Retry with current settings; None dismisses only the local unfinished receipt.
+    async fn recover_karakeep(&self, delivery_id: i64, retry: bool) -> Result<(), BrookletError> {
+        let _ = (delivery_id, retry);
+        Err(BrookletError::InvalidSetup("delivery recovery support"))
+    }
     async fn karakeep_config(&self) -> Result<Option<KarakeepConfig>, BrookletError>;
     async fn save_karakeep_config(
         &self,
@@ -104,6 +122,7 @@ pub struct AccountSyncService {
     repository: Arc<dyn Repository>,
     secrets: Arc<dyn SecretStore>,
     api_factory: Arc<dyn MinifluxApiFactory>,
+    karakeep_factory: Arc<dyn KarakeepApiFactory>,
     sync_lock: tokio::sync::Mutex<()>,
     running: AtomicBool,
 }
@@ -118,9 +137,37 @@ impl AccountSyncService {
             repository,
             secrets,
             api_factory,
+            karakeep_factory: Arc::new(ReqwestKarakeepApiFactory),
             sync_lock: tokio::sync::Mutex::new(()),
             running: AtomicBool::new(false),
         }
+    }
+
+    pub fn with_karakeep_factory(mut self, factory: Arc<dyn KarakeepApiFactory>) -> Self {
+        self.karakeep_factory = factory;
+        self
+    }
+
+    async fn direct_karakeep_api(
+        &self,
+        account_id: i64,
+    ) -> Result<Box<dyn KarakeepApi>, BrookletError> {
+        let config = self
+            .repository
+            .karakeep_config(account_id)
+            .await?
+            .ok_or(BrookletError::InvalidSetup("a Karakeep API endpoint"))?;
+        let endpoint = config
+            .direct_endpoint
+            .as_deref()
+            .ok_or(BrookletError::InvalidSetup("a Karakeep API endpoint"))?;
+        let key = self
+            .secrets
+            .load_karakeep_key(account_id)
+            .await?
+            .filter(|key| !key.trim().is_empty())
+            .ok_or(BrookletError::InvalidSetup("a Karakeep API key"))?;
+        self.karakeep_factory.create(endpoint, key)
     }
 
     async fn configured_account(&self) -> Result<crate::model::Account, BrookletError> {
@@ -224,29 +271,12 @@ impl AccountSyncService {
                     accepted.extend(batch);
                 }
             }
-            let karakeep_config = self.repository.karakeep_config(account.id).await?;
-            let direct_api = if let Some(config) = karakeep_config
-                .as_ref()
-                .filter(|config| config.route == KarakeepRoute::Direct)
-            {
-                match (
-                    &config.direct_endpoint,
-                    self.secrets.load_karakeep_key(account.id).await?,
-                ) {
-                    (Some(endpoint), Some(key)) => Some(ReqwestKarakeepApi::new(endpoint, key)?),
-                    _ => None,
-                }
-            } else {
-                None
-            };
             for delivery in self.repository.pending_karakeep(account.id).await? {
                 let result = match delivery.route {
                     KarakeepRoute::Miniflux => api.save_to_integration(delivery.entry_id).await,
-                    KarakeepRoute::Direct => match &direct_api {
-                        Some(client) => client.save(&delivery.canonical_url, &delivery.title).await,
-                        None => Err(BrookletError::InvalidSetup(
-                            "a Karakeep endpoint and API key",
-                        )),
+                    KarakeepRoute::Direct => match self.direct_karakeep_api(account.id).await {
+                        Ok(client) => client.save(&delivery.canonical_url, &delivery.title).await,
+                        Err(error) => Err(error),
                     },
                 };
                 match result {
@@ -258,12 +288,19 @@ impl AccountSyncService {
                     Err(error) => {
                         if error.failure_kind() == crate::model::FailureKind::Retryable {
                             self.repository
-                                .defer_karakeep(delivery.id, &error.to_string())
+                                .defer_karakeep(
+                                    delivery.id,
+                                    &delivery_error_message(delivery.route, &error),
+                                )
                                 .await?;
                             return Err(error);
                         }
                         self.repository
-                            .finish_karakeep(delivery.id, Some(&error.to_string()), now_ms())
+                            .finish_karakeep(
+                                delivery.id,
+                                Some(&delivery_error_message(delivery.route, &error)),
+                                now_ms(),
+                            )
                             .await?;
                     }
                 }
@@ -477,25 +514,74 @@ impl SyncService for AccountSyncService {
         let account = self.configured_account().await?;
         self.repository.karakeep_config(account.id).await
     }
+    async fn unfinished_karakeep(&self) -> Result<Vec<KarakeepDelivery>, BrookletError> {
+        let account = self.configured_account().await?;
+        self.repository.unfinished_karakeep(account.id).await
+    }
+    async fn recover_karakeep(&self, delivery_id: i64, retry: bool) -> Result<(), BrookletError> {
+        let _guard = self.sync_lock.lock().await;
+        let account = self.configured_account().await?;
+        let route = if retry {
+            Some(
+                self.repository
+                    .karakeep_config(account.id)
+                    .await?
+                    .map_or(KarakeepRoute::Miniflux, |config| config.route),
+            )
+        } else {
+            None
+        };
+        self.repository
+            .recover_karakeep(account.id, delivery_id, route)
+            .await
+    }
     async fn save_karakeep_config(
         &self,
         config: &KarakeepConfig,
         key: Option<String>,
     ) -> Result<(), BrookletError> {
+        let _guard = self.sync_lock.lock().await;
         let account = self.configured_account().await?;
-        if config.route == KarakeepRoute::Direct {
-            let endpoint = config
-                .direct_endpoint
-                .as_deref()
-                .ok_or(BrookletError::InvalidSetup("a Karakeep API endpoint"))?;
-            crate::services::url_policy::service_url(endpoint)?;
-            if let Some(key) = key.as_deref() {
-                self.secrets.store_karakeep_key(account.id, key).await?;
-            }
+        if config.route != KarakeepRoute::Direct {
+            return self
+                .repository
+                .save_karakeep_config(account.id, config)
+                .await;
         }
-        self.repository
+        let endpoint = config
+            .direct_endpoint
+            .as_deref()
+            .ok_or(BrookletError::InvalidSetup("a Karakeep API endpoint"))?;
+        crate::services::url_policy::service_url(endpoint)?;
+        let old_key = self.secrets.load_karakeep_key(account.id).await?;
+        let key = key
+            .filter(|key| !key.trim().is_empty())
+            .or_else(|| old_key.clone())
+            .filter(|key| !key.trim().is_empty())
+            .ok_or(BrookletError::InvalidSetup("a Karakeep API key"))?;
+        self.karakeep_factory
+            .create(endpoint, key.clone())?
+            .validate()
+            .await?;
+        let replacing_key = old_key.as_ref() != Some(&key);
+        if replacing_key {
+            self.secrets.store_karakeep_key(account.id, &key).await?;
+        }
+        if let Err(error) = self
+            .repository
             .save_karakeep_config(account.id, config)
             .await
+        {
+            // A failed metadata write must not silently replace the working key.
+            if replacing_key {
+                match old_key {
+                    Some(old) => self.secrets.store_karakeep_key(account.id, &old).await?,
+                    None => self.secrets.delete_karakeep_key(account.id).await?,
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
     }
     async fn storage_policy(&self) -> Result<StoragePolicy, BrookletError> {
         let account = self.configured_account().await?;
@@ -529,6 +615,16 @@ impl SyncService for AccountSyncService {
 
     async fn sync(&self) -> Result<SyncResult, BrookletError> {
         self.run_sync(false).await
+    }
+}
+
+fn delivery_error_message(route: KarakeepRoute, error: &BrookletError) -> String {
+    match route {
+        KarakeepRoute::Direct => error.karakeep_message(),
+        KarakeepRoute::Miniflux => format!(
+            "{} Check Miniflux’s Karakeep integration before retrying.",
+            error.sync_message()
+        ),
     }
 }
 

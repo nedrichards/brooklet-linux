@@ -57,6 +57,7 @@ cargo_target = custom_target(
     'src/ui/reader_images.rs',
     'src/ui/setup.rs',
     'src/ui/reconnect.rs',
+    'src/ui/karakeep.rs',
     'src/ui/signal_scope.rs',
     'src/sync/mod.rs',
     'resources/ui/window.blp',

@@ -75,6 +75,19 @@ impl BrookletError {
         }
     }
 
+    pub fn karakeep_message(&self) -> String {
+        match self {
+            Self::Http { status: 401 | 403, .. } => "Karakeep rejected the API key. Update it in Preferences, then retry the delivery.".into(),
+            Self::Http { status, .. } => format!("Karakeep returned HTTP {status}. Check the endpoint or Miniflux integration, then retry."),
+            Self::InvalidServiceUrl(detail) => format!("Check the Karakeep endpoint: {detail}."),
+            Self::InvalidSetup(detail) => format!("Please enter {detail}."),
+            Self::Transport { kind: FailureKind::MalformedRequest, .. } => "The endpoint did not return a Karakeep bookmarks response. Check its address.".into(),
+            Self::Transport { .. } => "Karakeep could not be reached. Check the connection and endpoint, then retry.".into(),
+            Self::SecretStore(_) => "The Karakeep key could not be accessed or saved securely. Check your system secret service.".into(),
+            _ => "Brooklet could not update local Karakeep delivery data.".into(),
+        }
+    }
+
     pub fn sync_message(&self) -> String {
         match self {
             Self::Http {

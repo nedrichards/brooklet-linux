@@ -3751,6 +3751,7 @@ fn install_window_tools(
             karakeep.set_title("Karakeep delivery");
             let direct = adw::SwitchRow::new();
             direct.set_title("Send directly to Karakeep");
+            direct.set_sensitive(false);
             direct.set_subtitle("Otherwise use Miniflux’s configured integration");
             karakeep.add(&direct);
             let endpoint = adw::EntryRow::new();
@@ -3772,6 +3773,20 @@ fn install_window_tools(
             let save_karakeep = gtk::Button::with_label("Save Karakeep settings");
             save_karakeep.set_margin_top(8);
             karakeep.add(&save_karakeep);
+            let deliveries = gtk::Button::with_label("Manage deliveries…");
+            karakeep.add(&deliveries);
+            signals.track(&deliveries, deliveries.connect_clicked({
+                let window = window.clone();
+                let dialog = dialog.clone();
+                let controller = controller.clone();
+                move |_| {
+                    dialog.close();
+                    let weak = window.downgrade();
+                    ui::karakeep::present(&window, controller.clone(), move || {
+                        if let Some(window) = weak.upgrade() { ui::reconnect::sync_when_ready(&window); }
+                    });
+                }
+            }));
             page.add(&karakeep);
             let diagnostics = adw::PreferencesGroup::new();
             diagnostics.set_title("Sync diagnostics");
@@ -3835,25 +3850,37 @@ fn install_window_tools(
                 }
             });
             controller.karakeep_config({
+                let save = save_karakeep.clone();
                 let direct = direct.clone();
                 let endpoint = endpoint.clone();
                 let toast = toast.clone();
-                move |result| match result {
+                move |result| {
+                    save.set_sensitive(true);
+                    direct.set_sensitive(true);
+                    match result {
                     Ok(Some(config)) => {
                         direct.set_active(config.route == brooklet::model::KarakeepRoute::Direct);
                         endpoint.set_text(config.direct_endpoint.as_deref().unwrap_or(""));
                     }
                     Ok(None) => {}
-                    Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
+                    Err(error) => toast.add_toast(adw::Toast::new(&error.karakeep_message())),
+                    }
                 }
             });
+            save_karakeep.set_sensitive(false);
             signals.track(&save_karakeep, save_karakeep.connect_clicked({
                 let controller = controller.clone();
                 let direct = direct.clone();
                 let endpoint = endpoint.clone();
                 let key = key.clone();
                 let toast = toast.clone();
-                move |_| {
+                move |button| {
+                    if !button.is_sensitive() { return; }
+                    button.set_sensitive(false);
+                    button.set_label("Checking Karakeep…");
+                    direct.set_sensitive(false);
+                    endpoint.set_sensitive(false);
+                    key.set_sensitive(false);
                     let route = if direct.is_active() {
                         brooklet::model::KarakeepRoute::Direct
                     } else {
@@ -3870,12 +3897,23 @@ fn install_window_tools(
                         (!secret.is_empty()).then_some(secret),
                         {
                             let toast = toast.clone();
-                            move |result| match result {
+                            let button = button.clone();
+                            let direct = direct.clone();
+                            let endpoint = endpoint.clone();
+                            let key = key.clone();
+                            move |result| {
+                                button.set_sensitive(true);
+                                button.set_label("Save Karakeep settings");
+                                direct.set_sensitive(true);
+                                endpoint.set_sensitive(direct.is_active());
+                                key.set_sensitive(direct.is_active());
+                                match result {
                                 Ok(()) => {
                                     toast.add_toast(adw::Toast::new("Karakeep settings saved"))
                                 }
                                 Err(error) => {
-                                    toast.add_toast(adw::Toast::new(&error.sync_message()))
+                                    toast.add_toast(adw::Toast::new(&error.karakeep_message()))
+                                }
                                 }
                             }
                         },
@@ -4944,6 +4982,7 @@ pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
     smoke_test_image_anchor()?;
     ui::signal_scope::smoke_test()?;
     ui::reconnect::smoke_test()?;
+    ui::karakeep::smoke_test()?;
     smoke_test_reader_pipeline(false)
 }
 

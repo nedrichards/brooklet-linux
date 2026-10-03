@@ -11,7 +11,7 @@ this plan.
 2. **Complete:** Separate upload failures from incoming sync: preserve pending intentions
    while allowing incoming articles during delivery failures.
 3. **Complete:** Repair Miniflux credentials without clearing local data.
-4. Expose and recover failed Karakeep deliveries; validate direct settings.
+4. **Complete:** Expose and recover failed Karakeep deliveries; validate direct settings.
 5. Refresh visible Library drill-down pages while preserving context.
 6. Follow up asynchronous server feed refresh with a bounded incoming pull.
 7. Show persistent, actionable sync and delivery health.
@@ -68,3 +68,28 @@ remote deletion, and refresh inside a feed.
   ordering, and deferred sync exactly once. Smoke emitted development-runtime
   portal/session-bus and Glycin warnings. A real account/keyring repair was not
   exercised.
+
+- Checkpoint 4: Preferences offers a list of unfinished Karakeep deliveries with
+  their route, state, URL and error. Retry deliberately uses current settings;
+  dismiss removes only the unfinished local receipt. Account-scoped recovery
+  cannot replay or remove a successful receipt and preserves articles and edits.
+  Recovery/settings serialize with uploads and logout. Missing direct credentials
+  now record an actionable receipt error without preventing integration delivery.
+- Direct settings require a key and a read-only, bounded GET of the bookmarks
+  endpoint before persistence. Blank keys retain and revalidate the saved key.
+  Validation/keyring failures preserve settings; a failed database save restores
+  the previous Karakeep secret without touching Miniflux. Keyring/database writes
+  cannot form a cross-store transaction, so rollback errors are reported.
+  The payload omits the unnecessary custom source field, and an arbitrary HTTP
+  409 is no longer accepted as proof of delivery. API references:
+  https://docs.karakeep.app/api/list-bookmarks/ and
+  https://docs.karakeep.app/api/create-bookmark/.
+- Checkpoint 4 verification: all 110 working-tree and 86 isolated-commit tests
+  passed. Seven new regressions cover read-only authentication/response checks,
+  redirect/conflict rejection, restart-visible failures, rerouting/retry,
+  account-scoped dismiss, saved-receipt protection, missing keys, keyring failures
+  and database-write rollback. SDK formatting, GUI Clippy with warnings denied,
+  GUI build and GTK smoke passed in both trees. UI smoke exercises actual retry,
+  duplicate clicks and dismiss through the controller against SQLite. Smoke
+  emitted development-runtime portal/session-bus and Glycin warnings. Real
+  Karakeep/Miniflux integration and system keyring recovery were not exercised.

@@ -113,6 +113,14 @@ impl SecretStore for Oo7SecretStore {
             .map_err(|_| BrookletError::SecretStore("stored Karakeep key is not valid text".into()))
     }
 
+    async fn delete_karakeep_key(&self, account_id: i64) -> Result<(), BrookletError> {
+        self.keyring()
+            .await?
+            .delete(&self.karakeep_attributes(&account_id.to_string()))
+            .await
+            .map_err(|error| BrookletError::SecretStore(error.to_string()))
+    }
+
     async fn store_karakeep_key(&self, account_id: i64, key: &str) -> Result<(), BrookletError> {
         let account_id = account_id.to_string();
         self.keyring()

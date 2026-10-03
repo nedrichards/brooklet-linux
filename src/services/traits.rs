@@ -29,6 +29,7 @@ pub trait MinifluxApi: Send + Sync {
 
 #[async_trait]
 pub trait KarakeepApi: Send + Sync {
+    async fn validate(&self) -> Result<(), BrookletError>;
     async fn save(&self, canonical_url: &str, title: &str) -> Result<(), BrookletError>;
 }
 
@@ -183,6 +184,21 @@ pub trait Repository: Send + Sync {
         let _ = delivery;
         Ok(())
     }
+    async fn unfinished_karakeep(
+        &self,
+        account_id: i64,
+    ) -> Result<Vec<KarakeepDelivery>, BrookletError> {
+        self.pending_karakeep(account_id).await
+    }
+    async fn recover_karakeep(
+        &self,
+        account_id: i64,
+        delivery_id: i64,
+        route: Option<crate::model::KarakeepRoute>,
+    ) -> Result<(), BrookletError> {
+        let _ = (account_id, delivery_id, route);
+        Err(BrookletError::InvalidSetup("delivery recovery support"))
+    }
     async fn pending_karakeep(
         &self,
         account_id: i64,
@@ -248,6 +264,9 @@ pub trait SecretStore: Send + Sync {
     async fn delete_account_secrets(&self, account_id: i64) -> Result<(), BrookletError>;
     async fn load_karakeep_key(&self, _account_id: i64) -> Result<Option<String>, BrookletError> {
         Ok(None)
+    }
+    async fn delete_karakeep_key(&self, _account_id: i64) -> Result<(), BrookletError> {
+        Ok(())
     }
     async fn store_karakeep_key(&self, _account_id: i64, _key: &str) -> Result<(), BrookletError> {
         Ok(())

@@ -5,8 +5,8 @@ use adw::glib;
 use crate::{
     error::BrookletError,
     model::{
-        Account, Category, Entry, EntryId, Feed, KarakeepConfig, ReaderPosition, StoragePolicy,
-        SyncStatus,
+        Account, Category, Entry, EntryId, Feed, KarakeepConfig, KarakeepDelivery, ReaderPosition,
+        StoragePolicy, SyncStatus,
     },
     setup::{SetupRequest, SetupService},
     sync::{SyncResult, SyncService},
@@ -288,6 +288,26 @@ impl AppController {
         );
     }
 
+    pub fn unfinished_karakeep(
+        &self,
+        callback: impl FnOnce(Result<Vec<KarakeepDelivery>, BrookletError>) + 'static,
+    ) {
+        let service = self.sync_service.clone();
+        self.dispatch(async move { service.unfinished_karakeep().await }, callback);
+    }
+    pub fn recover_karakeep(
+        &self,
+        id: i64,
+        retry: bool,
+        callback: impl FnOnce(Result<(), BrookletError>) + 'static,
+    ) {
+        let service = self.sync_service.clone();
+        self.dispatch_account(
+            async move { service.recover_karakeep(id, retry).await },
+            callback,
+        );
+    }
+
     pub fn karakeep_config(
         &self,
         callback: impl FnOnce(Result<Option<KarakeepConfig>, BrookletError>) + 'static,
@@ -303,7 +323,7 @@ impl AppController {
         callback: impl FnOnce(Result<(), BrookletError>) + 'static,
     ) {
         let service = self.sync_service.clone();
-        self.dispatch(
+        self.dispatch_account(
             async move { service.save_karakeep_config(&config, key).await },
             callback,
         );
