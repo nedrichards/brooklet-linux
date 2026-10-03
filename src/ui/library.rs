@@ -249,6 +249,22 @@ fn feed_rows(list: &gtk::ListBox) -> Vec<adw::ActionRow> {
 fn feed_id(row: &adw::ActionRow) -> Option<i64> {
     row.action_target_value().and_then(|value| value.get())
 }
+fn feed_status(feed: &Feed) -> Option<String> {
+    let message = feed.parsing_error_message.trim();
+    let error = if !message.is_empty() {
+        Some(format!("Update failed: {message}"))
+    } else if feed.parsing_error_count > 0 {
+        Some("Update failed on the server".into())
+    } else {
+        None
+    };
+    match (feed.disabled, error) {
+        (true, Some(error)) => Some(format!("Updates disabled in Miniflux · {error}")),
+        (true, None) => Some("Updates disabled in Miniflux".into()),
+        (false, error) => error,
+    }
+}
+
 fn replace_feeds(page: &Rc<Page>, feeds: Vec<Feed>) {
     let Contents::Category { list, .. } = &page.contents else {
         return;
@@ -297,6 +313,9 @@ fn replace_feeds(page: &Rc<Page>, feeds: Vec<Feed>) {
             row
         });
         row.set_title(&feed.title);
+        let status = feed_status(feed);
+        row.set_subtitle(status.as_deref().unwrap_or(""));
+        row.set_tooltip_text(status.as_deref());
         if !same_order {
             list.append(&row);
         }

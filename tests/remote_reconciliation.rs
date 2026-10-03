@@ -34,12 +34,14 @@ fn story(id: i64, changed: i64) -> EntryDto {
 }
 #[derive(Default)]
 struct Server {
+    feeds: Mutex<Vec<FeedDto>>,
     entries: Mutex<Vec<EntryDto>>,
     queries: Mutex<Vec<EntryQuery>>,
     probes: Mutex<Vec<i64>>,
     omitted: Mutex<HashSet<i64>>,
     race: AtomicBool,
     bad_page: AtomicU16,
+    feed_status: AtomicU16,
     inventory_status: AtomicU16,
     probe_status: AtomicU16,
     upload_status: AtomicU16,
@@ -68,7 +70,8 @@ impl MinifluxApi for Api {
         Ok(vec![])
     }
     async fn feeds(&self) -> Result<Vec<FeedDto>, BrookletError> {
-        Ok(vec![])
+        status(&self.0.feed_status)?;
+        Ok(self.0.feeds.lock().unwrap().clone())
     }
     async fn entries(&self, query: &EntryQuery) -> Result<EntriesDto, BrookletError> {
         self.0.queries.lock().unwrap().push(query.clone());
@@ -464,10 +467,10 @@ async fn deletion_marker_upgrade_preserves_existing_cache_and_pending_work() {
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
     connection
-        .execute_batch("ALTER TABLE entries DROP COLUMN remote_removed")
+        .execute_batch("ALTER TABLE entries DROP COLUMN remote_removed; ALTER TABLE feeds DROP COLUMN parsing_error_message; ALTER TABLE feeds DROP COLUMN parsing_error_count; ALTER TABLE feeds DROP COLUMN disabled")
         .unwrap();
     connection
-        .pragma_update(None, "user_version", version - 1)
+        .pragma_update(None, "user_version", version - 2)
         .unwrap();
     drop(connection);
     let upgraded = SqliteRepository::open(&path).unwrap();
@@ -482,4 +485,80 @@ async fn deletion_marker_upgrade_preserves_existing_cache_and_pending_work() {
         )
         .unwrap();
     assert_eq!(marker, 0);
+}
+
+#[tokio::test]
+async fn feed_health_survives_restart_failed_pull_and_clears_on_recovery() {
+    let (memory, _, server) = fixture(1).await;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("feeds.sqlite");
+    let repo = Arc::new(SqliteRepository::open(&path).unwrap());
+    repo.save_account(&memory.account().await.unwrap().unwrap())
+        .await
+        .unwrap();
+    server.feeds.lock().unwrap().push(FeedDto {
+        id: 7,
+        category: None,
+        title: "Feed".into(),
+        site_url: "https://example.org".into(),
+        feed_url: "https://example.org/feed".into(),
+        parsing_error_message: "HTTP 503 <unavailable>".into(),
+        parsing_error_count: 3,
+        disabled: true,
+    });
+    let sync = service(repo.clone(), server.clone());
+    sync.sync().await.unwrap();
+    let feeds = repo.feeds_cached(1, None).await.unwrap();
+    assert_eq!(feeds[0].parsing_error_message, "HTTP 503 <unavailable>");
+    assert_eq!(feeds[0].parsing_error_count, 3);
+    assert!(feeds[0].disabled);
+    sync.set_starred_local(1, true).await.unwrap();
+    let pending = repo.pending_mutations(1).await.unwrap();
+    drop(sync);
+    drop(repo);
+    let repo = Arc::new(SqliteRepository::open(&path).unwrap());
+    assert_eq!(repo.feeds_cached(1, None).await.unwrap(), feeds);
+    assert_eq!(repo.pending_mutations(1).await.unwrap(), pending);
+    server.feed_status.store(503, Ordering::Release);
+    let failed_sync = service(repo.clone(), server.clone());
+    assert!(failed_sync.sync().await.is_err());
+    assert_eq!(repo.feeds_cached(1, None).await.unwrap(), feeds);
+    assert!(repo.cached_entry(1, 1).await.unwrap().is_some());
+    drop(failed_sync);
+    server.feed_status.store(0, Ordering::Release);
+    // An article request failure does not erase successful feed metadata.
+    server.bad_page.store(2, Ordering::Release);
+    server.upload_status.store(503, Ordering::Release);
+    let sync = service(repo.clone(), server.clone());
+    assert!(sync.sync().await.is_err());
+    assert_eq!(repo.feeds_cached(1, None).await.unwrap(), feeds);
+    assert!(repo.cached_entry(1, 1).await.unwrap().is_some());
+    server.bad_page.store(0, Ordering::Release);
+    server.upload_status.store(0, Ordering::Release);
+    {
+        let mut feeds = server.feeds.lock().unwrap();
+        feeds[0].parsing_error_message.clear();
+        feeds[0].parsing_error_count = 0;
+        feeds[0].disabled = false;
+    }
+    sync.sync().await.unwrap();
+    let healthy = repo.feeds_cached(1, None).await.unwrap();
+    assert!(healthy[0].parsing_error_message.is_empty());
+    assert_eq!(healthy[0].parsing_error_count, 0);
+    assert!(!healthy[0].disabled);
+    drop(sync);
+    drop(repo);
+    // Upgrade the prior feed schema without disturbing articles or intentions.
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    connection.execute_batch("ALTER TABLE feeds DROP COLUMN parsing_error_message; ALTER TABLE feeds DROP COLUMN parsing_error_count; ALTER TABLE feeds DROP COLUMN disabled").unwrap();
+    connection
+        .pragma_update(None, "user_version", version - 1)
+        .unwrap();
+    drop(connection);
+    let upgraded = SqliteRepository::open(&path).unwrap();
+    assert_eq!(upgraded.feeds_cached(1, None).await.unwrap(), healthy);
+    assert!(upgraded.cached_entry(1, 1).await.unwrap().is_some());
 }

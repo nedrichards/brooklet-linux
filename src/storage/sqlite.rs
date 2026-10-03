@@ -118,6 +118,7 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE entries ADD COLUMN content_revision INTEGER NOT NULL DEFAULT 0; CREATE INDEX entries_delivery ON karakeep_deliveries(account_id, entry_id); CREATE INDEX entries_order ON entries(account_id, published_at_ms DESC, id DESC);",
     "ALTER TABLE sync_state ADD COLUMN delivery_error TEXT;",
     "ALTER TABLE entries ADD COLUMN remote_removed INTEGER NOT NULL DEFAULT 0;",
+    "ALTER TABLE feeds ADD COLUMN parsing_error_message TEXT NOT NULL DEFAULT ''; ALTER TABLE feeds ADD COLUMN parsing_error_count INTEGER NOT NULL DEFAULT 0; ALTER TABLE feeds ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0;",
 ];
 
 pub struct SqliteRepository {
@@ -588,7 +589,7 @@ impl SqliteStore {
         category_id: Option<i64>,
     ) -> Result<Vec<Feed>, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
-        let mut statement = connection.prepare("SELECT id,category_id,title,site_url,feed_url FROM feeds WHERE account_id=?1 AND (?2 IS NULL OR category_id=?2) ORDER BY title")?;
+        let mut statement = connection.prepare("SELECT id,category_id,title,site_url,feed_url,parsing_error_message,parsing_error_count,disabled FROM feeds WHERE account_id=?1 AND (?2 IS NULL OR category_id=?2) ORDER BY title")?;
         statement
             .query_map(params![account_id, category_id], |row| {
                 Ok(Feed {
@@ -597,6 +598,9 @@ impl SqliteStore {
                     title: row.get(2)?,
                     site_url: row.get(3)?,
                     feed_url: row.get(4)?,
+                    parsing_error_message: row.get(5)?,
+                    parsing_error_count: row.get(6)?,
+                    disabled: row.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()
@@ -619,7 +623,7 @@ impl SqliteStore {
             for category in categories {
                 category_stmt.execute(params![account_id, category.id, category.title])?;
             }
-            let mut feed_stmt = transaction.prepare("INSERT INTO feeds(account_id,id,category_id,title,site_url,feed_url) VALUES(?1,?2,?3,?4,?5,?6)")?;
+            let mut feed_stmt = transaction.prepare("INSERT INTO feeds(account_id,id,category_id,title,site_url,feed_url,parsing_error_message,parsing_error_count,disabled) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)")?;
             for feed in feeds {
                 feed_stmt.execute(params![
                     account_id,
@@ -627,7 +631,10 @@ impl SqliteStore {
                     feed.category_id,
                     feed.title,
                     feed.site_url,
-                    feed.feed_url
+                    feed.feed_url,
+                    feed.parsing_error_message,
+                    feed.parsing_error_count,
+                    feed.disabled
                 ])?;
             }
         }
@@ -1725,6 +1732,9 @@ mod tests {
             title: "Example".into(),
             site_url: "https://example.com".into(),
             feed_url: "https://example.com/feed".into(),
+            parsing_error_message: String::new(),
+            parsing_error_count: 0,
+            disabled: false,
         };
         repository
             .merge_metadata(1, &[category], &[feed])

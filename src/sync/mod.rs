@@ -366,6 +366,9 @@ impl AccountSyncService {
                 title: dto.title,
                 site_url: dto.site_url,
                 feed_url: dto.feed_url,
+                parsing_error_message: dto.parsing_error_message,
+                parsing_error_count: dto.parsing_error_count,
+                disabled: dto.disabled,
             })
             .collect::<Vec<_>>();
         self.repository
@@ -1174,6 +1177,9 @@ mod tests {
                     title: "Example".into(),
                     site_url: String::new(),
                     feed_url: String::new(),
+                    parsing_error_message: String::new(),
+                    parsing_error_count: 0,
+                    disabled: false,
                 }),
             },
         );

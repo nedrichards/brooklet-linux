@@ -51,6 +51,12 @@ pub struct FeedDto {
     pub site_url: String,
     #[serde(default)]
     pub feed_url: String,
+    #[serde(default)]
+    pub parsing_error_message: String,
+    #[serde(default)]
+    pub parsing_error_count: i64,
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -378,6 +384,18 @@ fn version_number(value: &str) -> (u64, u64, u64) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn feed_health_decodes_reported_fields_and_defaults_missing_fields() {
+        let healthy: FeedDto = serde_json::from_str(r#"{"id":7,"title":"Feed"}"#).unwrap();
+        assert!(!healthy.disabled);
+        assert_eq!(healthy.parsing_error_count, 0);
+        assert!(healthy.parsing_error_message.is_empty());
+        let failed: FeedDto = serde_json::from_str(r#"{"id":7,"title":"Feed","parsing_error_message":"HTTP 503 <unavailable>","parsing_error_count":3,"disabled":true}"#).unwrap();
+        assert!(failed.disabled);
+        assert_eq!(failed.parsing_error_count, 3);
+        assert_eq!(failed.parsing_error_message, "HTTP 503 <unavailable>");
+    }
+
     use std::{
         io::{Read, Write},
         net::TcpListener,

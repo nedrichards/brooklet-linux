@@ -24,6 +24,12 @@ pub struct Feed {
     pub title: String,
     pub site_url: String,
     pub feed_url: String,
+    #[serde(default)]
+    pub parsing_error_message: String,
+    #[serde(default)]
+    pub parsing_error_count: i64,
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

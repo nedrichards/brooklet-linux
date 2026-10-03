@@ -16,7 +16,7 @@ this plan.
 6. **Complete:** Follow up asynchronous server feed refresh with bounded incoming pulls.
 7. **Complete:** Show persistent, actionable sync and delivery failures.
 8. **Complete:** Reconcile remote deletions and test concurrent pagination changes.
-9. Retain and display feed parsing errors and disabled state.
+9. **Complete:** Retain and display feed parsing errors and disabled state.
 10. Show recoverable startup database failures without destroying the database.
 
 Add end-to-end coverage alongside the relevant checkpoints for subscription,
@@ -204,3 +204,27 @@ remote deletion, and refresh inside a feed.
   unverified as documented for checkpoint 5. Development-runtime portal/session
   bus, accessibility-bus, frame-timing and Glycin warnings were emitted. Live
   Miniflux deletion and concurrent updates were not exercised.
+
+- Checkpoint 9: Feed metadata retains Miniflux's parsing error message/count and
+  disabled flag. Missing API fields default to healthy. An additive SQLite
+  migration preserves cached feeds and articles. Metadata sync stores and clears
+  these fields; failed metadata requests preserve the existing cache, and article
+  pull failures do not erase successfully fetched feed diagnostics.
+- Affected Library feed rows show a plain-text explanation and matching tooltip.
+  Disabled feeds retain navigation to cached articles. Healthy rows have no
+  status subtitle; recovery clears stale text and tooltips. Disabled state and
+  parsing failures remain per-feed information, separate from account sync
+  failures. API reference: https://miniflux.app/docs/api.html#get-feeds.
+- Checkpoint 9 coverage: API decoding/defaults; real SQLite/service sync, restart,
+  metadata/article failures and recovery; migration with retained cache; GTK
+  disabled/error/fallback/healthy cases, literal server text, stable row identity,
+  navigation capability, viewport/focus preservation and status clearing.
+- Checkpoint 9 verification: all 131 working-tree and 107 isolated-commit Rust
+  tests passed. SDK formatting, GUI Clippy with warnings denied, GUI builds and
+  full GTK smoke passed in both trees; working-tree keyboard logic checks passed.
+  Shared build-directory artifacts initially reused the isolated library for the
+  working GUI; rebuilding working sources resolved that cache issue. Existing
+  assertions were retained. Physical keyboard delivery remains unverified as
+  documented for checkpoint 5. Development-runtime portal/session-bus,
+  frame-timing and Glycin warnings were emitted. Live feed failures and recovery
+  were not exercised.

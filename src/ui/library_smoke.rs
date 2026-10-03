@@ -43,6 +43,9 @@ fn feeds() -> Vec<Feed> {
             title: format!("Feed {id}"),
             site_url: "https://example.com".into(),
             feed_url: format!("https://example.com/{id}.xml"),
+            parsing_error_message: String::new(),
+            parsing_error_count: 0,
+            disabled: false,
         })
         .collect()
 }
@@ -159,6 +162,11 @@ pub fn run() -> Result<(), adw::glib::BoolError> {
         .ok_or_else(|| adw::glib::bool_error!("Missing category viewport anchor"))?;
     let mut changed = feeds();
     changed[19].title = "Renamed feed".into();
+    changed[19].parsing_error_message = "HTTP 503 <unavailable>".into();
+    changed[19].parsing_error_count = 3;
+    changed[19].disabled = true;
+    changed[0].parsing_error_count = 1;
+    changed[1].disabled = true;
     let mut inserted = changed[0].clone();
     inserted.id = 999;
     inserted.title = "New feed".into();
@@ -167,6 +175,25 @@ pub fn run() -> Result<(), adw::glib::BoolError> {
     categories.borrow_mut().pop_front().unwrap().1(Ok(changed));
     layout();
     let after = category_anchor(&category).unwrap();
+    check(
+        row.subtitle().as_deref()
+            == Some("Updates disabled in Miniflux · Update failed: HTTP 503 <unavailable>")
+            && !row.uses_markup()
+            && row.is_activatable(),
+        "Feed failure status or cached navigation missing",
+    )?;
+    check(
+        row.tooltip_text().as_deref() == row.subtitle().as_deref(),
+        "Feed failure detail missing",
+    )?;
+    let rows = feed_rows(list);
+    check(
+        rows[0].subtitle().as_deref() == Some("Update failed on the server")
+            && rows[2].subtitle().as_deref() == Some("Updates disabled in Miniflux")
+            && rows[3].subtitle().as_deref().is_none_or(str::is_empty),
+        "Feed fallback or healthy status incorrect",
+    )?;
+
     check(
         before.0 == after.0 && (before.1 - after.1).abs() < 2.0,
         "Category refresh lost viewport anchor",
@@ -187,6 +214,16 @@ pub fn run() -> Result<(), adw::glib::BoolError> {
     check(
         navigation.visible_page().as_ref() == Some(&category.page),
         "Category refresh navigated away",
+    )?;
+
+    let mut recovered = feeds();
+    recovered[19].title = "Renamed feed".into();
+    pages.refresh_visible();
+    categories.borrow_mut().pop_front().unwrap().1(Ok(recovered));
+    layout();
+    check(
+        row.subtitle().as_deref().is_none_or(str::is_empty) && row.tooltip_text().is_none(),
+        "Recovered feed retained stale error",
     )?;
 
     let (list, model) = pages.open_feed(21, Rc::new(Cell::new(None)));
@@ -374,6 +411,9 @@ fn sync_journey(refresh: bool) -> Result<(), adw::glib::BoolError> {
                 .into(),
                 site_url: "https://example.com".into(),
                 feed_url: "https://example.com/feed".into(),
+                parsing_error_message: String::new(),
+                parsing_error_count: 0,
+                disabled: false,
                 category: Some(CategoryDto {
                     id: 7,
                     title: "Category".into(),
