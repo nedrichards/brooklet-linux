@@ -23,6 +23,18 @@ pub struct AppController {
 }
 
 impl AppController {
+    pub fn cached_entry(
+        &self,
+        entry_id: EntryId,
+        callback: impl FnOnce(Result<Option<Entry>, BrookletError>) + 'static,
+    ) {
+        let service = self.sync_service.clone();
+        self.dispatch(
+            async move { service.cached_entry(entry_id).await },
+            callback,
+        );
+    }
+
     pub fn parse_entry(
         &self,
         entry_id: EntryId,

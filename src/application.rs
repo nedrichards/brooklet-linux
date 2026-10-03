@@ -35,8 +35,7 @@ struct InboxUi {
     status: adw::StatusPage,
     scroller: gtk::ScrolledWindow,
     spinner: adw::Spinner,
-    new_button: gtk::Button,
-    pending_entries: Rc<RefCell<Option<Vec<Entry>>>>,
+    refresh_generation: Rc<Cell<u64>>,
     read_in_flight: Rc<RefCell<HashSet<i64>>>,
     suppress_read: Rc<RefCell<HashSet<i64>>>,
     pinned_read: Rc<RefCell<Option<Entry>>>,
@@ -59,8 +58,7 @@ struct WeakInboxUi {
     status: adw::glib::WeakRef<adw::StatusPage>,
     scroller: adw::glib::WeakRef<gtk::ScrolledWindow>,
     spinner: adw::glib::WeakRef<adw::Spinner>,
-    new_button: adw::glib::WeakRef<gtk::Button>,
-    pending_entries: Rc<RefCell<Option<Vec<Entry>>>>,
+    refresh_generation: Rc<Cell<u64>>,
     read_in_flight: Rc<RefCell<HashSet<i64>>>,
     suppress_read: Rc<RefCell<HashSet<i64>>>,
     pinned_read: Rc<RefCell<Option<Entry>>>,
@@ -80,8 +78,7 @@ impl InboxUi {
             status: self.status.downgrade(),
             scroller: self.scroller.downgrade(),
             spinner: self.spinner.downgrade(),
-            new_button: self.new_button.downgrade(),
-            pending_entries: self.pending_entries.clone(),
+            refresh_generation: self.refresh_generation.clone(),
             read_in_flight: self.read_in_flight.clone(),
             suppress_read: self.suppress_read.clone(),
             pinned_read: self.pinned_read.clone(),
@@ -103,8 +100,7 @@ impl WeakInboxUi {
             status: self.status.upgrade()?,
             scroller: self.scroller.upgrade()?,
             spinner: self.spinner.upgrade()?,
-            new_button: self.new_button.upgrade()?,
-            pending_entries: self.pending_entries.clone(),
+            refresh_generation: self.refresh_generation.clone(),
             read_in_flight: self.read_in_flight.clone(),
             suppress_read: self.suppress_read.clone(),
             pinned_read: self.pinned_read.clone(),
@@ -539,10 +535,7 @@ impl BrookletApplication {
                 status: inbox_status.clone(),
                 scroller: inbox_scroller,
                 spinner: sync_spinner,
-                new_button: builder
-                    .object("new_articles_button")
-                    .expect("new_articles_button"),
-                pending_entries: Rc::new(RefCell::new(None)),
+                refresh_generation: Rc::new(Cell::new(0)),
                 read_in_flight: Rc::new(RefCell::new(HashSet::new())),
                 suppress_read: Rc::new(RefCell::new(HashSet::new())),
                 pinned_read: Rc::new(RefCell::new(None)),
@@ -551,41 +544,7 @@ impl BrookletApplication {
                 undo_toast: Rc::new(RefCell::new(None)),
                 refresh_policy: Rc::new(RefCell::new(AutoRefreshPolicy::default())),
             };
-            inbox_ui.model.selection.connect_selected_item_notify({
-                let weak = inbox_ui.downgrade();
-                move |_| {
-                    let Some(inbox) = weak.upgrade() else {
-                        return;
-                    };
-                    if !inbox.rebuilding.get() {
-                        let weak = weak.clone();
-                        adw::glib::idle_add_local_once(move || {
-                            let Some(inbox) = weak.upgrade() else {
-                                return;
-                            };
-                            if !inbox.rebuilding.get() {
-                                release_read_pin_unless(
-                                    &inbox,
-                                    ui::inbox::selected_id(&inbox.list),
-                                );
-                            }
-                        });
-                    }
-                }
-            });
-            inbox_ui.new_button.connect_clicked({
-                let weak = inbox_ui.downgrade();
-                move |_| {
-                    let Some(inbox) = weak.upgrade() else {
-                        return;
-                    };
-                    let Some(entries) = inbox.pending_entries.borrow_mut().take() else {
-                        return;
-                    };
-                    apply_inbox_entries(&inbox, entries);
-                    inbox.new_button.set_visible(false);
-                }
-            });
+            install_read_pin_tracking(&inbox_ui);
             let reader_ui = ReaderUi {
                 split: inbox_split,
                 title: reader_title,
@@ -1124,7 +1083,7 @@ impl BrookletApplication {
                             let views = views.clone();
                             move |result| {
                                 match result {
-                                    Ok(entries) => show_entries(&inbox_ui, entries),
+                                    Ok(entries) => refresh_inbox(&controller, &inbox_ui, entries),
                                     Err(error) => toast_overlay
                                         .add_toast(adw::Toast::new(&error.sync_message())),
                                 }
@@ -2111,7 +2070,7 @@ fn begin_sync(
             Ok(result) => {
                 let before = inbox_snapshot(&inbox_ui);
                 let changes = ui::inbox::InboxChanges::between(&before, &result.inbox);
-                show_entries(&inbox_ui, result.inbox);
+                refresh_inbox(&reload_controller, &inbox_ui, result.inbox);
                 load_other_views(reload_controller, views, toast_overlay.clone());
                 if let Some(message) = changes.toast_message() {
                     toast_overlay.add_toast(adw::Toast::new(&message));
@@ -2129,46 +2088,72 @@ fn begin_sync(
 }
 
 fn inbox_snapshot(inbox_ui: &InboxUi) -> Vec<Entry> {
-    if let Some(entries) = inbox_ui.pending_entries.borrow().as_ref() {
-        return entries.clone();
-    }
     (0..inbox_ui.model.store.n_items())
         .filter_map(|position| ui::inbox::entry_at(&inbox_ui.model, position))
         .collect()
 }
 
 fn show_entries(inbox_ui: &InboxUi, entries: Vec<Entry>) {
-    if inbox_ui.scroller.vadjustment().value() > 40.0 && inbox_ui.model.store.n_items() > 0 {
-        let changes = ui::inbox::InboxChanges::between(&inbox_snapshot(inbox_ui), &entries);
-        if changes.added > 0 || changes.updated > 0 {
-            let new_count = changes.added;
-            inbox_ui.new_button.set_label(if new_count == 0 {
-                "Apply inbox updates"
-            } else if new_count == 1 {
-                "Apply 1 new article"
-            } else {
-                "Apply new articles"
-            });
-            if new_count > 1 {
-                inbox_ui
-                    .new_button
-                    .set_label(&format!("Apply {new_count} new articles"));
-            }
-            *inbox_ui.pending_entries.borrow_mut() = Some(entries);
-            inbox_ui.new_button.set_visible(true);
-            return;
-        }
-    }
-    inbox_ui.new_button.set_visible(false);
-    inbox_ui.pending_entries.borrow_mut().take();
+    inbox_ui
+        .refresh_generation
+        .set(inbox_ui.refresh_generation.get().wrapping_add(1));
     apply_inbox_entries(inbox_ui, entries);
+}
+
+fn refresh_inbox(controller: &AppController, inbox: &InboxUi, entries: Vec<Entry>) {
+    let selected = ui::inbox::selected_id(&inbox.list)
+        .and_then(|id| ui::inbox::entry_by_id(&inbox.model, id))
+        .filter(|selected| !entries.iter().any(|entry| entry.id == selected.id));
+    if let Some(selected) = &selected {
+        // Preserve the selection while checking whether it is read or deleted.
+        *inbox.pinned_read.borrow_mut() = Some(selected.clone());
+    }
+    show_entries(inbox, entries);
+    if let Some(selected) = selected {
+        let generation = inbox.refresh_generation.get();
+        let weak = inbox.downgrade();
+        controller.cached_entry(selected.id, move |result| {
+            let Some(inbox) = weak.upgrade() else {
+                return;
+            };
+            if inbox.refresh_generation.get() != generation
+                || ui::inbox::selected_id(&inbox.list) != Some(selected.id)
+                || !inbox
+                    .pinned_read
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|entry| entry.id == selected.id)
+                || inbox.list.root().is_none()
+            {
+                return;
+            }
+            match result {
+                Ok(Some(cached)) => {
+                    // Keep current UI fields (including newer local stars); this
+                    // read-only lookup confirms only read state and existence.
+                    let Some(mut entry) = ui::inbox::entry_by_id(&inbox.model, selected.id) else {
+                        return;
+                    };
+                    entry.read = cached.read;
+                    *inbox.pinned_read.borrow_mut() = cached.read.then(|| entry.clone());
+                    inbox.rebuilding.set(true);
+                    ui::inbox::update_entry(&inbox.model, entry);
+                    ui::inbox::select_id(&inbox.list, selected.id);
+                    inbox.rebuilding.set(false);
+                }
+                Ok(None) => release_read_pin_unless(&inbox, None),
+                Err(error) => tracing::warn!(%error, "could not confirm selected article state"),
+            }
+        });
+    }
 }
 
 fn apply_inbox_entries(inbox_ui: &InboxUi, mut entries: Vec<Entry>) {
     let place = capture_list_place(&inbox_ui.list, &inbox_ui.scroller);
-    if let Some(pinned) = inbox_ui.pinned_read.borrow().as_ref() {
-        if let Some(position) = entries.iter().position(|entry| entry.id == pinned.id) {
-            entries[position] = pinned.clone();
+    let pin = inbox_ui.pinned_read.borrow().clone();
+    if let Some(pinned) = pin {
+        if entries.iter().any(|entry| entry.id == pinned.id) {
+            inbox_ui.pinned_read.borrow_mut().take();
         } else {
             let position = entries
                 .iter()
@@ -2191,6 +2176,28 @@ fn apply_inbox_entries(inbox_ui: &InboxUi, mut entries: Vec<Entry>) {
         inbox_ui.emptied_place.borrow_mut().take();
         restore_list_place(&inbox_ui.list, &inbox_ui.scroller, place);
     }
+}
+
+fn install_read_pin_tracking(inbox: &InboxUi) -> adw::glib::SignalHandlerId {
+    inbox.model.selection.connect_selected_item_notify({
+        let weak = inbox.downgrade();
+        move |_| {
+            let Some(inbox) = weak.upgrade() else {
+                return;
+            };
+            if !inbox.rebuilding.get() {
+                let weak = weak.clone();
+                adw::glib::idle_add_local_once(move || {
+                    let Some(inbox) = weak.upgrade() else {
+                        return;
+                    };
+                    if !inbox.rebuilding.get() {
+                        release_read_pin_unless(&inbox, ui::inbox::selected_id(&inbox.list));
+                    }
+                });
+            }
+        }
+    })
 }
 
 fn release_read_pin_unless(inbox_ui: &InboxUi, keep_id: Option<i64>) {
@@ -2225,6 +2232,9 @@ fn pin_read(inbox_ui: &InboxUi, entry: Entry) -> bool {
         read: true,
         ..entry
     };
+    inbox_ui
+        .refresh_generation
+        .set(inbox_ui.refresh_generation.get().wrapping_add(1));
     *inbox_ui.pinned_read.borrow_mut() = Some(entry.clone());
     inbox_ui.rebuilding.set(true);
     ui::inbox::update_entry(&inbox_ui.model, entry.clone());
@@ -3463,7 +3473,7 @@ fn install_window_tools(
                         Ok(result) => {
                             let before = inbox_snapshot(&inbox);
                             let changes = ui::inbox::InboxChanges::between(&before, &result.inbox);
-                            show_entries(&inbox, result.inbox);
+                            refresh_inbox(&controller, &inbox, result.inbox);
                             load_other_views(controller, views, toast.clone());
                             let message = changes.toast_message().unwrap_or_else(|| {
                                 "No new articles yet. Slow feeds may appear on the next sync."
@@ -4641,6 +4651,254 @@ fn smoke_test_article_keyboard(
     Ok(())
 }
 
+fn smoke_test_automatic_inbox(
+    window: &adw::ApplicationWindow,
+    inbox: &InboxUi,
+    reader: &ReaderUi,
+    repository: &SqliteRepository,
+    template: &Entry,
+) -> Result<(), adw::glib::BoolError> {
+    use brooklet::services::traits::Repository;
+    fn wait(predicate: impl Fn() -> bool) -> Result<(), adw::glib::BoolError> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let context = adw::glib::MainContext::default();
+        while !predicate() {
+            while context.pending() {
+                context.iteration(false);
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(adw::glib::bool_error!("Automatic inbox update timed out"));
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Ok(())
+    }
+    fn layout() -> Result<(), adw::glib::BoolError> {
+        let settled = Rc::new(Cell::new(false));
+        adw::glib::timeout_add_local_once(Duration::from_millis(350), {
+            let settled = settled.clone();
+            move || settled.set(true)
+        });
+        wait(|| settled.get())
+    }
+    fn check(value: bool, message: &str) -> Result<(), adw::glib::BoolError> {
+        if value {
+            Ok(())
+        } else {
+            Err(adw::glib::bool_error!("{message}"))
+        }
+    }
+    let initial = (1000..1120)
+        .rev()
+        .map(|id| Entry {
+            id,
+            title: format!("Story {id}"),
+            published_at_ms: id * 1000,
+            html: "<p>Reader paragraph</p>".repeat(80),
+            read: false,
+            starred: false,
+            ..template.clone()
+        })
+        .collect::<Vec<_>>();
+    let before_pending = reader
+        .controller
+        .backend_handle()
+        .block_on(repository.pending_mutations(1))
+        .map_err(|error| adw::glib::bool_error!("{error}"))?;
+    reader
+        .controller
+        .backend_handle()
+        .block_on(repository.merge_changed_page(1, &initial, &[]))
+        .map_err(|error| adw::glib::bool_error!("{error}"))?;
+    let tracking = install_read_pin_tracking(inbox);
+    reader.split.set_show_content(false);
+    window.present();
+    show_entries(inbox, initial.clone());
+    layout()?;
+    ui::inbox::select_id(&inbox.list, 1100);
+    inbox.list.grab_focus();
+    layout()?;
+    inbox.scroller.vadjustment().set_value(800.0);
+    layout()?;
+    let before = capture_list_place(&inbox.list, &inbox.scroller);
+    check(
+        before.entry_id.is_some() && before.value > 40.0,
+        "Automatic inbox viewport fixture missing",
+    )?;
+    let mut updated = initial.clone();
+    updated
+        .iter_mut()
+        .find(|entry| entry.id == 1101)
+        .unwrap()
+        .title = "Updated automatically".into();
+    updated.insert(
+        0,
+        Entry {
+            id: 1120,
+            title: "New automatically".into(),
+            published_at_ms: 1_120_000,
+            ..template.clone()
+        },
+    );
+    refresh_inbox(&reader.controller, inbox, updated.clone());
+    layout()?;
+    let after = capture_list_place(&inbox.list, &inbox.scroller);
+    check(
+        ui::inbox::entry_by_id(&inbox.model, 1120).is_some()
+            && ui::inbox::entry_by_id(&inbox.model, 1101).unwrap().title == "Updated automatically"
+            && ui::inbox::selected_id(&inbox.list) == Some(1100),
+        "Scrolled inbox deferred updates or lost selection",
+    )?;
+    check(
+        before.entry_id == after.entry_id && (before.row_y - after.row_y).abs() < 2.0,
+        "Automatic additions lost viewport anchor",
+    )?;
+    check(
+        gtk::prelude::GtkWindowExt::focus(window).is_some_and(|focus| {
+            focus == inbox.list.clone().upcast::<gtk::Widget>() || focus.is_ancestor(&inbox.list)
+        }),
+        "Automatic update lost list focus",
+    )?;
+
+    // Keep the open reader and selected row when another client reads the entry.
+    let selected = initial
+        .iter()
+        .find(|entry| entry.id == 1100)
+        .unwrap()
+        .clone();
+    // Start from an already-rendered reader; asynchronous construction has
+    // separate pipeline coverage and is not part of an inbox refresh.
+    ui::reader::begin(&selected, &reader.title, &reader.content);
+    let blocks = brooklet::reader::parse_document(&selected.html, Some(&selected.url));
+    let mut document = ui::reader::DocumentBuilder::new(blocks);
+    while !document.step(&reader.content).1 {}
+    reader.active_id.set(Some(selected.id));
+    reader.restoring.set(false);
+    reader.placeholder.set_visible(false);
+    reader.scroller.set_visible(true);
+    reader.split.set_show_content(true);
+    layout()?;
+    reader.scroller.vadjustment().set_value(120.0);
+    layout()?;
+    let reader_offset = reader.scroller.vadjustment().value();
+    check(reader_offset > 0.0, "Reader position fixture missing")?;
+    let read = Entry {
+        read: true,
+        ..selected.clone()
+    };
+    reader
+        .controller
+        .backend_handle()
+        .block_on(repository.merge_changed_page(1, &[read], &[]))
+        .map_err(|error| adw::glib::bool_error!("{error}"))?;
+    updated.retain(|entry| entry.id != 1100);
+    refresh_inbox(&reader.controller, inbox, updated.clone());
+    // A later local UI update must not be overwritten by the read-only lookup.
+    update_visible_starred(window.upcast_ref(), 1100, true);
+    wait(|| ui::inbox::entry_by_id(&inbox.model, 1100).is_some_and(|entry| entry.read)).map_err(
+        |_| {
+            adw::glib::bool_error!(
+                "Remote read not confirmed: selected={:?} pin={:?} generation={}",
+                ui::inbox::selected_id(&inbox.list),
+                inbox
+                    .pinned_read
+                    .borrow()
+                    .as_ref()
+                    .map(|entry| (entry.id, entry.read)),
+                inbox.refresh_generation.get()
+            )
+        },
+    )?;
+    layout()?;
+    check(
+        ui::inbox::selected_id(&inbox.list) == Some(1100)
+            && ui::inbox::entry_by_id(&inbox.model, 1100).unwrap().starred
+            && reader.active_id.get() == Some(1100)
+            && (reader.scroller.vadjustment().value() - reader_offset).abs() < 1.0,
+        "Remote read lost selected row, newer star, or reader position",
+    )?;
+    ui::inbox::move_cursor(&inbox.list, 1);
+    layout()?;
+    check(
+        ui::inbox::entry_by_id(&inbox.model, 1100).is_none(),
+        "Read row stayed pinned after navigation",
+    )?;
+
+    // A newer unread snapshot invalidates an older read-state confirmation.
+    show_entries(inbox, initial.clone());
+    ui::inbox::select_id(&inbox.list, 1100);
+    refresh_inbox(&reader.controller, inbox, updated.clone());
+    refresh_inbox(&reader.controller, inbox, initial.clone());
+    layout()?;
+    check(
+        ui::inbox::entry_by_id(&inbox.model, 1100).is_some_and(|entry| !entry.read)
+            && inbox.pinned_read.borrow().is_none(),
+        "Late read lookup overwrote a newer unread snapshot",
+    )?;
+
+    // Restoring unread remotely clears an already-confirmed read pin.
+    refresh_inbox(&reader.controller, inbox, updated.clone());
+    wait(|| ui::inbox::entry_by_id(&inbox.model, 1100).is_some_and(|entry| entry.read)).map_err(
+        |_| {
+            adw::glib::bool_error!(
+                "Remote read not confirmed: selected={:?} pin={:?} generation={}",
+                ui::inbox::selected_id(&inbox.list),
+                inbox
+                    .pinned_read
+                    .borrow()
+                    .as_ref()
+                    .map(|entry| (entry.id, entry.read)),
+                inbox.refresh_generation.get()
+            )
+        },
+    )?;
+    reader
+        .controller
+        .backend_handle()
+        .block_on(repository.merge_changed_page(1, std::slice::from_ref(&selected), &[]))
+        .map_err(|error| adw::glib::bool_error!("{error}"))?;
+    refresh_inbox(&reader.controller, inbox, initial.clone());
+    layout()?;
+    check(
+        inbox.pinned_read.borrow().is_none()
+            && ui::inbox::entry_by_id(&inbox.model, 1100).is_some_and(|entry| !entry.read),
+        "Remote unread retained stale read state",
+    )?;
+
+    // Confirm a real deletion instead of retaining a permanently stale row.
+    reader
+        .controller
+        .backend_handle()
+        .block_on(repository.merge_changed_page(1, &[], &[1100]))
+        .map_err(|error| adw::glib::bool_error!("{error}"))?;
+    refresh_inbox(&reader.controller, inbox, updated);
+    wait(|| ui::inbox::entry_by_id(&inbox.model, 1100).is_none())
+        .map_err(|_| adw::glib::bool_error!("Deleted selected article was not removed"))?;
+    check(
+        reader.active_id.get() == Some(1100),
+        "Remote deletion closed the open reader",
+    )?;
+    let after_pending = reader
+        .controller
+        .backend_handle()
+        .block_on(repository.pending_mutations(1))
+        .map_err(|error| adw::glib::bool_error!("{error}"))?;
+    check(
+        before_pending == after_pending,
+        "Automatic inbox updates wrote read/star intentions",
+    )?;
+    reader.active_id.set(None);
+    reader.split.set_show_content(false);
+    inbox.model.selection.disconnect(tracking);
+    let ids = (1000..1120).collect::<Vec<_>>();
+    reader
+        .controller
+        .backend_handle()
+        .block_on(repository.merge_changed_page(1, &[], &ids))
+        .map_err(|error| adw::glib::bool_error!("{error}"))?;
+    Ok(())
+}
+
 fn smoke_test_reader_pipeline(keyboard_only: bool) -> Result<(), adw::glib::BoolError> {
     use brooklet::services::traits::Repository;
     let repository = Arc::new(
@@ -4760,8 +5018,7 @@ fn smoke_test_reader_pipeline(keyboard_only: bool) -> Result<(), adw::glib::Bool
         status: builder.object("inbox_status").unwrap(),
         scroller: builder.object("inbox_scroller").unwrap(),
         spinner: builder.object("sync_spinner").unwrap(),
-        new_button: builder.object("new_articles_button").unwrap(),
-        pending_entries: Rc::new(RefCell::new(None)),
+        refresh_generation: Rc::new(Cell::new(0)),
         read_in_flight: Rc::new(RefCell::new(HashSet::new())),
         suppress_read: Rc::new(RefCell::new(HashSet::new())),
         pinned_read: Rc::new(RefCell::new(None)),
@@ -4797,6 +5054,7 @@ fn smoke_test_reader_pipeline(keyboard_only: bool) -> Result<(), adw::glib::Bool
         &reader,
         vec![long.clone(), replacement.clone()],
     )?;
+    smoke_test_automatic_inbox(&window, &inbox, &reader, &repository, &replacement)?;
     if keyboard_only {
         window.destroy();
         drop(reader);

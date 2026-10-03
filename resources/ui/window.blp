@@ -82,13 +82,6 @@ Adw.ApplicationWindow window {
                 content: Gtk.Box {
                   orientation: vertical;
 
-                  Gtk.Button new_articles_button {
-                    visible: false;
-                    label: _("Apply inbox updates");
-                    tooltip-text: _("Update the inbox and keep your place");
-                    styles ["suggested-action", "flat"]
-                  }
-
                   Adw.StatusPage inbox_status {
                     vexpand: true;
                     icon-name: "mail-unread-symbolic";

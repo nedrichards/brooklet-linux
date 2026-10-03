@@ -18,6 +18,7 @@ this plan.
 8. **Complete:** Reconcile remote deletions and test concurrent pagination changes.
 9. **Complete:** Retain and display feed parsing errors and disabled state.
 10. **Complete:** Show recoverable startup database failures without destroying the database.
+11. **Complete:** Apply inbox updates automatically while retaining the current place (user follow-up).
 
 Add end-to-end coverage alongside the relevant checkpoints for subscription,
 offline edits and restart/reconnect, credential replacement, integration outage,
@@ -253,3 +254,32 @@ remote deletion, and refresh inside a feed.
   unverified as documented for checkpoint 5. Development-runtime portal/session
   bus, frame-timing and Glycin warnings were emitted. Failure scenarios used
   disposable files; the real user database and keyring were not modified.
+
+- Follow-up 11: Removed the Apply inbox updates/new articles button and the
+  deferred snapshot queue. Sync, feed refresh and cached inbox loads now apply
+  immediately with ID-based selection and viewport restoration. When the selected
+  article leaves the unread snapshot, retain it provisionally and confirm its
+  state through a read-only local cache lookup. Confirmed read rows stay until
+  selection moves away; confirmed deletion removes the row without closing the
+  already-open reader. Returning unread clears the old read pin.
+- Late cache replies cannot overwrite newer snapshots or another selection.
+  Confirmation changes only read state/existence, preserving newer local star
+  updates. Read-state row replacement explicitly restores selection. No service
+  request or read/star mutation is introduced by this confirmation.
+- Follow-up 11 coverage: new GTK journeys in smoke and keyboard logic gates use
+  real SQLite/cache dispatch and production star/selection handlers. They verify
+  immediate inserts/content updates while scrolled, stable focus/selection and
+  viewport anchor, remote read retention and release after navigation, remote
+  unread restoration, stale-reply rejection, newer stars, real deletion, retained
+  reader position and unchanged pending intentions. Existing asynchronous reader
+  and production Sync/Refresh journeys remain required.
+- Follow-up 11 verification: all 135 working-tree and 111 isolated-commit Rust
+  tests passed. SDK formatting, GUI Clippy with warnings denied, GUI builds,
+  full GTK smoke and keyboard logic checks passed in both trees. An initial
+  smoke run hit the previously observed Library viewport fixture assertion;
+  final gates passed with that assertion retained. The new reader-position
+  scenario starts from a fully rendered document; existing asynchronous reader
+  construction coverage remains intact. Physical keyboard delivery remains
+  unverified as documented for checkpoint 5. Development-runtime portal/session
+  bus, frame-timing and Glycin warnings were emitted. Cross-client behavior was
+  simulated through real SQLite; a live Miniflux account was not exercised.
