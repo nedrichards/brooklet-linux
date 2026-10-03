@@ -3,14 +3,56 @@ use adw::{gio, glib, prelude::*};
 use brooklet::controller::AppController;
 use std::{
     cell::{Cell, RefCell},
+    future::Future,
+    pin::Pin,
     rc::Rc,
     sync::Arc,
+    task::{Context, Poll},
     time::Duration,
 };
 
 const RESIDENT_BYTES: usize = 64 * 1024 * 1024;
 const IMAGE_PIXELS: u64 = 2 * 1024 * 1024;
 const SOURCE_PIXELS: u64 = 32 * 1024 * 1024;
+
+// GLib can destroy a cancelled task after Job::drop's runtime guard has exited.
+// Keep the Tokio context attached to the future's poll AND destruction, since
+// Glycin's destructors spawn asynchronous cleanup tasks too.
+struct RuntimeFuture<F> {
+    future: Option<Pin<Box<F>>>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl<F> RuntimeFuture<F> {
+    fn new(runtime: tokio::runtime::Handle, future: F) -> Self {
+        Self {
+            future: Some(Box::pin(future)),
+            runtime,
+        }
+    }
+}
+
+impl<F: Future> Future for RuntimeFuture<F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let _entered = this.runtime.enter();
+        this.future
+            .as_mut()
+            .expect("future remains present")
+            .as_mut()
+            .poll(context)
+    }
+}
+
+impl<F> Drop for RuntimeFuture<F> {
+    fn drop(&mut self) {
+        let _entered = self.runtime.enter();
+        // Fields are otherwise dropped after this guard, outside Tokio.
+        drop(self.future.take());
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum State {
@@ -248,7 +290,7 @@ impl Images {
                 }) as u32;
                 let weak = Rc::downgrade(&images);
                 let task = glib::MainContext::default().spawn_local(async move {
-                    let mut decode = Box::pin(async move {
+                    let decode = RuntimeFuture::new(handle, async move {
                         let decoders = controller.image_decoders();
                         let _permit = decoders
                             .acquire()
@@ -281,11 +323,7 @@ impl Images {
                         }
                         Some((frame.texture(), frame.buf_slice().len()))
                     });
-                    let result = std::future::poll_fn(|context| {
-                        let _entered = handle.enter();
-                        std::future::Future::poll(decode.as_mut(), context)
-                    })
-                    .await;
+                    let result = decode.await;
                     if let Some(images) = weak.upgrade() {
                         images.finish(index, result);
                     }
@@ -497,6 +535,95 @@ pub fn smoke_test(controller: Arc<AppController>) -> Result<(), glib::BoolError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct CleanupProbe {
+        dropped: Rc<Cell<bool>>,
+        ready: bool,
+    }
+
+    impl Future for CleanupProbe {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+            assert!(tokio::runtime::Handle::try_current().is_ok());
+            if self.ready {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    impl Drop for CleanupProbe {
+        fn drop(&mut self) {
+            // Model Glycin's destructor: cleanup must be able to spawn even
+            // when GLib releases a task outside any Tokio poll or cancel guard.
+            tokio::spawn(async {});
+            self.dropped.set(true);
+        }
+    }
+
+    #[test]
+    fn unpolled_decode_destroys_future_inside_runtime() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let dropped = Rc::new(Cell::new(false));
+        let future = RuntimeFuture::new(
+            runtime.handle().clone(),
+            CleanupProbe {
+                dropped: dropped.clone(),
+                ready: false,
+            },
+        );
+        drop(future);
+        assert!(dropped.get());
+        assert!(tokio::runtime::Handle::try_current().is_err());
+    }
+
+    #[test]
+    fn cancelled_job_destroys_decode_inside_runtime() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let context = glib::MainContext::new();
+        let _owner = context.acquire().unwrap();
+        let dropped = Rc::new(Cell::new(false));
+        let task = context.spawn_local(RuntimeFuture::new(
+            runtime.handle().clone(),
+            CleanupProbe {
+                dropped: dropped.clone(),
+                ready: false,
+            },
+        ));
+        context.iteration(false);
+        let job = Job {
+            fetch: runtime.spawn(std::future::pending::<()>()).abort_handle(),
+            cancel: gio::Cancellable::new(),
+            decode: Some(task),
+            runtime: runtime.handle().clone(),
+        };
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        drop(job);
+        assert!(dropped.get());
+        assert!(tokio::runtime::Handle::try_current().is_err());
+    }
+
+    #[test]
+    fn completed_decode_destroys_future_inside_runtime() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let context = glib::MainContext::new();
+        let _owner = context.acquire().unwrap();
+        let dropped = Rc::new(Cell::new(false));
+        let task = context.spawn_local(RuntimeFuture::new(
+            runtime.handle().clone(),
+            CleanupProbe {
+                dropped: dropped.clone(),
+                ready: true,
+            },
+        ));
+        context.iteration(false);
+        drop(task);
+        assert!(dropped.get());
+        assert!(tokio::runtime::Handle::try_current().is_err());
+    }
+
     #[test]
     fn decode_dimensions_bound_pixels_and_preserve_aspect_ratio() {
         assert_eq!(decode_size(800, 400, 400), Some((400, 200)));

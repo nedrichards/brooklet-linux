@@ -31,6 +31,7 @@ cargo_target = custom_target(
     'src/keyboard.rs',
     'src/auto_refresh.rs',
     'src/outgoing.rs',
+    'src/sync_health.rs',
     'src/config.rs',
     'src/controller.rs',
     'src/error.rs',
@@ -57,6 +58,8 @@ cargo_target = custom_target(
     'src/ui/reader_table.rs',
     'src/ui/reader_images.rs',
     'src/ui/setup.rs',
+    'src/ui/startup.rs',
+    'src/ui/sync_health.rs',
     'src/ui/reconnect.rs',
     'src/ui/karakeep.rs',
     'src/ui/library.rs',
@@ -87,6 +90,14 @@ test(
   'rust-unit-tests',
   cargo,
   args: ['test', '--all-targets', '--locked'],
+  workdir: meson.project_source_root(),
+  timeout: 180,
+)
+
+test(
+  'reader-decode-lifecycle-tests',
+  cargo,
+  args: ['test', '--bin', 'brooklet', '--features', 'gui', '--locked', 'ui::reader_images::tests'],
   workdir: meson.project_source_root(),
   timeout: 180,
 )
