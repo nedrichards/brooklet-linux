@@ -146,6 +146,15 @@ impl SqliteRepository {
     }
 
     fn prepare(mut connection: Connection, path: PathBuf) -> Result<Self, BrookletError> {
+        // Reject future schemas before WAL or migration writes.
+        let version: usize =
+            connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version > MIGRATIONS.len() {
+            return Err(BrookletError::UnsupportedDatabase {
+                found: version,
+                supported: MIGRATIONS.len(),
+            });
+        }
         connection.pragma_update(None, "foreign_keys", "ON")?;
         if path != Path::new(":memory:") {
             connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -1266,6 +1275,120 @@ impl Repository for SqliteRepository {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_open_preserves_corrupt_files_and_unwritable_locations() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("broken.db");
+        let original = b"not a database: preserve these bytes";
+        std::fs::write(&path, original).unwrap();
+        assert!(SqliteRepository::open(&path).is_err());
+        assert!(SqliteRepository::open(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        // A parent that is a file cannot be created as a data directory.
+        assert!(SqliteRepository::open(path.join("brooklet.db")).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(SqliteRepository::open(directory.path()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn future_schema_is_rejected_before_journal_or_data_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("future.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE future_data(value TEXT); INSERT INTO future_data VALUES('keep me');",
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", MIGRATIONS.len() + 1)
+            .unwrap();
+        drop(connection);
+        let original = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            SqliteRepository::open(&path),
+            Err(BrookletError::UnsupportedDatabase { .. })
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(!directory.path().join("future.db-wal").exists());
+        let connection = Connection::open(&path).unwrap();
+        let journal: String = connection
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal, "delete");
+        assert_eq!(
+            connection
+                .query_row("SELECT value FROM future_data", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "keep me"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_failure_rolls_back_and_retry_preserves_cache_and_intentions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("migration.db");
+        let source = repository_with_entry().await;
+        let repo = SqliteRepository::open(&path).unwrap();
+        repo.save_account(&source.account().await.unwrap().unwrap())
+            .await
+            .unwrap();
+        let entry = source.cached_entry(1, 42).await.unwrap().unwrap();
+        repo.merge_changed_page(1, &[entry], &[]).await.unwrap();
+        repo.set_starred_local(1, 42, true).await.unwrap();
+        let before = repo.cached_entry(1, 42).await.unwrap();
+        let pending = repo.pending_mutations(1).await.unwrap();
+        drop(repo);
+        let connection = Connection::open(&path).unwrap();
+        // A malformed prior schema causes the second statement of the last
+        // migration to fail. Its first statement must also roll back.
+        connection.execute_batch("ALTER TABLE feeds DROP COLUMN parsing_error_message; ALTER TABLE feeds DROP COLUMN disabled;").unwrap();
+        connection
+            .pragma_update(None, "user_version", MIGRATIONS.len() - 1)
+            .unwrap();
+        drop(connection);
+        assert!(SqliteRepository::open(&path).is_err());
+        let connection = Connection::open(&path).unwrap();
+        assert!(
+            connection
+                .prepare("SELECT parsing_error_message FROM feeds")
+                .is_err()
+        );
+        let version: usize = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.len() - 1);
+        connection
+            .execute_batch("ALTER TABLE feeds DROP COLUMN parsing_error_count")
+            .unwrap();
+        drop(connection);
+        let reopened = SqliteRepository::open(&path).unwrap();
+        assert_eq!(reopened.cached_entry(1, 42).await.unwrap(), before);
+        assert_eq!(reopened.pending_mutations(1).await.unwrap(), pending);
+    }
+
+    #[test]
+    fn locked_database_can_be_retried_after_owner_releases_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("locked.db");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TABLE preserved(value TEXT); INSERT INTO preserved VALUES('keep me'); BEGIN EXCLUSIVE;").unwrap();
+        assert!(SqliteRepository::open(&path).is_err());
+        connection.execute_batch("ROLLBACK").unwrap();
+        drop(connection);
+        let repository = SqliteRepository::open(&path).unwrap();
+        let connection = repository.store.connection.lock().unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT value FROM preserved", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "keep me"
+        );
+    }
+
     use super::*;
 
     #[tokio::test]

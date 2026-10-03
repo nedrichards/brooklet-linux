@@ -17,7 +17,7 @@ this plan.
 7. **Complete:** Show persistent, actionable sync and delivery failures.
 8. **Complete:** Reconcile remote deletions and test concurrent pagination changes.
 9. **Complete:** Retain and display feed parsing errors and disabled state.
-10. Show recoverable startup database failures without destroying the database.
+10. **Complete:** Show recoverable startup database failures without destroying the database.
 
 Add end-to-end coverage alongside the relevant checkpoints for subscription,
 offline edits and restart/reconnect, credential replacement, integration outage,
@@ -228,3 +228,28 @@ remote deletion, and refresh inside a feed.
   documented for checkpoint 5. Development-runtime portal/session-bus,
   frame-timing and Glycin warnings were emitted. Live feed failures and recovery
   were not exercised.
+
+- Checkpoint 10: The application opens local data on a background worker before
+  installing account actions or starting the controller. Failures show a recovery
+  window with the database path, underlying error, Try Again and Quit. Repeated
+  activation reuses the window; retries cannot overlap. Recovery reopens the same
+  path and installs the normal application exactly once. Closing during a retry
+  rejects its late result before creating services or another window. No reset,
+  deletion, replacement, or secret changes are performed on failure.
+- A database from a newer Brooklet schema is rejected before WAL or migration
+  writes, with instructions to use a compatible app version. Existing migration
+  transactions retain rollback behavior; unsupported/corrupt files stay available
+  for external repair and retry.
+- Checkpoint 10 coverage: corrupt bytes and blocked paths, newer-schema byte and
+  journal preservation, migration rollback with cached articles/pending edits,
+  lock failure and recovery. GTK tests cover detailed errors, repeat activation,
+  duplicate clicks, failure retries, successful retry, UI responsiveness while
+  opening is blocked, closure/late results, and the real startup-to-setup journey.
+- Checkpoint 10 verification: all 135 working-tree and 111 isolated-commit Rust
+  tests passed. SDK formatting, GUI Clippy with warnings denied, GUI builds and
+  full GTK smoke passed in both trees; working-tree keyboard logic checks passed.
+  The production first-run journey waits for and dismisses the normal setup
+  dialog before verifying window closure. Physical keyboard delivery remains
+  unverified as documented for checkpoint 5. Development-runtime portal/session
+  bus, frame-timing and Glycin warnings were emitted. Failure scenarios used
+  disposable files; the real user database and keyring were not modified.

@@ -17,6 +17,10 @@ pub enum BrookletError {
         found: String,
         required: &'static str,
     },
+    #[error(
+        "This database was created by a newer Brooklet version (schema {found}; supported {supported}). Open it with that version or newer."
+    )]
+    UnsupportedDatabase { found: usize, supported: usize },
     #[error("database operation failed")]
     Database(#[source] rusqlite::Error),
     #[error("local storage could not be prepared")]
@@ -42,7 +46,9 @@ pub enum BrookletError {
 impl BrookletError {
     pub fn failure_kind(&self) -> FailureKind {
         match self {
-            Self::InvalidServiceUrl(_) => FailureKind::MalformedRequest,
+            Self::InvalidServiceUrl(_) | Self::UnsupportedDatabase { .. } => {
+                FailureKind::MalformedRequest
+            }
             Self::Http { kind, .. } | Self::Transport { kind, .. } => *kind,
             Self::UnsupportedServer { .. } => FailureKind::UnsupportedServer,
             Self::Database(_)
@@ -58,7 +64,7 @@ impl BrookletError {
 
     pub fn setup_message(&self) -> String {
         match self {
-            Self::AccountMismatch | Self::AccountAlreadyConfigured | Self::RefreshFollowUpTimeout | Self::SyncResponse(_) => self.to_string(),
+            Self::AccountMismatch | Self::AccountAlreadyConfigured | Self::RefreshFollowUpTimeout | Self::SyncResponse(_) | Self::UnsupportedDatabase { .. } => self.to_string(),
             Self::InvalidServiceUrl(detail) => format!("Check the Miniflux address: {detail}."),
             Self::InvalidSetup(detail) => format!("Please enter {detail}."),
             Self::Http { status: 401 | 403, .. } => {
@@ -126,7 +132,9 @@ impl BrookletError {
             Self::Database(_) | Self::Storage(_) => {
                 "Brooklet could not update its local article cache.".into()
             }
-            Self::RefreshFollowUpTimeout | Self::SyncResponse(_) => self.to_string(),
+            Self::RefreshFollowUpTimeout
+            | Self::SyncResponse(_)
+            | Self::UnsupportedDatabase { .. } => self.to_string(),
             Self::InvalidServiceUrl(_)
             | Self::InvalidSetup(_)
             | Self::Http { .. }

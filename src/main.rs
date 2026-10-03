@@ -23,11 +23,5 @@ fn main() -> adw::glib::ExitCode {
             }
         };
     }
-    match application::BrookletApplication::new() {
-        Ok(application) => application.run(),
-        Err(error) => {
-            eprintln!("Brooklet could not start: {error}");
-            adw::glib::ExitCode::FAILURE
-        }
-    }
+    application::BrookletApplication::run()
 }

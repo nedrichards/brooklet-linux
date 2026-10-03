@@ -336,40 +336,64 @@ impl SearchState {
 }
 
 impl BrookletApplication {
-    pub fn new() -> Result<Self, BrookletError> {
+    pub fn run() -> adw::glib::ExitCode {
         adw::glib::set_application_name(config::APP_NAME);
         register_resources();
-
-        let database_path = adw::glib::user_data_dir()
-            .join(config::APP_ID)
-            .join("brooklet.db");
-        let repository = Arc::new(SqliteRepository::open(database_path)?);
-        let secrets = Arc::new(Oo7SecretStore::new(config::APP_ID));
-        let setup_service = Arc::new(AccountSetupService::new(
-            Arc::new(MinifluxIdentityValidator),
-            repository.clone(),
-            secrets.clone(),
-        ));
-        let sync_service = Arc::new(AccountSyncService::new(
-            repository,
-            secrets,
-            Arc::new(ReqwestMinifluxApiFactory),
-        ));
-        let controller = Arc::new(AppController::new(setup_service, sync_service)?);
         let application = adw::Application::builder()
             .application_id(config::APP_ID)
             .build();
-        let this = Self {
-            application,
-            controller,
-        };
-        this.install_actions();
-        this.connect_lifecycle();
-        Ok(this)
+        let database_path = adw::glib::user_data_dir()
+            .join(config::APP_ID)
+            .join("brooklet.db");
+        let image_path = adw::glib::user_cache_dir()
+            .join(config::APP_ID)
+            .join("images.db");
+        Self::install_startup(&application, database_path, image_path);
+        application.run()
     }
 
-    pub fn run(self) -> adw::glib::ExitCode {
-        self.application.run()
+    fn install_startup(
+        application: &adw::Application,
+        database_path: std::path::PathBuf,
+        image_path: std::path::PathBuf,
+    ) {
+        let weak_application = application.downgrade();
+        ui::startup::install(
+            application,
+            database_path.clone(),
+            Arc::new(move || {
+                let repository = Arc::new(SqliteRepository::open(&database_path)?);
+                let images = brooklet::services::image_cache::ImageCache::new(
+                    image_path.clone(),
+                    brooklet::services::image_cache::DEFAULT_IMAGE_CACHE_BYTES,
+                )?;
+                Ok((repository, images))
+            }),
+            Rc::new(move |(repository, images)| {
+                let Some(application) = weak_application.upgrade() else {
+                    return Ok(());
+                };
+                let secrets = Arc::new(Oo7SecretStore::new(config::APP_ID));
+                let setup = Arc::new(AccountSetupService::new(
+                    Arc::new(MinifluxIdentityValidator),
+                    repository.clone(),
+                    secrets.clone(),
+                ));
+                let sync = Arc::new(AccountSyncService::new(
+                    repository,
+                    secrets,
+                    Arc::new(ReqwestMinifluxApiFactory),
+                ));
+                let controller = Arc::new(AppController::with_image_cache(setup, sync, images)?);
+                let this = Self {
+                    application,
+                    controller,
+                };
+                this.install_actions();
+                this.connect_lifecycle();
+                Ok(())
+            }),
+        );
     }
 
     fn connect_lifecycle(&self) {
@@ -4877,6 +4901,7 @@ pub fn keyboard_test() -> Result<(), adw::glib::BoolError> {
 }
 
 pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
+    ui::startup::smoke_test()?;
     adw::init()?;
     let texture = gtk::gdk::MemoryTexture::new(
         320,
@@ -4966,6 +4991,23 @@ pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
 fn register_resources() {
     gio::resources_register_include!("brooklet.gresource")
         .expect("Brooklet GResources must be valid");
+}
+
+/// Exercise the production startup wiring with isolated local data.
+pub(crate) fn startup_smoke_application(
+    path: std::path::PathBuf,
+    images: std::path::PathBuf,
+) -> Result<adw::Application, adw::glib::BoolError> {
+    register_resources();
+    let application = adw::Application::new(
+        Some("com.nedrichards.brooklet.StartupProductionTest"),
+        gio::ApplicationFlags::NON_UNIQUE,
+    );
+    application
+        .register(None::<&gio::Cancellable>)
+        .map_err(|error| adw::glib::bool_error!("{error}"))?;
+    BrookletApplication::install_startup(&application, path, images);
+    Ok(application)
 }
 
 /// Isolated full-window journey using the production action and lifecycle wiring.
