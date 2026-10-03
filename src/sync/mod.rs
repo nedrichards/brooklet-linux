@@ -116,6 +116,8 @@ pub trait SyncService: Send + Sync {
         category_id: Option<i64>,
     ) -> Result<(), BrookletError>;
     async fn sync(&self) -> Result<SyncResult, BrookletError>;
+    /// Upload queued changes without fetching articles.
+    async fn flush_outgoing(&self) -> Result<bool, BrookletError>;
 }
 
 pub struct AccountSyncService {
@@ -125,6 +127,8 @@ pub struct AccountSyncService {
     karakeep_factory: Arc<dyn KarakeepApiFactory>,
     sync_lock: tokio::sync::Mutex<()>,
     running: AtomicBool,
+    mutation_lock: tokio::sync::Mutex<()>,
+    delivering: AtomicBool,
 }
 
 struct RunningGuard<'a>(&'a AtomicBool);
@@ -155,6 +159,8 @@ impl AccountSyncService {
             karakeep_factory: Arc::new(ReqwestKarakeepApiFactory),
             sync_lock: tokio::sync::Mutex::new(()),
             running: AtomicBool::new(false),
+            mutation_lock: tokio::sync::Mutex::new(()),
+            delivering: AtomicBool::new(false),
         }
     }
 
@@ -229,6 +235,81 @@ impl AccountSyncService {
         result
     }
 
+    async fn upload_mutations(
+        &self,
+        account: &crate::model::Account,
+        api: &dyn MinifluxApi,
+    ) -> Result<(), BrookletError> {
+        let pending = self.repository.pending_mutations(account.id).await?;
+        for field in [MutationField::Read, MutationField::Starred] {
+            for desired in [false, true] {
+                let batch = pending
+                    .iter()
+                    .filter(|mutation| mutation.field == field && mutation.desired == desired)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if batch.is_empty() {
+                    continue;
+                }
+                let ids = batch
+                    .iter()
+                    .map(|mutation| mutation.entry_id)
+                    .collect::<Vec<_>>();
+                match field {
+                    MutationField::Read => api.set_read(&ids, desired).await?,
+                    MutationField::Starred => api.set_starred(&ids, desired).await?,
+                }
+                // Commit each accepted batch before any subsequent request can fail.
+                for mutation in &batch {
+                    self.repository.acknowledge_mutation(mutation).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn upload_karakeep(
+        &self,
+        account: &crate::model::Account,
+        api: &dyn MinifluxApi,
+    ) -> Result<(), BrookletError> {
+        for delivery in self.repository.pending_karakeep(account.id).await? {
+            let result = match delivery.route {
+                KarakeepRoute::Miniflux => api.save_to_integration(delivery.entry_id).await,
+                KarakeepRoute::Direct => match self.direct_karakeep_api(account.id).await {
+                    Ok(client) => client.save(&delivery.canonical_url, &delivery.title).await,
+                    Err(error) => Err(error),
+                },
+            };
+            match result {
+                Ok(()) => {
+                    self.repository
+                        .finish_karakeep(delivery.id, None, now_ms())
+                        .await?
+                }
+                Err(error) => {
+                    if error.failure_kind() == crate::model::FailureKind::Retryable {
+                        self.repository
+                            .defer_karakeep(
+                                delivery.id,
+                                &delivery_error_message(delivery.route, &error),
+                            )
+                            .await?;
+                        return Err(error);
+                    }
+                    self.repository
+                        .finish_karakeep(
+                            delivery.id,
+                            Some(&delivery_error_message(delivery.route, &error)),
+                            now_ms(),
+                        )
+                        .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     // Delivery and refresh have separate durable status. Service failures leave
     // queued intentions protected during merge; local storage failures still abort.
     async fn record_delivery_attempt(
@@ -258,72 +339,19 @@ impl AccountSyncService {
         refresh_feeds: bool,
     ) -> Result<SyncResult, BrookletError> {
         let api = self.api(account).await?;
+        {
+            let _guard = self.mutation_lock.lock().await;
+            let delivery = async {
+                self.upload_mutations(account, api.as_ref()).await?;
+                self.upload_karakeep(account, api.as_ref()).await
+            }
+            .await;
+            self.record_delivery_attempt(account.id, delivery).await?;
+        }
         if refresh_feeds {
             api.refresh_feeds().await?;
         }
-        let mut accepted = Vec::new();
-        let delivery = async {
-            let pending = self.repository.pending_mutations(account.id).await?;
-            for field in [MutationField::Read, MutationField::Starred] {
-                for desired in [false, true] {
-                    let batch = pending
-                        .iter()
-                        .filter(|mutation| mutation.field == field && mutation.desired == desired)
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if batch.is_empty() {
-                        continue;
-                    }
-                    let ids = batch
-                        .iter()
-                        .map(|mutation| mutation.entry_id)
-                        .collect::<Vec<_>>();
-                    match field {
-                        MutationField::Read => api.set_read(&ids, desired).await?,
-                        MutationField::Starred => api.set_starred(&ids, desired).await?,
-                    }
-                    accepted.extend(batch);
-                }
-            }
-            for delivery in self.repository.pending_karakeep(account.id).await? {
-                let result = match delivery.route {
-                    KarakeepRoute::Miniflux => api.save_to_integration(delivery.entry_id).await,
-                    KarakeepRoute::Direct => match self.direct_karakeep_api(account.id).await {
-                        Ok(client) => client.save(&delivery.canonical_url, &delivery.title).await,
-                        Err(error) => Err(error),
-                    },
-                };
-                match result {
-                    Ok(()) => {
-                        self.repository
-                            .finish_karakeep(delivery.id, None, now_ms())
-                            .await?
-                    }
-                    Err(error) => {
-                        if error.failure_kind() == crate::model::FailureKind::Retryable {
-                            self.repository
-                                .defer_karakeep(
-                                    delivery.id,
-                                    &delivery_error_message(delivery.route, &error),
-                                )
-                                .await?;
-                            return Err(error);
-                        }
-                        self.repository
-                            .finish_karakeep(
-                                delivery.id,
-                                Some(&delivery_error_message(delivery.route, &error)),
-                                now_ms(),
-                            )
-                            .await?;
-                    }
-                }
-            }
-            Ok(())
-        }
-        .await;
-        self.record_delivery_attempt(account.id, delivery).await?;
-        let result = self.pull_incoming(account, api.as_ref(), &accepted).await?;
+        let result = self.pull_incoming(account, api.as_ref()).await?;
         if !refresh_feeds {
             return Ok(result);
         }
@@ -333,7 +361,7 @@ impl AccountSyncService {
             let mut result = result;
             for seconds in [2, 5, 10] {
                 tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
-                result = self.pull_incoming(account, api.as_ref(), &[]).await?;
+                result = self.pull_incoming(account, api.as_ref()).await?;
             }
             Ok(result)
         })
@@ -345,7 +373,6 @@ impl AccountSyncService {
         &self,
         account: &crate::model::Account,
         api: &dyn MinifluxApi,
-        accepted: &[crate::model::PendingMutation],
     ) -> Result<SyncResult, BrookletError> {
         let categories = api
             .categories()
@@ -400,6 +427,9 @@ impl AccountSyncService {
         let mut after_entry_id = None;
         let mut fetched = 0;
         loop {
+            // Serialize each fetch+merge with uploads: a response fetched before
+            // an upload must be merged before its local protection is acknowledged.
+            let _guard = self.mutation_lock.lock().await;
             let page = api
                 .entries(&EntryQuery {
                     status: None,
@@ -463,9 +493,6 @@ impl AccountSyncService {
         self.repository
             .complete_sync(account.id, newest, now_ms())
             .await?;
-        for mutation in accepted {
-            self.repository.acknowledge_mutation(mutation).await?;
-        }
         self.repository
             .apply_retention(account.id, now_ms())
             .await?;
@@ -509,6 +536,7 @@ impl AccountSyncService {
             }
         }
         for id in cached.into_iter().filter(|id| !remote.contains(id)) {
+            let _guard = self.mutation_lock.lock().await;
             // Absence in an offset-paged inventory is only a hint. Confirm it
             // individually before deleting: concurrent changes can shift those pages.
             match api.entry(id).await {
@@ -543,6 +571,48 @@ fn now_ms() -> i64 {
 
 #[async_trait]
 impl SyncService for AccountSyncService {
+    async fn flush_outgoing(&self) -> Result<bool, BrookletError> {
+        let _guard = self.mutation_lock.lock().await;
+        let Some(account) = self.repository.account().await? else {
+            return Ok(false);
+        };
+        if self
+            .repository
+            .pending_mutations(account.id)
+            .await?
+            .is_empty()
+            && self
+                .repository
+                .pending_karakeep(account.id)
+                .await?
+                .is_empty()
+        {
+            return Ok(false);
+        }
+        let _delivering = RunningGuard::new(&self.delivering);
+        let result = async {
+            let api = self.api(&account).await?;
+            self.upload_mutations(&account, api.as_ref()).await?;
+            self.upload_karakeep(&account, api.as_ref()).await
+        }
+        .await;
+        let error = result.as_ref().err().map(ToString::to_string);
+        self.repository
+            .record_delivery_error(account.id, error.as_deref())
+            .await?;
+        result?;
+        Ok(!self
+            .repository
+            .pending_mutations(account.id)
+            .await?
+            .is_empty()
+            || !self
+                .repository
+                .pending_karakeep(account.id)
+                .await?
+                .is_empty())
+    }
+
     async fn cached_entry(&self, entry_id: EntryId) -> Result<Option<Entry>, BrookletError> {
         let account = self.configured_account().await?;
         self.repository.cached_entry(account.id, entry_id).await
@@ -550,6 +620,7 @@ impl SyncService for AccountSyncService {
 
     async fn disconnect(&self) -> Result<(), BrookletError> {
         let _guard = self.sync_lock.lock().await;
+        let _mutation_guard = self.mutation_lock.lock().await;
         if let Some(account) = self.repository.account().await? {
             self.secrets.delete_account_secrets(account.id).await?;
             self.repository.delete_account(account.id).await?;
@@ -671,6 +742,7 @@ impl SyncService for AccountSyncService {
     }
     async fn recover_karakeep(&self, delivery_id: i64, retry: bool) -> Result<(), BrookletError> {
         let _guard = self.sync_lock.lock().await;
+        let _mutation_guard = self.mutation_lock.lock().await;
         let account = self.configured_account().await?;
         let route = if retry {
             Some(
@@ -692,6 +764,7 @@ impl SyncService for AccountSyncService {
         key: Option<String>,
     ) -> Result<(), BrookletError> {
         let _guard = self.sync_lock.lock().await;
+        let _mutation_guard = self.mutation_lock.lock().await;
         let account = self.configured_account().await?;
         if config.route != KarakeepRoute::Direct {
             return self
@@ -747,7 +820,8 @@ impl SyncService for AccountSyncService {
     async fn sync_status(&self) -> Result<SyncStatus, BrookletError> {
         let account = self.configured_account().await?;
         let mut status = self.repository.sync_status(account.id).await?;
-        status.running = self.running.load(Ordering::Acquire);
+        status.running =
+            self.running.load(Ordering::Acquire) || self.delivering.load(Ordering::Acquire);
         Ok(status)
     }
     async fn refresh_feeds(&self) -> Result<SyncResult, BrookletError> {
@@ -828,7 +902,32 @@ mod tests {
 
     use super::*;
 
+    #[derive(Default)]
+    struct ApiControls {
+        fail_star: AtomicBool,
+        fail_read: AtomicBool,
+        fail_refresh: AtomicBool,
+        save_status: std::sync::atomic::AtomicU16,
+        fail_pull: AtomicBool,
+        read_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+        pull_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+        read_started: tokio::sync::Notify,
+        pull_started: tokio::sync::Notify,
+    }
+
+    async fn gate(
+        slot: &Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+        started: &tokio::sync::Notify,
+    ) {
+        let gate = slot.lock().unwrap().clone();
+        started.notify_one();
+        if let Some(gate) = gate {
+            gate.acquire().await.unwrap().forget();
+        }
+    }
+
     struct FakeApi {
+        controls: Arc<ApiControls>,
         pages: Arc<Mutex<VecDeque<EntriesDto>>>,
         queries: Arc<Mutex<Vec<EntryQuery>>>,
         events: Arc<Mutex<Vec<String>>>,
@@ -859,6 +958,13 @@ mod tests {
             }
             self.events.lock().unwrap().push("pull".into());
             self.queries.lock().unwrap().push(query.clone());
+            gate(&self.controls.pull_gate, &self.controls.pull_started).await;
+            if self.controls.fail_pull.load(Ordering::Acquire) {
+                return Err(BrookletError::Http {
+                    status: 503,
+                    kind: crate::model::FailureKind::Retryable,
+                });
+            }
             Ok(self.pages.lock().unwrap().pop_front().unwrap())
         }
 
@@ -882,6 +988,13 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("read:{read}:{entry_ids:?}"));
+            gate(&self.controls.read_gate, &self.controls.read_started).await;
+            if self.controls.fail_read.load(Ordering::Acquire) {
+                return Err(BrookletError::Http {
+                    status: 503,
+                    kind: crate::model::FailureKind::Retryable,
+                });
+            }
             Ok(())
         }
 
@@ -890,15 +1003,36 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("starred:{starred}:{entry_ids:?}"));
+            if self.controls.fail_star.load(Ordering::Acquire) {
+                return Err(BrookletError::Http {
+                    status: 503,
+                    kind: crate::model::FailureKind::Retryable,
+                });
+            }
             Ok(())
         }
 
-        async fn save_to_integration(&self, _entry_id: i64) -> Result<(), BrookletError> {
-            unreachable!()
+        async fn save_to_integration(&self, entry_id: i64) -> Result<(), BrookletError> {
+            self.events.lock().unwrap().push(format!("save:{entry_id}"));
+            let status = self.controls.save_status.load(Ordering::Acquire);
+            if status != 0 {
+                return Err(BrookletError::Http {
+                    status,
+                    kind: crate::model::classify_http_status(status),
+                });
+            }
+            Ok(())
         }
 
         async fn refresh_feeds(&self) -> Result<(), BrookletError> {
-            unreachable!()
+            self.events.lock().unwrap().push("refresh".into());
+            if self.controls.fail_refresh.load(Ordering::Acquire) {
+                return Err(BrookletError::Http {
+                    status: 503,
+                    kind: crate::model::FailureKind::Retryable,
+                });
+            }
+            Ok(())
         }
 
         async fn subscribe(
@@ -911,6 +1045,7 @@ mod tests {
     }
 
     struct FakeFactory {
+        controls: Arc<ApiControls>,
         pages: Arc<Mutex<VecDeque<EntriesDto>>>,
         queries: Arc<Mutex<Vec<EntryQuery>>>,
         events: Arc<Mutex<Vec<String>>>,
@@ -924,6 +1059,7 @@ mod tests {
         ) -> Result<Box<dyn MinifluxApi>, BrookletError> {
             assert_eq!(token, "secret-token");
             Ok(Box::new(FakeApi {
+                controls: self.controls.clone(),
                 pages: self.pages.clone(),
                 queries: self.queries.clone(),
                 events: self.events.clone(),
@@ -1070,6 +1206,542 @@ mod tests {
 
     struct MemorySecrets;
 
+    struct Harness {
+        repository: Arc<crate::storage::sqlite::SqliteRepository>,
+        service: Arc<AccountSyncService>,
+        controls: Arc<ApiControls>,
+        events: Arc<Mutex<Vec<String>>>,
+        pages: Arc<Mutex<VecDeque<EntriesDto>>>,
+    }
+
+    fn remote_entry(id: i64, read: bool) -> EntryDto {
+        EntryDto {
+            id,
+            feed_id: 7,
+            title: format!("Story {id}"),
+            url: format!("https://example.com/{id}"),
+            author: None,
+            published_at: "2026-10-02T12:00:00Z".into(),
+            changed_at: "2026-10-02T12:00:00Z".into(),
+            content: "<p>Story</p>".into(),
+            status: if read { "read" } else { "unread" }.into(),
+            starred: false,
+            reading_time: 1,
+            feed: None,
+        }
+    }
+
+    impl Harness {
+        async fn new() -> Self {
+            Self::with_repository(Arc::new(
+                crate::storage::sqlite::SqliteRepository::open_in_memory().unwrap(),
+            ))
+            .await
+        }
+
+        async fn with_repository(
+            repository: Arc<crate::storage::sqlite::SqliteRepository>,
+        ) -> Self {
+            if repository.account().await.unwrap().is_none() {
+                repository
+                    .save_account(&Account {
+                        id: 1,
+                        server_url: "https://miniflux.example".into(),
+                        username: "reader".into(),
+                        server_version: "2.3.2".into(),
+                    })
+                    .await
+                    .unwrap();
+                repository
+                    .merge_changed_page(
+                        1,
+                        &[
+                            map_entry(1, remote_entry(42, false)),
+                            map_entry(1, remote_entry(43, false)),
+                        ],
+                        &[],
+                    )
+                    .await
+                    .unwrap();
+            }
+            let controls = Arc::new(ApiControls::default());
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let pages = Arc::new(Mutex::new(VecDeque::from([EntriesDto {
+                total: 0,
+                entries: Vec::new(),
+            }])));
+            let service = Arc::new(AccountSyncService::new(
+                repository.clone(),
+                Arc::new(MemorySecrets),
+                Arc::new(FakeFactory {
+                    controls: controls.clone(),
+                    events: events.clone(),
+                    pages: pages.clone(),
+                    queries: Arc::new(Mutex::new(Vec::new())),
+                }),
+            ));
+            Self {
+                repository,
+                service,
+                controls,
+                events,
+                pages,
+            }
+        }
+    }
+
+    async fn started(notification: &tokio::sync::Notify) {
+        tokio::time::timeout(std::time::Duration::from_secs(3), notification.notified())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn standalone_delivery_batches_read_unread_star_and_unstar_without_pulling() {
+        let harness = Harness::new().await;
+        harness
+            .service
+            .set_read_many_local(&[42, 43], true)
+            .await
+            .unwrap();
+        harness.service.set_read_local(43, false).await.unwrap();
+        harness.service.set_starred_local(42, true).await.unwrap();
+        harness.service.set_starred_local(43, false).await.unwrap();
+        assert!(!harness.service.flush_outgoing().await.unwrap());
+        assert_eq!(
+            *harness.events.lock().unwrap(),
+            [
+                "read:false:[43]",
+                "read:true:[42]",
+                "starred:false:[43]",
+                "starred:true:[42]",
+            ]
+        );
+        assert_eq!(
+            harness
+                .repository
+                .sync_status(1)
+                .await
+                .unwrap()
+                .last_successful_sync_at_ms,
+            None
+        );
+        assert!(
+            harness
+                .repository
+                .pending_mutations(1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_reads_use_one_upload_and_failed_uploads_keep_the_entire_batch() {
+        let harness = Harness::new().await;
+        harness
+            .service
+            .set_read_many_local(&[42, 43], true)
+            .await
+            .unwrap();
+        harness.controls.fail_read.store(true, Ordering::Release);
+        assert!(harness.service.flush_outgoing().await.is_err());
+        assert_eq!(
+            harness.repository.pending_mutations(1).await.unwrap().len(),
+            2
+        );
+        harness.controls.fail_read.store(false, Ordering::Release);
+        harness.service.flush_outgoing().await.unwrap();
+        assert_eq!(
+            *harness.events.lock().unwrap(),
+            ["read:true:[42, 43]", "read:true:[42, 43]"]
+        );
+        assert!(
+            harness
+                .repository
+                .pending_mutations(1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_notifications_deliver_only_the_latest_committed_actions() {
+        let harness = Harness::new().await;
+        let (notifications, changes) = tokio::sync::watch::channel(0);
+        let writes =
+            crate::outgoing::local_writes(&tokio::runtime::Handle::current(), notifications);
+        let service = harness.service.clone();
+        let worker = tokio::spawn(crate::outgoing::deliver(changes, move || {
+            let service = service.clone();
+            async move { service.flush_outgoing().await }
+        }));
+        let mut replies = Vec::new();
+        for read in [true, false, true] {
+            let service = harness.service.clone();
+            let (reply, result) = tokio::sync::oneshot::channel();
+            writes
+                .send((
+                    Box::pin(async move { service.set_read_local(42, read).await }),
+                    reply,
+                ))
+                .unwrap();
+            replies.push(result);
+        }
+        for reply in replies {
+            reply.await.unwrap().unwrap();
+        }
+        started(&harness.controls.read_started).await;
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !harness
+                .repository
+                .pending_mutations(1)
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(*harness.events.lock().unwrap(), ["read:true:[42]"]);
+        assert!(
+            harness
+                .repository
+                .cached_entry(1, 42)
+                .await
+                .unwrap()
+                .unwrap()
+                .read
+        );
+        worker.abort();
+    }
+
+    #[tokio::test]
+    async fn karakeep_retry_does_not_replay_read_and_terminal_errors_stop_automatic_delivery() {
+        let harness = Harness::new().await;
+        harness.service.set_read_local(42, true).await.unwrap();
+        let entry = harness
+            .repository
+            .cached_entry(1, 42)
+            .await
+            .unwrap()
+            .unwrap();
+        harness.service.queue_karakeep(&entry).await.unwrap();
+        harness.controls.save_status.store(503, Ordering::Release);
+        assert!(harness.service.flush_outgoing().await.is_err());
+        assert!(
+            harness
+                .repository
+                .pending_mutations(1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            harness.repository.pending_karakeep(1).await.unwrap().len(),
+            1
+        );
+        harness.events.lock().unwrap().clear();
+        harness.controls.save_status.store(400, Ordering::Release);
+        assert!(!harness.service.flush_outgoing().await.unwrap());
+        assert_eq!(*harness.events.lock().unwrap(), ["save:42"]);
+        assert!(
+            harness
+                .repository
+                .pending_karakeep(1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            harness
+                .repository
+                .cached_entry(1, 42)
+                .await
+                .unwrap()
+                .unwrap()
+                .delivery_state,
+            Some(crate::model::DeliveryState::NeedsAttention)
+        );
+        harness.events.lock().unwrap().clear();
+        harness.service.flush_outgoing().await.unwrap();
+        assert!(harness.events.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn accepted_karakeep_delivery_is_not_replayed_by_the_following_sync() {
+        let harness = Harness::new().await;
+        let entry = harness
+            .repository
+            .cached_entry(1, 42)
+            .await
+            .unwrap()
+            .unwrap();
+        harness.service.queue_karakeep(&entry).await.unwrap();
+        harness.service.flush_outgoing().await.unwrap();
+        assert_eq!(*harness.events.lock().unwrap(), ["save:42"]);
+        harness.events.lock().unwrap().clear();
+        harness.service.sync().await.unwrap();
+        assert_eq!(*harness.events.lock().unwrap(), ["pull"]);
+    }
+
+    #[tokio::test]
+    async fn queued_actions_are_accepted_before_server_feed_refresh_can_fail() {
+        let harness = Harness::new().await;
+        harness.service.set_read_local(42, true).await.unwrap();
+        harness.controls.fail_refresh.store(true, Ordering::Release);
+        assert!(harness.service.refresh_feeds().await.is_err());
+        assert!(
+            harness
+                .repository
+                .pending_mutations(1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            *harness.events.lock().unwrap(),
+            ["read:true:[42]", "refresh"]
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_batch_is_acknowledged_before_a_later_batch_fails() {
+        let harness = Harness::new().await;
+        harness.service.set_read_local(42, true).await.unwrap();
+        harness.service.set_starred_local(43, true).await.unwrap();
+        harness.controls.fail_star.store(true, Ordering::Release);
+        assert!(harness.service.flush_outgoing().await.is_err());
+        assert!(
+            harness
+                .repository
+                .sync_status(1)
+                .await
+                .unwrap()
+                .error
+                .is_some()
+        );
+        assert_eq!(harness.repository.sync_cursor(1).await.unwrap(), None);
+        let pending = harness.repository.pending_mutations(1).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].field, MutationField::Starred);
+        harness.events.lock().unwrap().clear();
+        harness.controls.fail_star.store(false, Ordering::Release);
+        assert!(!harness.service.flush_outgoing().await.unwrap());
+        assert_eq!(*harness.events.lock().unwrap(), ["starred:true:[43]"]);
+        assert_eq!(harness.repository.sync_status(1).await.unwrap().error, None);
+    }
+
+    #[tokio::test]
+    async fn a_failed_download_never_replays_an_accepted_write() {
+        let harness = Harness::new().await;
+        harness.service.set_read_local(42, true).await.unwrap();
+        harness.controls.fail_pull.store(true, Ordering::Release);
+        assert!(harness.service.sync().await.is_err());
+        assert!(
+            harness
+                .repository
+                .pending_mutations(1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        harness.events.lock().unwrap().clear();
+        harness.controls.fail_pull.store(false, Ordering::Release);
+        harness.service.sync().await.unwrap();
+        assert_eq!(*harness.events.lock().unwrap(), ["pull"]);
+    }
+
+    #[tokio::test]
+    async fn another_clients_newer_state_is_imported_after_our_upload() {
+        let harness = Harness::new().await;
+        harness.service.set_read_local(42, true).await.unwrap();
+        harness.service.flush_outgoing().await.unwrap();
+        // The server's current state now reflects another client's unread action.
+        *harness.pages.lock().unwrap() = VecDeque::from([EntriesDto {
+            total: 1,
+            entries: vec![remote_entry(42, false)],
+        }]);
+        harness.events.lock().unwrap().clear();
+        harness.service.sync().await.unwrap();
+        assert!(
+            !harness
+                .repository
+                .cached_entry(1, 42)
+                .await
+                .unwrap()
+                .unwrap()
+                .read
+        );
+        assert_eq!(*harness.events.lock().unwrap(), ["pull"]);
+    }
+
+    #[tokio::test]
+    async fn read_unread_read_while_uploading_retains_the_latest_revision_for_delivery() {
+        let harness = Harness::new().await;
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        *harness.controls.read_gate.lock().unwrap() = Some(gate.clone());
+        harness.service.set_read_local(42, true).await.unwrap();
+        let first = harness
+            .repository
+            .pending_mutations(1)
+            .await
+            .unwrap()
+            .remove(0);
+        let service = harness.service.clone();
+        let upload = tokio::spawn(async move { service.flush_outgoing().await });
+        started(&harness.controls.read_started).await;
+        harness.service.set_read_local(42, false).await.unwrap();
+        harness.service.set_read_local(42, true).await.unwrap();
+        *harness.controls.read_gate.lock().unwrap() = None;
+        gate.add_permits(1);
+        assert!(upload.await.unwrap().unwrap());
+        let latest = harness
+            .repository
+            .pending_mutations(1)
+            .await
+            .unwrap()
+            .remove(0);
+        assert!(latest.revision > first.revision);
+        assert!(latest.desired);
+        assert!(!harness.service.flush_outgoing().await.unwrap());
+        assert_eq!(
+            *harness.events.lock().unwrap(),
+            ["read:true:[42]", "read:true:[42]"]
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_inflight_page_merges_before_upload_acknowledgement() {
+        let harness = Harness::new().await;
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        *harness.controls.pull_gate.lock().unwrap() = Some(gate.clone());
+        *harness.pages.lock().unwrap() = VecDeque::from([EntriesDto {
+            total: 1,
+            entries: vec![remote_entry(42, false)],
+        }]);
+        let service = harness.service.clone();
+        let refresh = tokio::spawn(async move { service.sync().await });
+        started(&harness.controls.pull_started).await;
+        harness.service.set_read_local(42, true).await.unwrap();
+        let service = harness.service.clone();
+        let upload = tokio::spawn(async move { service.flush_outgoing().await });
+        tokio::task::yield_now().await;
+        assert_eq!(*harness.events.lock().unwrap(), ["pull"]);
+        gate.add_permits(1);
+        refresh.await.unwrap().unwrap();
+        upload.await.unwrap().unwrap();
+        assert!(
+            harness
+                .repository
+                .cached_entry(1, 42)
+                .await
+                .unwrap()
+                .unwrap()
+                .read
+        );
+        assert!(
+            harness
+                .repository
+                .pending_mutations(1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(*harness.events.lock().unwrap(), ["pull", "read:true:[42]"]);
+    }
+
+    #[tokio::test]
+    async fn cancelled_refresh_releases_upload_lock_and_clears_running_status() {
+        let harness = Harness::new().await;
+        *harness.controls.pull_gate.lock().unwrap() =
+            Some(Arc::new(tokio::sync::Semaphore::new(0)));
+        let service = harness.service.clone();
+        let refresh = tokio::spawn(async move { service.sync().await });
+        started(&harness.controls.pull_started).await;
+        assert!(harness.service.sync_status().await.unwrap().running);
+        harness.service.set_read_local(42, true).await.unwrap();
+        refresh.abort();
+        assert!(refresh.await.unwrap_err().is_cancelled());
+        assert!(!harness.service.sync_status().await.unwrap().running);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            harness.service.flush_outgoing(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            harness
+                .repository
+                .pending_mutations(1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(*harness.events.lock().unwrap(), ["pull", "read:true:[42]"]);
+    }
+
+    #[tokio::test]
+    async fn simultaneous_manual_sync_and_delivery_do_not_upload_the_same_snapshot_twice() {
+        let harness = Harness::new().await;
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        *harness.controls.read_gate.lock().unwrap() = Some(gate.clone());
+        harness.service.set_read_local(42, true).await.unwrap();
+        let service = harness.service.clone();
+        let upload = tokio::spawn(async move { service.flush_outgoing().await });
+        started(&harness.controls.read_started).await;
+        let service = harness.service.clone();
+        let refresh = tokio::spawn(async move { service.sync().await });
+        gate.add_permits(1);
+        upload.await.unwrap().unwrap();
+        refresh.await.unwrap().unwrap();
+        assert_eq!(*harness.events.lock().unwrap(), ["read:true:[42]", "pull"]);
+    }
+
+    #[tokio::test]
+    async fn startup_delivers_persisted_changes_after_a_database_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("offline.db");
+        {
+            let harness = Harness::with_repository(Arc::new(
+                crate::storage::sqlite::SqliteRepository::open(&path).unwrap(),
+            ))
+            .await;
+            harness.service.set_read_local(42, true).await.unwrap();
+        }
+        let harness = Harness::with_repository(Arc::new(
+            crate::storage::sqlite::SqliteRepository::open(&path).unwrap(),
+        ))
+        .await;
+        let (_sender, changes) = tokio::sync::watch::channel(0);
+        let service = harness.service.clone();
+        let worker = tokio::spawn(crate::outgoing::deliver(changes, move || {
+            let service = service.clone();
+            async move { service.flush_outgoing().await }
+        }));
+        started(&harness.controls.read_started).await;
+        // Wait for the HTTP success to have been committed to the real database.
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !harness
+                .repository
+                .pending_mutations(1)
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(*harness.events.lock().unwrap(), ["read:true:[42]"]);
+        worker.abort();
+    }
+
     #[async_trait]
     impl SecretStore for MemorySecrets {
         async fn load_miniflux_token(
@@ -1140,6 +1812,7 @@ mod tests {
             repository.clone(),
             secrets.clone(),
             Arc::new(FakeFactory {
+                controls: Arc::new(ApiControls::default()),
                 pages: Arc::new(Mutex::new(VecDeque::new())),
                 queries: Arc::new(Mutex::new(Vec::new())),
                 events: Arc::new(Mutex::new(Vec::new())),
@@ -1235,6 +1908,7 @@ mod tests {
             repository,
             Arc::new(MemorySecrets),
             Arc::new(FakeFactory {
+                controls: Arc::new(ApiControls::default()),
                 pages,
                 queries: queries.clone(),
                 events,
@@ -1273,6 +1947,7 @@ mod tests {
                 entry_id: 42,
                 field: MutationField::Read,
                 desired: true,
+                revision: 1,
             }]),
             cursor: Mutex::new(None),
         });
@@ -1280,6 +1955,7 @@ mod tests {
             repository.clone(),
             Arc::new(MemorySecrets),
             Arc::new(FakeFactory {
+                controls: Arc::new(ApiControls::default()),
                 pages: Arc::new(Mutex::new(VecDeque::from([EntriesDto {
                     total: 0,
                     entries: Vec::new(),
@@ -1296,7 +1972,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overlapping_stale_page_cannot_reverse_just_pushed_read_intent() {
+    async fn sync_merges_confirmed_remote_state_after_acknowledging_upload() {
         let remote = EntryDto {
             id: 42,
             feed_id: 7,
@@ -1327,6 +2003,7 @@ mod tests {
                 entry_id: 42,
                 field: MutationField::Read,
                 desired: true,
+                revision: 1,
             }]),
             cursor: Mutex::new(Some(1_000)),
         });
@@ -1335,9 +2012,13 @@ mod tests {
             repository.clone(),
             Arc::new(MemorySecrets),
             Arc::new(FakeFactory {
+                controls: Arc::new(ApiControls::default()),
                 pages: Arc::new(Mutex::new(VecDeque::from([EntriesDto {
                     total: 1,
-                    entries: vec![remote],
+                    entries: vec![EntryDto {
+                        status: "read".into(),
+                        ..remote
+                    }],
                 }]))),
                 queries: queries.clone(),
                 events: Arc::new(Mutex::new(Vec::new())),

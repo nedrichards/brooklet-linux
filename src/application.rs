@@ -843,6 +843,8 @@ impl BrookletApplication {
             );
             window.connect_close_request({
                 let reader = reader_ui.clone();
+                let controller = controller.clone();
+                let application = application.downgrade();
                 move |_| {
                     if let Some(entry_id) = reader.active_id.get()
                         && !reader.restoring.get()
@@ -853,6 +855,10 @@ impl BrookletApplication {
                             reader.scroller.vadjustment().value() as i32,
                         );
                         reader.controller.save_reader_position(position, |_| {});
+                    }
+                    if let Some(application) = application.upgrade() {
+                        let hold = application.hold();
+                        controller.drain_local_writes(move |_| drop(hold));
                     }
                     adw::glib::Propagation::Proceed
                 }
@@ -1118,8 +1124,16 @@ impl BrookletApplication {
     }
 
     fn install_actions(&self) {
+        let controller = self.controller.clone();
         let quit = gio::ActionEntry::builder("quit")
-            .activate(|application: &adw::Application, _, _| application.quit())
+            .activate(move |application: &adw::Application, _, _| {
+                let application = application.clone();
+                let hold = application.hold();
+                controller.drain_local_writes(move |_| {
+                    application.quit();
+                    drop(hold);
+                });
+            })
             .build();
         self.application.add_action_entries([quit]);
         let shortcuts_dialog = Rc::new(RefCell::new(None::<adw::ShortcutsDialog>));

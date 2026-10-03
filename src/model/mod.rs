@@ -129,6 +129,8 @@ pub enum MutationField {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingMutation {
+    /// Monotonic revision for this queued field, including repeated equal values.
+    pub revision: i64,
     pub account_id: AccountId,
     pub entry_id: EntryId,
     pub field: MutationField,

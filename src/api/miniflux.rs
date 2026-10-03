@@ -178,6 +178,8 @@ impl ReqwestMinifluxApi {
             base.set_path(&path);
         }
         let client = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
             .redirect(Policy::none())
             .https_only(!allow_http)
             .build()
@@ -478,6 +480,34 @@ mod tests {
                 assert!(payload.get("category_id").is_none());
             }
             assert!(requests.recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn lost_write_response_is_retryable_and_replay_sets_the_same_value() {
+        for starred in [false, true] {
+            // The server consumes the complete write, then closes without a
+            // response. Its acceptance is ambiguous to the client.
+            let (base, requests) = serve(vec![String::new(), response(204, "", &[])]);
+            let api = ReqwestMinifluxApi::for_test(&base, "secret");
+            let result = if starred {
+                api.set_starred(&[9], true).await
+            } else {
+                api.set_read(&[9], true).await
+            };
+            assert_eq!(result.unwrap_err().failure_kind(), FailureKind::Retryable);
+            if starred {
+                api.set_starred(&[9], true).await.unwrap();
+            } else {
+                api.set_read(&[9], true).await.unwrap();
+            }
+            let first = requests.recv().unwrap();
+            let replay = requests.recv().unwrap();
+            assert!(first.starts_with("PUT /v1/entries HTTP/1.1"));
+            assert_eq!(
+                first.split_once("\r\n\r\n").unwrap().1,
+                replay.split_once("\r\n\r\n").unwrap().1
+            );
         }
     }
 

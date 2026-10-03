@@ -22,6 +22,14 @@ minutes and catches up after a long suspend or time away. Automatic sync pauses
 on connections reported as metered or unavailable, and slows down after failures.
 You can still refresh manually at any time.
 
+Read/unread, star, and Karakeep actions are saved locally immediately and sent
+after two quiet seconds, with a ten-second limit during continuous activity.
+Delivery continues while the window is inactive and on metered connections.
+Retryable failures use exponential delays from five seconds to thirty minutes;
+credentials or certificate failures retry at thirty-minute intervals. Changes
+survive closing the app and resume delivery on the next launch. Brooklet does
+not run an upload service after it exits.
+
 A failed outgoing delivery does not block incoming article updates. Unsent
 read/star changes stay queued and protected from remote state; Karakeep outages
 also leave delivery queued. Sync diagnostics retain delivery failures even when

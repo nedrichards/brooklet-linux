@@ -139,9 +139,32 @@ editing controls. Keep Unread remains available in the reader header and menu.
 SQLite is the UI source of truth. A local read/star action and its pending
 mutation are written in one transaction. The pending-mutation key is
 `(account_id, entry_id, field)`, so a later desired value replaces the earlier
-one. Sync snapshots pending work, pushes it before pulling remote state, and
-acknowledges only the desired value it actually sent. This protects a newer
-local reversal made while a request is in flight.
+one. Local actions enter a FIFO persistence queue before backend tasks are
+spawned, preserving invocation order. After a successful local commit, a watch
+channel wakes an independent delivery worker. It debounces for two quiet seconds,
+capped at ten seconds from the start of a burst, and never cancels an upload
+when more actions arrive. Startup checks persisted work even if article refresh
+is still fresh. Window inactivity and metered connections do not gate delivery.
+Retryable failures back off exponentially from five seconds to thirty minutes;
+other failure kinds retry every thirty minutes. New actions do not shorten an
+existing failure backoff. A successful drain resets it. Manual sync can drain
+the queue immediately. Closing or quitting waits for queued local commits;
+network delivery resumes at next launch if unfinished when the process exits.
+
+Both standalone delivery and full sync push pending read/star work before
+Karakeep work. Full sync does this before requesting a server feed refresh.
+Each accepted batch is acknowledged immediately, before further requests or
+downloads can fail. Acknowledgement matches both the desired value and the
+monotonic revision stored in `updated_at_ms`; revisions increase even when rapid
+changes share a millisecond or the clock moves backwards. This protects newer
+equal values as well as reversals made while a request is in flight.
+
+Uploads, disconnect, and each article fetch-and-merge share a mutex. A stale
+response fetched before an upload is merged while the local intent is still
+pending; a fetch after acknowledgement imports the current server state,
+including changes from other clients. Uploads can run between pages rather than
+waiting for a whole article refresh. Miniflux and Karakeep requests have a
+ten-second connection timeout and a thirty-second total timeout.
 
 Remote merge preserves fields with unacknowledged local intentions. Incremental
 entry pulls overlap the last successful `changed_after` cursor by 60 seconds;
@@ -217,6 +240,16 @@ user-facing context without retaining credentials or article bodies. `tracing`
 records phases, counts, durations, endpoint classes, and stable identifiers;
 it never records tokens, API keys, authenticated headers, or full article HTML.
 Offline and retryable failures update sync state while leaving cached UI usable.
+Delivery errors are stored separately from article refresh errors and clear on
+successful delivery without hiding an unresolved refresh failure. A status row
+created by an error before the first successful pull has an absent cursor and
+triggers bootstrap normally.
+
+An accepted write cannot be replayed merely because a later batch or download
+failed. A lost HTTP response or a process crash between server acceptance and
+SQLite acknowledgement remains ambiguous: durable pending work is retried.
+Read/star requests set explicit values; third-party save requests do not offer
+an exactly-once delivery guarantee.
 
 Incoming sync continues when read/star upload or Karakeep delivery fails at a
 service boundary. Unsent intentions remain queued and protected from remote

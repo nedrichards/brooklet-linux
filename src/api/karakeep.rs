@@ -41,6 +41,8 @@ impl ReqwestKarakeepApi {
             service_url(endpoint)?
         };
         let client = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
             .https_only(!allow_http_for_tests)
             .redirect(Policy::none())
             .build()

@@ -30,6 +30,7 @@ cargo_target = custom_target(
     'src/application.rs',
     'src/keyboard.rs',
     'src/auto_refresh.rs',
+    'src/outgoing.rs',
     'src/config.rs',
     'src/controller.rs',
     'src/error.rs',

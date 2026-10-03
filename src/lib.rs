@@ -5,6 +5,7 @@ pub mod config;
 pub mod controller;
 pub mod error;
 pub mod model;
+pub mod outgoing;
 pub mod reader;
 pub mod services;
 pub mod setup;

@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use crate::outgoing::LocalWrite;
+
 use adw::glib;
 
 use crate::{
@@ -20,6 +22,8 @@ pub struct AppController {
     image_cache: Arc<crate::services::image_cache::ImageCache>,
     image_decoders: Arc<tokio::sync::Semaphore>,
     parsers: Arc<tokio::sync::Semaphore>,
+    local_writes: tokio::sync::mpsc::UnboundedSender<LocalWrite>,
+    outgoing_changes: tokio::sync::watch::Sender<u64>,
 }
 
 impl AppController {
@@ -96,9 +100,19 @@ impl AppController {
             .thread_name("brooklet-backend")
             .enable_all()
             .build()?;
+        let (outgoing_changes, changes) = tokio::sync::watch::channel(0);
+        let outgoing_service = sync_service.clone();
+        runtime.spawn(crate::outgoing::deliver(changes, move || {
+            let service = outgoing_service.clone();
+            async move { service.flush_outgoing().await }
+        }));
+        let local_writes =
+            crate::outgoing::local_writes(runtime.handle(), outgoing_changes.clone());
         Ok(Self {
             runtime,
             account_operations: Arc::new(tokio::sync::Mutex::new(())),
+            local_writes,
+            outgoing_changes,
             setup_service,
             sync_service,
             image_cache,
@@ -121,7 +135,15 @@ impl AppController {
         callback: impl FnOnce(Result<Account, BrookletError>) + 'static,
     ) {
         let service = self.setup_service.clone();
-        self.dispatch_account(async move { service.configure(request).await }, callback);
+        let changes = self.outgoing_changes.clone();
+        self.dispatch_account(
+            async move {
+                let account = service.configure(request).await?;
+                changes.send_modify(|generation| *generation = generation.wrapping_add(1));
+                Ok(account)
+            },
+            callback,
+        );
     }
 
     /// Account changes share a lock with logout. A reconnect that was queued
@@ -162,7 +184,7 @@ impl AppController {
         callback: impl FnOnce(Result<(), BrookletError>) + 'static,
     ) {
         let service = self.sync_service.clone();
-        self.dispatch(
+        self.dispatch_write(
             async move { service.set_read_local(entry_id, read).await },
             callback,
         );
@@ -177,7 +199,7 @@ impl AppController {
         let service = self.sync_service.clone();
         let operations = self.account_operations.clone();
         let cache = self.image_cache.clone();
-        self.dispatch(
+        self.dispatch_write(
             async move {
                 let _guard = operations.lock().await;
                 service.disconnect().await?;
@@ -245,7 +267,7 @@ impl AppController {
         callback: impl FnOnce(Result<(), BrookletError>) + 'static,
     ) {
         let service = self.sync_service.clone();
-        self.dispatch(
+        self.dispatch_write(
             async move { service.set_read_many_local(&entry_ids, read).await },
             callback,
         );
@@ -258,7 +280,7 @@ impl AppController {
         callback: impl FnOnce(Result<(), BrookletError>) + 'static,
     ) {
         let service = self.sync_service.clone();
-        self.dispatch(
+        self.dispatch_write(
             async move { service.set_starred_local(entry_id, starred).await },
             callback,
         );
@@ -282,7 +304,7 @@ impl AppController {
         callback: impl FnOnce(Result<(), BrookletError>) + 'static,
     ) {
         let service = self.sync_service.clone();
-        self.dispatch(
+        self.dispatch_write(
             async move { service.save_reader_position(&position).await },
             callback,
         );
@@ -294,7 +316,7 @@ impl AppController {
         callback: impl FnOnce(Result<(), BrookletError>) + 'static,
     ) {
         let service = self.sync_service.clone();
-        self.dispatch(
+        self.dispatch_write(
             async move { service.queue_karakeep(&entry).await },
             callback,
         );
@@ -406,6 +428,28 @@ impl AppController {
     pub fn clear_image_cache(&self, callback: impl FnOnce(Result<(), BrookletError>) + 'static) {
         let cache = self.image_cache.clone();
         self.dispatch(async move { cache.clear().await }, callback);
+    }
+
+    /// A queue barrier lets shutdown wait for preceding local commits, without
+    /// waiting for the network or cancelling an in-flight delivery.
+    pub fn drain_local_writes(&self, callback: impl FnOnce(Result<(), BrookletError>) + 'static) {
+        self.dispatch_write(async { Ok(()) }, callback);
+    }
+
+    fn dispatch_write(
+        &self,
+        future: impl Future<Output = Result<(), BrookletError>> + Send + 'static,
+        callback: impl FnOnce(Result<(), BrookletError>) + 'static,
+    ) {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.local_writes
+            .send((Box::pin(future), sender))
+            .expect("local write worker remains alive");
+        glib::MainContext::default().spawn_local(async move {
+            if let Ok(result) = receiver.await {
+                callback(result);
+            }
+        });
     }
 
     fn dispatch<T: Send + 'static>(

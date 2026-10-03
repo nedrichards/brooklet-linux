@@ -481,10 +481,10 @@ impl SqliteStore {
             transaction.execute(
                 r#"INSERT INTO pending_mutations
                    (account_id, entry_id, field, desired, updated_at_ms)
-               VALUES (?1, ?2, 'read', ?3, unixepoch('subsec') * 1000)
+               VALUES (?1, ?2, 'read', ?3, CAST(unixepoch('subsec') * 1000 AS INTEGER))
                ON CONFLICT(account_id, entry_id, field) DO UPDATE SET
                    desired = excluded.desired,
-                   updated_at_ms = excluded.updated_at_ms"#,
+                   updated_at_ms = max(pending_mutations.updated_at_ms + 1, excluded.updated_at_ms)"#,
                 params![account_id, entry_id, read],
             )?;
         }
@@ -495,7 +495,7 @@ impl SqliteStore {
     fn pending_mutations(&self, account_id: i64) -> Result<Vec<PendingMutation>, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         let mut statement = connection.prepare(
-            r#"SELECT account_id, entry_id, field, desired
+            r#"SELECT account_id, entry_id, field, desired, updated_at_ms
                FROM pending_mutations
                WHERE account_id = ?1
                ORDER BY updated_at_ms, entry_id, field"#,
@@ -512,6 +512,7 @@ impl SqliteStore {
                         MutationField::Starred
                     },
                     desired: row.get(3)?,
+                    revision: row.get(4)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()
@@ -526,12 +527,13 @@ impl SqliteStore {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         connection.execute(
             r#"DELETE FROM pending_mutations
-               WHERE account_id = ?1 AND entry_id = ?2 AND field = ?3 AND desired = ?4"#,
+               WHERE account_id = ?1 AND entry_id = ?2 AND field = ?3 AND desired = ?4 AND updated_at_ms = ?5"#,
             params![
                 mutation.account_id,
                 mutation.entry_id,
                 field,
-                mutation.desired
+                mutation.desired,
+                mutation.revision
             ],
         )?;
         Ok(())
@@ -550,7 +552,7 @@ impl SqliteStore {
             params![account_id, entry_id, starred],
         )?;
         if updated > 0 {
-            transaction.execute("INSERT INTO pending_mutations(account_id,entry_id,field,desired,updated_at_ms) VALUES(?1,?2,'starred',?3,unixepoch('subsec')*1000) ON CONFLICT(account_id,entry_id,field) DO UPDATE SET desired=excluded.desired,updated_at_ms=excluded.updated_at_ms",params![account_id,entry_id,starred])?;
+            transaction.execute("INSERT INTO pending_mutations(account_id,entry_id,field,desired,updated_at_ms) VALUES(?1,?2,'starred',?3,CAST(unixepoch('subsec')*1000 AS INTEGER)) ON CONFLICT(account_id,entry_id,field) DO UPDATE SET desired=excluded.desired,updated_at_ms=max(pending_mutations.updated_at_ms+1,excluded.updated_at_ms)",params![account_id,entry_id,starred])?;
         }
         transaction.commit()?;
         Ok(())
@@ -566,7 +568,7 @@ impl SqliteStore {
         let transaction = connection.transaction()?;
         {
             let mut update = transaction.prepare("UPDATE entries SET read=?3,last_opened_at_ms=CASE WHEN ?3 THEN unixepoch('subsec')*1000 ELSE last_opened_at_ms END WHERE account_id=?1 AND id=?2")?;
-            let mut pending = transaction.prepare("INSERT INTO pending_mutations(account_id,entry_id,field,desired,updated_at_ms) VALUES(?1,?2,'read',?3,unixepoch('subsec')*1000) ON CONFLICT(account_id,entry_id,field) DO UPDATE SET desired=excluded.desired,updated_at_ms=excluded.updated_at_ms")?;
+            let mut pending = transaction.prepare("INSERT INTO pending_mutations(account_id,entry_id,field,desired,updated_at_ms) VALUES(?1,?2,'read',?3,CAST(unixepoch('subsec')*1000 AS INTEGER)) ON CONFLICT(account_id,entry_id,field) DO UPDATE SET desired=excluded.desired,updated_at_ms=max(pending_mutations.updated_at_ms+1,excluded.updated_at_ms)")?;
             for id in entry_ids {
                 if update.execute(params![account_id, id, read])? > 0 {
                     pending.execute(params![account_id, id, read])?;
@@ -1591,6 +1593,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn acknowledgement_cannot_delete_newer_equal_values_or_read_unread_read() {
+        let repository = repository_with_entry().await;
+        repository.set_read_local(1, 42, true).await.unwrap();
+        let sent = repository.pending_mutations(1).await.unwrap().remove(0);
+        repository
+            .set_read_many_local(1, &[42], false)
+            .await
+            .unwrap();
+        repository
+            .set_read_many_local(1, &[42], true)
+            .await
+            .unwrap();
+        let latest = repository.pending_mutations(1).await.unwrap().remove(0);
+        assert!(latest.revision > sent.revision);
+        repository.acknowledge_mutation(&sent).await.unwrap();
+        assert_eq!(
+            repository.pending_mutations(1).await.unwrap().as_slice(),
+            std::slice::from_ref(&latest)
+        );
+        repository.acknowledge_mutation(&latest).await.unwrap();
+        assert!(repository.pending_mutations(1).await.unwrap().is_empty());
+
+        repository.set_starred_local(1, 42, true).await.unwrap();
+        let sent = repository.pending_mutations(1).await.unwrap().remove(0);
+        repository.set_starred_local(1, 42, true).await.unwrap();
+        let latest = repository.pending_mutations(1).await.unwrap().remove(0);
+        assert!(latest.revision > sent.revision);
+        repository.acknowledge_mutation(&sent).await.unwrap();
+        assert_eq!(repository.pending_mutations(1).await.unwrap(), [latest]);
+    }
+
+    #[tokio::test]
+    async fn queue_revisions_advance_when_the_previous_timestamp_is_in_the_future() {
+        let repository = repository_with_entry().await;
+        repository.set_read_local(1, 42, true).await.unwrap();
+        repository
+            .run(|store| {
+                store.connection.lock().unwrap().execute(
+                    "UPDATE pending_mutations SET updated_at_ms=9000000000000 WHERE account_id=1",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let sent = repository.pending_mutations(1).await.unwrap().remove(0);
+        repository.set_read_local(1, 42, true).await.unwrap();
+        let latest = repository.pending_mutations(1).await.unwrap().remove(0);
+        assert_eq!(latest.revision, sent.revision + 1);
+        repository.acknowledge_mutation(&sent).await.unwrap();
+        assert_eq!(repository.pending_mutations(1).await.unwrap(), [latest]);
+    }
+
+    #[tokio::test]
     async fn delivery_status_migration_preserves_existing_account_entries_and_queue() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("old.db");
@@ -1613,7 +1669,7 @@ mod tests {
         );
         assert!(repository.cached_entry(1, 42).await.unwrap().unwrap().read);
         let pending = repository.pending_mutations(1).await.unwrap().remove(0);
-        assert!(pending.desired);
+        assert_eq!(pending.revision, 1234);
         repository
             .record_delivery_error(1, Some("offline"))
             .await
