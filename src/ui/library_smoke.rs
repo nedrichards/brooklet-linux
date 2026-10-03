@@ -351,7 +351,7 @@ fn sync_journey(refresh: bool) -> Result<(), adw::glib::BoolError> {
         sync::{AccountSyncService, MinifluxApiFactory, SyncService},
     };
     use std::sync::atomic::{AtomicBool, Ordering};
-    struct Server(Arc<AtomicBool>);
+    struct Server(Arc<AtomicBool>, Arc<AtomicBool>);
     #[async_trait]
     impl MinifluxApi for Server {
         async fn validate(&self) -> Result<ServerIdentity, BrookletError> {
@@ -380,13 +380,22 @@ fn sync_journey(refresh: bool) -> Result<(), adw::glib::BoolError> {
                 }),
             }])
         }
-        async fn entries(&self, _: &EntryQuery) -> Result<EntriesDto, BrookletError> {
+        async fn entries(&self, query: &EntryQuery) -> Result<EntriesDto, BrookletError> {
             let updated = self.0.load(Ordering::Acquire);
-            let ids = if updated {
+            let mut ids = if updated {
                 vec![101, 99, 42]
             } else {
                 vec![99, 42]
             };
+            if self.1.load(Ordering::Acquire) {
+                ids.retain(|id| *id != 42);
+            }
+            if query.order == "id" {
+                ids.sort_unstable();
+            }
+            if query.limit == 1 {
+                ids.truncate(1);
+            }
             Ok(EntriesDto {
                 total: ids.len(),
                 entries: ids
@@ -412,8 +421,27 @@ fn sync_journey(refresh: bool) -> Result<(), adw::glib::BoolError> {
                     .collect(),
             })
         }
-        async fn entry(&self, _: i64) -> Result<EntryDto, BrookletError> {
-            unreachable!()
+        async fn entry_ids(
+            &self,
+            _: usize,
+            _: usize,
+        ) -> Result<brooklet::api::miniflux::EntryIdsDto, BrookletError> {
+            let entry_ids: Vec<i64> = if self.1.load(Ordering::Acquire) {
+                vec![99, 101]
+            } else {
+                vec![42, 99, 101]
+            };
+            Ok(brooklet::api::miniflux::EntryIdsDto {
+                total: entry_ids.len(),
+                entry_ids,
+            })
+        }
+        async fn entry(&self, id: i64) -> Result<EntryDto, BrookletError> {
+            assert!(id == 42 && self.1.load(Ordering::Acquire));
+            Err(BrookletError::Http {
+                status: 404,
+                kind: brooklet::model::classify_http_status(404),
+            })
         }
         async fn set_read(&self, _: &[i64], _: bool) -> Result<(), BrookletError> {
             unreachable!("Navigation or refresh changed read state")
@@ -438,7 +466,7 @@ fn sync_journey(refresh: bool) -> Result<(), adw::glib::BoolError> {
     }
     impl MinifluxApiFactory for Server {
         fn create(&self, _: &str, _: String) -> Result<Box<dyn MinifluxApi>, BrookletError> {
-            Ok(Box::new(Server(self.0.clone())))
+            Ok(Box::new(Server(self.0.clone(), self.1.clone())))
         }
     }
     struct Secrets;
@@ -501,11 +529,12 @@ fn sync_journey(refresh: bool) -> Result<(), adw::glib::BoolError> {
         }))
         .map_err(|e| adw::glib::bool_error!("{e}"))?;
     let updated = Arc::new(AtomicBool::new(false));
+    let deleted = Arc::new(AtomicBool::new(false));
     let secrets = Arc::new(Secrets);
     let service = Arc::new(AccountSyncService::new(
         repo.clone(),
         secrets.clone(),
-        Arc::new(Server(updated.clone())),
+        Arc::new(Server(updated.clone(), deleted.clone())),
     ));
     runtime
         .block_on(service.sync())
@@ -722,6 +751,31 @@ fn sync_journey(refresh: bool) -> Result<(), adw::glib::BoolError> {
         check(
             !health.property::<bool>("visible"),
             "Recovered health remained prominent",
+        )?;
+    }
+    if refresh {
+        window
+            .activate_action("win.library-feed", Some(&21_i64.to_variant()))
+            .map_err(|e| adw::glib::bool_error!("{e}"))?;
+        let page = builder_nav.visible_page().unwrap();
+        let list = find_list(page.upcast_ref()).unwrap();
+        wait_until(|| list.model().is_some_and(|model| model.n_items() == 3))?;
+        inbox::select_id(&list, 99);
+        list.grab_focus();
+        deleted.store(true, Ordering::Release);
+        app.activate_action("sync", None);
+        wait_until(|| list.model().is_some_and(|model| model.n_items() == 2))?;
+        check(
+            inbox::selected_id(&list) == Some(99)
+                && builder_nav.visible_page().as_ref() == Some(&page),
+            "Remote deletion changed surviving selection or feed scope",
+        )?;
+        check(
+            runtime
+                .block_on(repo.cached_entry(1, 42))
+                .unwrap()
+                .is_none(),
+            "Hard-deleted article remained cached",
         )?;
     }
     window.close();

@@ -35,6 +35,8 @@ pub enum BrookletError {
         "Timed out checking refreshed feeds. Cached articles remain available; try Sync again."
     )]
     RefreshFollowUpTimeout,
+    #[error("Sync could not finish: {0}. Cached articles remain available; try Sync again.")]
+    SyncResponse(&'static str),
 }
 
 impl BrookletError {
@@ -46,7 +48,8 @@ impl BrookletError {
             Self::Database(_)
             | Self::Storage(_)
             | Self::SecretStore(_)
-            | Self::RefreshFollowUpTimeout => FailureKind::Retryable,
+            | Self::RefreshFollowUpTimeout
+            | Self::SyncResponse(_) => FailureKind::Retryable,
             Self::InvalidSetup(_) | Self::AccountMismatch | Self::AccountAlreadyConfigured => {
                 FailureKind::MalformedRequest
             }
@@ -55,7 +58,7 @@ impl BrookletError {
 
     pub fn setup_message(&self) -> String {
         match self {
-            Self::AccountMismatch | Self::AccountAlreadyConfigured | Self::RefreshFollowUpTimeout => self.to_string(),
+            Self::AccountMismatch | Self::AccountAlreadyConfigured | Self::RefreshFollowUpTimeout | Self::SyncResponse(_) => self.to_string(),
             Self::InvalidServiceUrl(detail) => format!("Check the Miniflux address: {detail}."),
             Self::InvalidSetup(detail) => format!("Please enter {detail}."),
             Self::Http { status: 401 | 403, .. } => {
@@ -123,7 +126,7 @@ impl BrookletError {
             Self::Database(_) | Self::Storage(_) => {
                 "Brooklet could not update its local article cache.".into()
             }
-            Self::RefreshFollowUpTimeout => self.to_string(),
+            Self::RefreshFollowUpTimeout | Self::SyncResponse(_) => self.to_string(),
             Self::InvalidServiceUrl(_)
             | Self::InvalidSetup(_)
             | Self::Http { .. }

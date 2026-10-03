@@ -373,20 +373,61 @@ impl AccountSyncService {
             .await?;
         let cursor = self.repository.sync_cursor(account.id).await?.unwrap_or(0);
         let overlap = incremental_start(Some(cursor), 60);
+        // Freeze advancement using a server-observed timestamp, not the client clock.
+        let watermark = api
+            .entries(&EntryQuery {
+                limit: 1,
+                ..EntryQuery::default()
+            })
+            .await?;
+        if watermark.entries.len() > 1 {
+            return Err(BrookletError::SyncResponse("invalid watermark page"));
+        }
+        let ceiling = watermark
+            .entries
+            .first()
+            .map(|dto| {
+                dto.changed_at
+                    .parse::<jiff::Timestamp>()
+                    .map(|time| time.as_second())
+                    .map_err(|_| BrookletError::SyncResponse("invalid change timestamp"))
+            })
+            .transpose()?;
         let mut newest = cursor;
-        let mut offset = 0;
+        let mut after_entry_id = None;
         let mut fetched = 0;
         loop {
             let page = api
                 .entries(&EntryQuery {
                     status: None,
                     changed_after: Some(overlap),
+                    changed_before: ceiling.map(|time| time.saturating_add(1)),
+                    order: "id",
+                    direction: "asc",
+                    after_entry_id,
                     limit: PAGE_SIZE,
-                    offset,
-                    ..EntryQuery::default()
+                    offset: 0,
                 })
                 .await?;
             let page_len = page.entries.len();
+            if page_len > PAGE_SIZE {
+                return Err(BrookletError::SyncResponse("oversized entry page"));
+            }
+            let mut previous = after_entry_id.unwrap_or(0);
+            for dto in &page.entries {
+                if dto.id <= previous {
+                    return Err(BrookletError::SyncResponse(
+                        "entry pagination did not advance",
+                    ));
+                }
+                previous = dto.id;
+                if dto.changed_at.parse::<jiff::Timestamp>().is_err() {
+                    return Err(BrookletError::SyncResponse("invalid change timestamp"));
+                }
+                if !matches!(dto.status.as_str(), "read" | "unread" | "removed") {
+                    return Err(BrookletError::SyncResponse("unknown entry status"));
+                }
+            }
             let mut entries = Vec::new();
             let mut removed = Vec::new();
             for dto in page.entries {
@@ -403,11 +444,19 @@ impl AccountSyncService {
                 .merge_changed_page(account.id, &entries, &removed)
                 .await?;
             fetched += page_len;
-            offset += page_len;
-            if page_len == 0 || offset >= page.total {
+            after_entry_id = Some(previous);
+            if page_len < PAGE_SIZE || ceiling.is_none() {
                 break;
             }
         }
+        // A write behind the ID cursor will be replayed on the next pull.
+        newest = cursor.max(newest.min(ceiling.unwrap_or(cursor)));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            self.reconcile_missing(account, api),
+        )
+        .await
+        .map_err(|_| BrookletError::SyncResponse("remote reconciliation timed out"))??;
         self.repository
             .complete_sync(account.id, newest, now_ms())
             .await?;
@@ -419,6 +468,67 @@ impl AccountSyncService {
             .await?;
         let inbox = self.repository.unread_entries(account.id).await?;
         Ok(SyncResult { inbox, fetched })
+    }
+    async fn reconcile_missing(
+        &self,
+        account: &crate::model::Account,
+        api: &dyn MinifluxApi,
+    ) -> Result<(), BrookletError> {
+        let cached = self.repository.cached_entry_ids(account.id).await?;
+        if cached.is_empty() {
+            return Ok(());
+        }
+        const LIMIT: usize = 10_000;
+        let mut remote = std::collections::HashSet::new();
+        let mut offset = 0;
+        let mut bound = None;
+        loop {
+            let page = api.entry_ids(LIMIT, offset).await?;
+            let count = page.entry_ids.len();
+            if count > LIMIT || page.entry_ids.iter().any(|id| *id <= 0) {
+                return Err(BrookletError::SyncResponse("invalid entry inventory"));
+            }
+            let added = page
+                .entry_ids
+                .into_iter()
+                .filter(|id| remote.insert(*id))
+                .count();
+            if count > 0 && added == 0 {
+                return Err(BrookletError::SyncResponse(
+                    "inventory pagination did not advance",
+                ));
+            }
+            let initial_total = *bound.get_or_insert(page.total);
+            offset += count;
+            if count == 0 || offset >= initial_total || cached.iter().all(|id| remote.contains(id))
+            {
+                break;
+            }
+        }
+        for id in cached.into_iter().filter(|id| !remote.contains(id)) {
+            // Absence in an offset-paged inventory is only a hint. Confirm it
+            // individually before deleting: concurrent changes can shift those pages.
+            match api.entry(id).await {
+                Err(BrookletError::Http { status: 404, .. }) => {
+                    self.repository
+                        .merge_changed_page(account.id, &[], &[id])
+                        .await?;
+                }
+                Ok(dto) if dto.id == id && dto.status == "removed" => {
+                    self.repository
+                        .merge_changed_page(account.id, &[], &[id])
+                        .await?;
+                }
+                Ok(dto) if dto.id == id && matches!(dto.status.as_str(), "read" | "unread") => {
+                    self.repository
+                        .merge_changed_page(account.id, &[map_entry(account.id, dto)], &[])
+                        .await?;
+                }
+                Ok(_) => return Err(BrookletError::SyncResponse("invalid entry confirmation")),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -736,11 +846,30 @@ mod tests {
         }
 
         async fn entries(&self, query: &EntryQuery) -> Result<EntriesDto, BrookletError> {
+            if query.limit == 1 {
+                let pages = self.pages.lock().unwrap();
+                let page = pages.front().expect("watermark fixture");
+                return Ok(EntriesDto {
+                    total: page.total,
+                    entries: page.entries.iter().take(1).cloned().collect(),
+                });
+            }
             self.events.lock().unwrap().push("pull".into());
             self.queries.lock().unwrap().push(query.clone());
             Ok(self.pages.lock().unwrap().pop_front().unwrap())
         }
 
+        async fn entry_ids(
+            &self,
+            _: usize,
+            _: usize,
+        ) -> Result<crate::api::miniflux::EntryIdsDto, BrookletError> {
+            let entry_ids: Vec<i64> = (1..=200).collect();
+            Ok(crate::api::miniflux::EntryIdsDto {
+                total: entry_ids.len(),
+                entry_ids,
+            })
+        }
         async fn entry(&self, _entry_id: i64) -> Result<EntryDto, BrookletError> {
             unreachable!()
         }
@@ -1115,9 +1244,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .map(|query| query.offset)
+                .map(|query| query.after_entry_id)
                 .collect::<Vec<_>>(),
-            [0, 100]
+            [None, Some(100)]
         );
     }
 

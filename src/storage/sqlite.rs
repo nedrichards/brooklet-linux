@@ -117,6 +117,7 @@ const MIGRATIONS: &[&str] = &[
     "#,
     "ALTER TABLE entries ADD COLUMN content_revision INTEGER NOT NULL DEFAULT 0; CREATE INDEX entries_delivery ON karakeep_deliveries(account_id, entry_id); CREATE INDEX entries_order ON entries(account_id, published_at_ms DESC, id DESC);",
     "ALTER TABLE sync_state ADD COLUMN delivery_error TEXT;",
+    "ALTER TABLE entries ADD COLUMN remote_removed INTEGER NOT NULL DEFAULT 0;",
 ];
 
 pub struct SqliteRepository {
@@ -658,9 +659,13 @@ impl SqliteStore {
         {
             let mut remove = transaction.prepare("DELETE FROM entries WHERE account_id=?1 AND id=?2 AND NOT EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id) AND NOT EXISTS(SELECT 1 FROM karakeep_deliveries k WHERE k.account_id=entries.account_id AND k.entry_id=entries.id AND k.state!='saved')")?;
             for id in removed_ids {
+                transaction.execute(
+                    "UPDATE entries SET remote_removed=1 WHERE account_id=?1 AND id=?2",
+                    params![account_id, id],
+                )?;
                 remove.execute(params![account_id, id])?;
             }
-            let mut merge = transaction.prepare("INSERT INTO entries(account_id,id,feed_id,feed_title,category_title,title,url,author,published_at_ms,html,read,starred,reading_minutes,content_revision) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) ON CONFLICT(account_id,id) DO UPDATE SET feed_id=excluded.feed_id,feed_title=excluded.feed_title,category_title=excluded.category_title,title=excluded.title,url=excluded.url,author=excluded.author,published_at_ms=excluded.published_at_ms,html=excluded.html,content_revision=excluded.content_revision,read=CASE WHEN EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id AND m.field='read') THEN entries.read ELSE excluded.read END,starred=CASE WHEN EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id AND m.field='starred') THEN entries.starred ELSE excluded.starred END,reading_minutes=excluded.reading_minutes")?;
+            let mut merge = transaction.prepare("INSERT INTO entries(account_id,id,feed_id,feed_title,category_title,title,url,author,published_at_ms,html,read,starred,reading_minutes,content_revision) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) ON CONFLICT(account_id,id) DO UPDATE SET remote_removed=0,feed_id=excluded.feed_id,feed_title=excluded.feed_title,category_title=excluded.category_title,title=excluded.title,url=excluded.url,author=excluded.author,published_at_ms=excluded.published_at_ms,html=excluded.html,content_revision=excluded.content_revision,read=CASE WHEN EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id AND m.field='read') THEN entries.read ELSE excluded.read END,starred=CASE WHEN EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id AND m.field='starred') THEN entries.starred ELSE excluded.starred END,reading_minutes=excluded.reading_minutes")?;
             for entry in entries {
                 merge.execute(params![
                     entry.account_id,
@@ -928,9 +933,10 @@ impl SqliteStore {
         let mut connection = self.connection.lock().expect("SQLite mutex poisoned");
         let transaction = connection.transaction()?;
         transaction.execute("DELETE FROM karakeep_deliveries WHERE account_id=?1 AND state='saved' AND completed_at_ms<?2",params![account_id,now_ms-30*86_400_000])?;
+        let reconciled = transaction.execute("DELETE FROM entries WHERE account_id=?1 AND remote_removed=1 AND NOT EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id) AND NOT EXISTS(SELECT 1 FROM karakeep_deliveries k WHERE k.account_id=entries.account_id AND k.entry_id=entries.id AND k.state!='saved')", [account_id])?;
         let Some(days) = policy.retain_read_days else {
             transaction.commit()?;
-            return Ok(0);
+            return Ok(reconciled);
         };
         let cutoff = now_ms.saturating_sub(i64::from(days) * 86_400_000);
         let eligible = "e.account_id=?1 AND e.read=1 AND e.starred=0 AND (e.last_opened_at_ms IS NULL OR e.last_opened_at_ms<?2) AND NOT EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=e.account_id AND m.entry_id=e.id) AND NOT EXISTS(SELECT 1 FROM karakeep_deliveries k WHERE k.account_id=e.account_id AND k.entry_id=e.id)";
@@ -946,7 +952,7 @@ impl SqliteStore {
             params![account_id, cutoff, policy.keep_at_most],
         )?;
         transaction.commit()?;
-        let removed = expired + overflow;
+        let removed = reconciled + expired + overflow;
         Ok(removed)
     }
 }
@@ -960,6 +966,18 @@ impl Repository for SqliteRepository {
     ) -> Result<Option<Entry>, BrookletError> {
         self.run(move |store| store.cached_entry(account_id, entry_id))
             .await
+    }
+
+    async fn cached_entry_ids(&self, account_id: i64) -> Result<Vec<EntryId>, BrookletError> {
+        self.run(move |store| {
+            let connection = store.connection.lock().expect("SQLite mutex poisoned");
+            let mut statement =
+                connection.prepare("SELECT id FROM entries WHERE account_id=?1 ORDER BY id")?;
+            Ok(statement
+                .query_map([account_id], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
     }
 
     async fn account(&self) -> Result<Option<Account>, BrookletError> {
@@ -1551,9 +1569,12 @@ mod tests {
             .apply_retention(1, 31 * 86_400_000)
             .await
             .unwrap();
-        assert_eq!(
-            repository.entries_for_view(1, "all").await.unwrap()[0].delivery_state,
-            None
+        assert!(
+            repository
+                .entries_for_view(1, "all")
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 

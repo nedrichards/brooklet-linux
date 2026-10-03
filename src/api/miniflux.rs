@@ -74,6 +74,12 @@ pub struct EntryDto {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct EntryIdsDto {
+    pub total: usize,
+    pub entry_ids: Vec<EntryId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct EntriesDto {
     pub total: usize,
     pub entries: Vec<EntryDto>,
@@ -96,6 +102,8 @@ impl EntryStatus {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntryQuery {
+    pub changed_before: Option<i64>,
+    pub after_entry_id: Option<i64>,
     pub status: Option<EntryStatus>,
     pub changed_after: Option<i64>,
     pub direction: &'static str,
@@ -109,6 +117,8 @@ impl Default for EntryQuery {
         Self {
             status: None,
             changed_after: None,
+            changed_before: None,
+            after_entry_id: None,
             direction: "desc",
             order: "changed_at",
             limit: 100,
@@ -244,12 +254,26 @@ impl MinifluxApi for ReqwestMinifluxApi {
             if let Some(changed_after) = query.changed_after {
                 pairs.append_pair("changed_after", &changed_after.to_string());
             }
+            if let Some(value) = query.changed_before {
+                pairs.append_pair("changed_before", &value.to_string());
+            }
+            if let Some(value) = query.after_entry_id {
+                pairs.append_pair("after_entry_id", &value.to_string());
+            }
             pairs
                 .append_pair("direction", query.direction)
                 .append_pair("order", query.order)
                 .append_pair("limit", &query.limit.to_string())
                 .append_pair("offset", &query.offset.to_string());
         }
+        self.send_json(self.request(Method::GET, url)).await
+    }
+
+    async fn entry_ids(&self, limit: usize, offset: usize) -> Result<EntryIdsDto, BrookletError> {
+        let mut url = self.endpoint("v1/entries/ids");
+        url.query_pairs_mut()
+            .append_pair("limit", &limit.to_string())
+            .append_pair("offset", &offset.to_string());
         self.send_json(self.request(Method::GET, url)).await
     }
 
@@ -478,6 +502,32 @@ mod tests {
                 .unwrap()
                 .starts_with("GET /v1/categories HTTP/1.1")
         );
+    }
+
+    #[tokio::test]
+    async fn reconciliation_queries_use_id_filters_and_unfiltered_inventory() {
+        let (base, requests) = serve(vec![
+            response(200, r#"{"total":0,"entries":[]}"#, &[]),
+            response(200, r#"{"total":2,"entry_ids":[99,42]}"#, &[]),
+        ]);
+        let api = ReqwestMinifluxApi::for_test(&base, "secret");
+        api.entries(&EntryQuery {
+            changed_after: Some(940),
+            changed_before: Some(1001),
+            after_entry_id: Some(42),
+            order: "id",
+            direction: "asc",
+            ..EntryQuery::default()
+        })
+        .await
+        .unwrap();
+        let request = requests.recv().unwrap();
+        assert!(request.contains("changed_after=940&changed_before=1001&after_entry_id=42&direction=asc&order=id&limit=100&offset=0"));
+        let ids = api.entry_ids(10_000, 10_000).await.unwrap();
+        assert_eq!(ids.entry_ids, [99, 42]);
+        let request = requests.recv().unwrap();
+        assert!(request.starts_with("GET /v1/entries/ids?limit=10000&offset=10000 HTTP/1.1"));
+        assert!(!request.contains("status="));
     }
 
     #[test]

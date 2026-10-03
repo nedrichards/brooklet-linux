@@ -348,6 +348,17 @@ async fn sync_uses_replacement_token_and_resumes_persisted_outgoing_work() {
                 entries: vec![],
             })
         }
+        async fn entry_ids(
+            &self,
+            _: usize,
+            _: usize,
+        ) -> Result<brooklet::api::miniflux::EntryIdsDto, BrookletError> {
+            let entry_ids: Vec<i64> = vec![42];
+            Ok(brooklet::api::miniflux::EntryIdsDto {
+                total: entry_ids.len(),
+                entry_ids,
+            })
+        }
         async fn entry(&self, _: i64) -> Result<EntryDto, BrookletError> {
             unreachable!()
         }

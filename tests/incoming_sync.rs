@@ -69,7 +69,13 @@ impl MinifluxApi for Api {
     async fn feeds(&self) -> Result<Vec<FeedDto>, BrookletError> {
         Ok(vec![])
     }
-    async fn entries(&self, _: &EntryQuery) -> Result<EntriesDto, BrookletError> {
+    async fn entries(&self, query: &EntryQuery) -> Result<EntriesDto, BrookletError> {
+        if query.limit == 1 {
+            return Ok(EntriesDto {
+                total: 2,
+                entries: vec![story(99)],
+            });
+        }
         self.0.request("pull", &self.0.pull_status)?;
         let mode = self.0.refresh_mode.load(Ordering::Acquire);
         let pull = self.0.refresh_pulls.fetch_add(1, Ordering::AcqRel);
@@ -89,6 +95,17 @@ impl MinifluxApi for Api {
         Ok(EntriesDto {
             total: entries.len(),
             entries,
+        })
+    }
+    async fn entry_ids(
+        &self,
+        _: usize,
+        _: usize,
+    ) -> Result<brooklet::api::miniflux::EntryIdsDto, BrookletError> {
+        let entry_ids: Vec<i64> = vec![42, 99, 101];
+        Ok(brooklet::api::miniflux::EntryIdsDto {
+            total: entry_ids.len(),
+            entry_ids,
         })
     }
     async fn entry(&self, _: i64) -> Result<EntryDto, BrookletError> {

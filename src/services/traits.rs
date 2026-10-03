@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 
 use crate::{
-    api::miniflux::{CategoryDto, EntriesDto, EntryDto, EntryQuery, FeedDto, ServerIdentity},
+    api::miniflux::{
+        CategoryDto, EntriesDto, EntryDto, EntryIdsDto, EntryQuery, FeedDto, ServerIdentity,
+    },
     error::BrookletError,
     model::{
         Account, Category, Entry, EntryId, Feed, KarakeepConfig, KarakeepDelivery, PendingMutation,
@@ -15,6 +17,7 @@ pub trait MinifluxApi: Send + Sync {
     async fn categories(&self) -> Result<Vec<CategoryDto>, BrookletError>;
     async fn feeds(&self) -> Result<Vec<FeedDto>, BrookletError>;
     async fn entries(&self, query: &EntryQuery) -> Result<EntriesDto, BrookletError>;
+    async fn entry_ids(&self, limit: usize, offset: usize) -> Result<EntryIdsDto, BrookletError>;
     async fn entry(&self, entry_id: EntryId) -> Result<EntryDto, BrookletError>;
     async fn set_read(&self, entry_ids: &[EntryId], read: bool) -> Result<(), BrookletError>;
     async fn set_starred(&self, entry_ids: &[EntryId], starred: bool) -> Result<(), BrookletError>;
@@ -46,6 +49,15 @@ pub trait Repository: Send + Sync {
             .await?
             .into_iter()
             .find(|entry| entry.id == entry_id))
+    }
+
+    async fn cached_entry_ids(&self, account_id: i64) -> Result<Vec<EntryId>, BrookletError> {
+        Ok(self
+            .entries_for_view(account_id, "all")
+            .await?
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect())
     }
 
     async fn account(&self) -> Result<Option<Account>, BrookletError>;

@@ -15,7 +15,7 @@ this plan.
 5. **Complete:** Refresh visible Library drill-down pages while preserving context.
 6. **Complete:** Follow up asynchronous server feed refresh with bounded incoming pulls.
 7. **Complete:** Show persistent, actionable sync and delivery failures.
-8. Reconcile remote deletions and test concurrent pagination changes.
+8. **Complete:** Reconcile remote deletions and test concurrent pagination changes.
 9. Retain and display feed parsing errors and disabled state.
 10. Show recoverable startup database failures without destroying the database.
 
@@ -178,3 +178,29 @@ remote deletion, and refresh inside a feed.
   unverified on this display as documented for checkpoint 5. Development-runtime
   portal/session-bus, GDK frame-timing and Glycin warnings were emitted. Real
   account outages and system keyring recovery were not exercised.
+
+- Checkpoint 8: Incoming pages use ascending entry IDs and a server-observed
+  timestamp ceiling rather than shifting offsets or the client clock. Later edits
+  behind the ID cursor replay on the next pull. Invalid pages stop without
+  advancing the cursor. An ID inventory identifies possible deletions; individual
+  entry requests confirm absence before removing cached content. Reconciliation
+  has a 60-second deadline and failure preserves the cursor for retry.
+- Confirmed removals preserve pending edits and unfinished Karakeep deliveries.
+  Durable removal markers allow cleanup after that work finishes, including after
+  restart and outside the timestamp overlap. Restored entries clear the marker.
+  The schema upgrade preserves existing cached articles and pending work.
+- Checkpoint 8 coverage: nine integration regressions cover concurrent inserts,
+  removals and edits, hard deletion and reader-position cleanup, inventory
+  omissions and failures, timeout/retry, repeated/malformed pages, multi-page
+  inventory, protected work after restart, restoration, receipt retention and
+  schema upgrade. HTTP tests verify the exact inventory and pagination queries.
+  The production GTK journey removes a remote article from an open feed while
+  preserving selection and navigation scope.
+- Checkpoint 8 verification: all 129 working-tree and 105 isolated-commit Rust
+  tests passed. SDK formatting, GUI Clippy with warnings denied, GUI builds and
+  full GTK smoke passed in both trees. Working-artifact keyboard logic checks
+  passed after intermittent pre-existing Library focus/viewport assertions on
+  the display. Those assertions were retained. Physical keyboard delivery remains
+  unverified as documented for checkpoint 5. Development-runtime portal/session
+  bus, accessibility-bus, frame-timing and Glycin warnings were emitted. Live
+  Miniflux deletion and concurrent updates were not exercised.
