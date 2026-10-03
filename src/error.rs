@@ -31,6 +31,10 @@ pub enum BrookletError {
     AccountMismatch,
     #[error("An account is already connected. Use Reconnect to replace its API token.")]
     AccountAlreadyConfigured,
+    #[error(
+        "Timed out checking refreshed feeds. Cached articles remain available; try Sync again."
+    )]
+    RefreshFollowUpTimeout,
 }
 
 impl BrookletError {
@@ -39,7 +43,10 @@ impl BrookletError {
             Self::InvalidServiceUrl(_) => FailureKind::MalformedRequest,
             Self::Http { kind, .. } | Self::Transport { kind, .. } => *kind,
             Self::UnsupportedServer { .. } => FailureKind::UnsupportedServer,
-            Self::Database(_) | Self::Storage(_) | Self::SecretStore(_) => FailureKind::Retryable,
+            Self::Database(_)
+            | Self::Storage(_)
+            | Self::SecretStore(_)
+            | Self::RefreshFollowUpTimeout => FailureKind::Retryable,
             Self::InvalidSetup(_) | Self::AccountMismatch | Self::AccountAlreadyConfigured => {
                 FailureKind::MalformedRequest
             }
@@ -48,7 +55,7 @@ impl BrookletError {
 
     pub fn setup_message(&self) -> String {
         match self {
-            Self::AccountMismatch | Self::AccountAlreadyConfigured => self.to_string(),
+            Self::AccountMismatch | Self::AccountAlreadyConfigured | Self::RefreshFollowUpTimeout => self.to_string(),
             Self::InvalidServiceUrl(detail) => format!("Check the Miniflux address: {detail}."),
             Self::InvalidSetup(detail) => format!("Please enter {detail}."),
             Self::Http { status: 401 | 403, .. } => {
@@ -116,6 +123,7 @@ impl BrookletError {
             Self::Database(_) | Self::Storage(_) => {
                 "Brooklet could not update its local article cache.".into()
             }
+            Self::RefreshFollowUpTimeout => self.to_string(),
             Self::InvalidServiceUrl(_)
             | Self::InvalidSetup(_)
             | Self::Http { .. }

@@ -1,6 +1,6 @@
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU16, Ordering},
+    atomic::{AtomicU16, AtomicUsize, Ordering},
 };
 
 use async_trait::async_trait;
@@ -20,6 +20,8 @@ struct Server {
     save_status: AtomicU16,
     pull_status: AtomicU16,
     calls: Mutex<Vec<String>>,
+    refresh_mode: AtomicU16,
+    refresh_pulls: AtomicUsize,
 }
 
 impl Server {
@@ -69,9 +71,24 @@ impl MinifluxApi for Api {
     }
     async fn entries(&self, _: &EntryQuery) -> Result<EntriesDto, BrookletError> {
         self.0.request("pull", &self.0.pull_status)?;
+        let mode = self.0.refresh_mode.load(Ordering::Acquire);
+        let pull = self.0.refresh_pulls.fetch_add(1, Ordering::AcqRel);
+        if mode == 2 && pull > 0 {
+            std::future::pending::<()>().await;
+        }
+        if mode == 3 && pull > 0 {
+            return Err(BrookletError::Http {
+                status: 503,
+                kind: classify_http_status(503),
+            });
+        }
+        let mut entries = vec![story(42), story(99)];
+        if mode == 1 && pull >= 2 {
+            entries.push(story(101));
+        }
         Ok(EntriesDto {
-            total: 2,
-            entries: vec![story(42), story(99)],
+            total: entries.len(),
+            entries,
         })
     }
     async fn entry(&self, _: i64) -> Result<EntryDto, BrookletError> {
@@ -88,6 +105,7 @@ impl MinifluxApi for Api {
     }
     async fn refresh_feeds(&self) -> Result<(), BrookletError> {
         self.0.calls.lock().unwrap().push("refresh".into());
+        self.0.refresh_pulls.store(0, Ordering::Release);
         Ok(())
     }
     async fn subscribe(&self, _: &str, _: Option<i64>) -> Result<i64, BrookletError> {
@@ -187,7 +205,7 @@ async fn failed_star_upload_keeps_only_unsent_intention_after_successful_pull() 
     assert_eq!(*server.calls.lock().unwrap(), ["star", "pull"]);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn karakeep_outage_does_not_block_pull_or_requested_feed_refresh() {
     let (repo, service, server) = fixture().await;
     let entry = repo.cached_entry(1, 42).await.unwrap().unwrap();
@@ -196,9 +214,9 @@ async fn karakeep_outage_does_not_block_pull_or_requested_feed_refresh() {
     let result = service.refresh_feeds().await.unwrap();
     assert_eq!(result.fetched, 2);
     let calls = server.calls.lock().unwrap().clone();
-    assert_eq!(calls.len(), 3);
+    assert_eq!(calls.len(), 6);
     assert!(calls[..2].contains(&"save".into()) && calls[..2].contains(&"refresh".into()));
-    assert_eq!(calls[2], "pull");
+    assert!(calls[2..].iter().all(|call| call == "pull"));
     assert_eq!(repo.pending_karakeep(1).await.unwrap().len(), 1);
     assert!(
         repo.sync_status(1)
@@ -627,4 +645,108 @@ async fn direct_delivery_missing_key_is_actionable_without_breaking_integration_
             .iter()
             .any(|call| call == "save")
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn refresh_pulls_late_articles_without_repeating_deliveries() {
+    let (repo, service, server) = fixture().await;
+    service.set_read_local(42, true).await.unwrap();
+    server.read_status.store(503, Ordering::Release);
+    server.refresh_mode.store(1, Ordering::Release);
+    let start = tokio::time::Instant::now();
+    let result = service.refresh_feeds().await.unwrap();
+    assert!(result.inbox.iter().any(|entry| entry.id == 101));
+    assert!(!result.inbox.iter().any(|entry| entry.id == 42));
+    assert_eq!(
+        tokio::time::Instant::now() - start,
+        std::time::Duration::from_secs(17)
+    );
+    let calls = server.calls.lock().unwrap().clone();
+    assert_eq!(calls.iter().filter(|c| c.as_str() == "refresh").count(), 1);
+    assert_eq!(calls.iter().filter(|c| c.as_str() == "read").count(), 1);
+    assert_eq!(calls.iter().filter(|c| c.as_str() == "pull").count(), 4);
+    assert_eq!(repo.pending_mutations(1).await.unwrap().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn refresh_without_changes_finishes_after_bounded_rounds() {
+    let (_, service, server) = fixture().await;
+    service.refresh_feeds().await.unwrap();
+    assert_eq!(
+        *server.calls.lock().unwrap(),
+        ["refresh", "pull", "pull", "pull", "pull"]
+    );
+    assert!(!service.sync_status().await.unwrap().running);
+    server.calls.lock().unwrap().clear();
+    service.sync().await.unwrap();
+    assert_eq!(*server.calls.lock().unwrap(), ["pull"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn follow_up_timeout_preserves_cache_and_allows_retry() {
+    let (repo, service, server) = fixture().await;
+    server.refresh_mode.store(2, Ordering::Release);
+    let start = tokio::time::Instant::now();
+    assert!(matches!(
+        service.refresh_feeds().await,
+        Err(BrookletError::RefreshFollowUpTimeout)
+    ));
+    assert_eq!(
+        tokio::time::Instant::now() - start,
+        std::time::Duration::from_secs(30)
+    );
+    assert_eq!(repo.unread_entries(1).await.unwrap().len(), 2);
+    assert!(
+        repo.sync_status(1)
+            .await
+            .unwrap()
+            .error
+            .unwrap()
+            .contains("Timed out")
+    );
+    assert!(!service.sync_status().await.unwrap().running);
+    server.refresh_mode.store(0, Ordering::Release);
+    service.sync().await.unwrap();
+    assert_eq!(repo.sync_status(1).await.unwrap().error, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn follow_up_failure_retains_cache_and_records_error() {
+    let (repo, service, server) = fixture().await;
+    server.refresh_mode.store(3, Ordering::Release);
+    assert!(service.refresh_feeds().await.is_err());
+    assert_eq!(repo.unread_entries(1).await.unwrap().len(), 2);
+    assert!(
+        repo.sync_status(1)
+            .await
+            .unwrap()
+            .error
+            .unwrap()
+            .contains("503")
+    );
+    assert_eq!(*server.calls.lock().unwrap(), ["refresh", "pull", "pull"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_delayed_refresh_releases_account_and_running_state() {
+    let (repo, service, server) = fixture().await;
+    let service = Arc::new(service);
+    let task = tokio::spawn({
+        let service = service.clone();
+        async move { service.refresh_feeds().await }
+    });
+    loop {
+        if server.calls.lock().unwrap().iter().any(|c| c == "pull") {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(service.sync_status().await.unwrap().running);
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(!service.sync_status().await.unwrap().running);
+    service.disconnect().await.unwrap();
+    tokio::time::advance(std::time::Duration::from_secs(60)).await;
+    assert_eq!(*server.calls.lock().unwrap(), ["refresh", "pull"]);
+    assert!(repo.account().await.unwrap().is_none());
 }

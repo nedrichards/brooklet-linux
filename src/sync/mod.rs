@@ -127,6 +127,21 @@ pub struct AccountSyncService {
     running: AtomicBool,
 }
 
+struct RunningGuard<'a>(&'a AtomicBool);
+
+impl<'a> RunningGuard<'a> {
+    fn new(flag: &'a AtomicBool) -> Self {
+        flag.store(true, Ordering::Release);
+        Self(flag)
+    }
+}
+
+impl Drop for RunningGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 impl AccountSyncService {
     pub fn new(
         repository: Arc<dyn Repository>,
@@ -192,7 +207,7 @@ impl AccountSyncService {
     async fn run_sync(&self, refresh_feeds: bool) -> Result<SyncResult, BrookletError> {
         let _guard = self.sync_lock.lock().await;
         let account = self.configured_account().await?;
-        self.running.store(true, Ordering::Release);
+        let _running = RunningGuard::new(&self.running);
         tracing::info!(account_id = account.id, refresh_feeds, "sync started");
         let result = self.run_sync_account(&account, refresh_feeds).await;
         if let Err(error) = &result {
@@ -211,7 +226,6 @@ impl AccountSyncService {
                 "sync completed"
             );
         }
-        self.running.store(false, Ordering::Release);
         result
     }
 
@@ -309,6 +323,30 @@ impl AccountSyncService {
         }
         .await;
         self.record_delivery_attempt(account.id, delivery).await?;
+        let result = self.pull_incoming(account, api.as_ref(), &accepted).await?;
+        if !refresh_feeds {
+            return Ok(result);
+        }
+        // Miniflux refreshes all feeds in the background and exposes no job token.
+        // Poll every round even if one feed produced entries: other feeds may finish later.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut result = result;
+            for seconds in [2, 5, 10] {
+                tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+                result = self.pull_incoming(account, api.as_ref(), &[]).await?;
+            }
+            Ok(result)
+        })
+        .await
+        .map_err(|_| BrookletError::RefreshFollowUpTimeout)?
+    }
+
+    async fn pull_incoming(
+        &self,
+        account: &crate::model::Account,
+        api: &dyn MinifluxApi,
+        accepted: &[crate::model::PendingMutation],
+    ) -> Result<SyncResult, BrookletError> {
         let categories = api
             .categories()
             .await?
@@ -373,7 +411,7 @@ impl AccountSyncService {
         self.repository
             .complete_sync(account.id, newest, now_ms())
             .await?;
-        for mutation in &accepted {
+        for mutation in accepted {
             self.repository.acknowledge_mutation(mutation).await?;
         }
         self.repository

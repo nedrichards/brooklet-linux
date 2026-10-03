@@ -13,7 +13,7 @@ this plan.
 3. **Complete:** Repair Miniflux credentials without clearing local data.
 4. **Complete:** Expose and recover failed Karakeep deliveries; validate direct settings.
 5. **Complete:** Refresh visible Library drill-down pages while preserving context.
-6. Follow up asynchronous server feed refresh with a bounded incoming pull.
+6. **Complete:** Follow up asynchronous server feed refresh with bounded incoming pulls.
 7. Show persistent, actionable sync and delivery health.
 8. Reconcile remote deletions and test concurrent pagination changes.
 9. Retain and display feed parsing errors and disabled state.
@@ -121,3 +121,32 @@ remote deletion, and refresh inside a feed.
   No new keyboard-routing change was made. Development-runtime portal/session
   bus, accessibility-bus and Glycin warnings were emitted during these checks.
   Live-service and manual pointer/touch behavior were not exercised.
+
+- Checkpoint 6: Refresh Feeds requests the server refresh once, performs the
+  initial sync, then pulls incoming metadata/articles after delays of 2, 5 and
+  10 seconds. Every round runs even if an earlier feed produced articles, because
+  other feeds may finish later. Follow-ups do not repeat uploads or request
+  another server refresh. The follow-up phase has a 30-second deadline including
+  network/database waits; it does not extend the initial sync request budget.
+  Errors preserve cached data and record sync health; timeout offers Sync again.
+  Cancellation releases account serialization and clears running state.
+- The action reports that feeds are refreshing, blocks duplicate clicks, and
+  updates Inbox and visible Library pages from the final result. No-change
+  feedback acknowledges slow feeds may appear on the next sync. Miniflux offers
+  no completion token for all-feeds refresh, so this is a bounded check rather
+  than a guarantee that every feed finished: https://miniflux.app/docs/api.html.
+- Checkpoint 6 coverage: five new virtual-time regressions cover late articles,
+  bounded no-change completion, no repeated deliveries/refresh requests, timeout
+  and recovery, follow-up failure, and cancellation before logout. Existing
+  Karakeep outage coverage now checks all follow-up pulls. Production-window
+  GTK journeys exercise both ordinary Sync and Refresh Feeds against SQLite,
+  with delayed server articles, duplicate clicks, restored action state and
+  retained feed scope/selection/focus/unread state.
+- Checkpoint 6 verification: all 115 working-tree and 91 isolated-commit Rust
+  tests passed. SDK formatting, GUI Clippy with warnings denied, GUI builds and
+  full GTK smoke passed in both trees; working-tree keyboard logic checks passed.
+  One working-tree smoke attempt hit the existing popped-widget lifetime timing
+  assertion before the sync journeys; the unchanged assertion passed on rerun.
+  Physical keyboard delivery remains unverified on this display as documented
+  for checkpoint 5. Development-runtime portal/session-bus and Glycin warnings
+  were emitted. Real-service feed scheduling was not exercised.

@@ -335,11 +335,12 @@ pub fn run() -> Result<(), adw::glib::BoolError> {
     )?;
     window.close();
     layout();
-    sync_journey()
+    sync_journey(false)?;
+    sync_journey(true)
 }
 
 /// Follow the production navigation and Sync actions with real controller/storage.
-fn sync_journey() -> Result<(), adw::glib::BoolError> {
+fn sync_journey(refresh: bool) -> Result<(), adw::glib::BoolError> {
     use async_trait::async_trait;
     use brooklet::{
         api::miniflux::{CategoryDto, EntriesDto, EntryDto, EntryQuery, FeedDto, ServerIdentity},
@@ -424,6 +425,11 @@ fn sync_journey() -> Result<(), adw::glib::BoolError> {
             unreachable!()
         }
         async fn refresh_feeds(&self) -> Result<(), BrookletError> {
+            let updated = self.0.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                updated.store(true, Ordering::Release);
+            });
             Ok(())
         }
         async fn subscribe(&self, _: &str, _: Option<i64>) -> Result<i64, BrookletError> {
@@ -449,7 +455,7 @@ fn sync_journey() -> Result<(), adw::glib::BoolError> {
         }
     }
     fn wait_until(test: impl Fn() -> bool) -> Result<(), adw::glib::BoolError> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(25);
         while !test() && Instant::now() < deadline {
             layout();
         }
@@ -551,16 +557,45 @@ fn sync_journey() -> Result<(), adw::glib::BoolError> {
     wait_until(|| list.model().is_some_and(|model| model.n_items() == 2))?;
     inbox::select_id(&list, 42);
     list.grab_focus();
-    updated.store(true, Ordering::Release);
-    app.activate_action("sync", None);
+    if refresh {
+        window
+            .activate_action("win.refresh-feeds", None)
+            .map_err(|e| adw::glib::bool_error!("{e}"))?;
+        check(
+            !window
+                .clone()
+                .downcast::<adw::ApplicationWindow>()
+                .unwrap()
+                .lookup_action("refresh-feeds")
+                .unwrap()
+                .is_enabled(),
+            "Refresh action remained enabled",
+        )?;
+        window
+            .activate_action("win.refresh-feeds", None)
+            .map_err(|e| adw::glib::bool_error!("{e}"))?;
+    } else {
+        updated.store(true, Ordering::Release);
+        app.activate_action("sync", None);
+    }
     wait_until(|| {
         list.model().is_some_and(|model| model.n_items() == 3)
             && inbox::selected_from_list(&list)
                 .is_some_and(|entry| entry.title == "Updated article" && entry.starred)
     })?;
     check(
+        window
+            .clone()
+            .downcast::<adw::ApplicationWindow>()
+            .unwrap()
+            .lookup_action("refresh-feeds")
+            .unwrap()
+            .is_enabled(),
+        "Refresh action did not recover",
+    )?;
+    check(
         focused_inside(&list),
-        "Production sync lost feed-list focus",
+        "Production refresh lost feed-list focus",
     )?;
     if let Some(driver) = std::env::var_os("BROOKLET_KEYBOARD_DRIVER") {
         let title = format!(

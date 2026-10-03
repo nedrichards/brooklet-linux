@@ -3422,6 +3422,7 @@ fn install_window_tools(
         let toast = toast.clone();
         move |action, _| {
             action.set_enabled(false);
+            toast.add_toast(adw::Toast::new("Refreshing feeds…"));
             controller.refresh_feeds({
                 let action = action.clone();
                 let controller = controller.clone();
@@ -3436,9 +3437,11 @@ fn install_window_tools(
                             let changes = ui::inbox::InboxChanges::between(&before, &result.inbox);
                             show_entries(&inbox, result.inbox);
                             load_other_views(controller, views, toast.clone());
-                            if let Some(message) = changes.toast_message() {
-                                toast.add_toast(adw::Toast::new(&message));
-                            }
+                            let message = changes.toast_message().unwrap_or_else(|| {
+                                "No new articles yet. Slow feeds may appear on the next sync."
+                                    .into()
+                            });
+                            toast.add_toast(adw::Toast::new(&message));
                         }
                         Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
                     }
