@@ -24,7 +24,7 @@ pub trait MinifluxApi: Send + Sync {
         &self,
         feed_url: &str,
         category_id: Option<i64>,
-    ) -> Result<FeedDto, BrookletError>;
+    ) -> Result<i64, BrookletError>;
 }
 
 #[async_trait]

@@ -301,15 +301,23 @@ impl MinifluxApi for ReqwestMinifluxApi {
         &self,
         feed_url: &str,
         category_id: Option<i64>,
-    ) -> Result<FeedDto, BrookletError> {
-        self.send_json(
-            self.request(Method::POST, self.endpoint("v1/feeds"))
-                .json(&Subscription {
+    ) -> Result<i64, BrookletError> {
+        // Creation returns an ID, not the full feed returned by GET /v1/feeds.
+        // Do not turn a successful creation into a failure by fetching metadata
+        // here: the UI follows creation with the normal sync path.
+        #[derive(Deserialize)]
+        struct CreatedFeed {
+            feed_id: i64,
+        }
+        let created: CreatedFeed =
+            self.send_json(self.request(Method::POST, self.endpoint("v1/feeds")).json(
+                &Subscription {
                     feed_url,
                     category_id,
-                }),
-        )
-        .await
+                },
+            ))
+            .await?;
+        Ok(created.feed_id)
     }
 }
 
@@ -404,6 +412,56 @@ mod tests {
                 .unwrap()
                 .contains(r#"{"entry_ids":[9],"starred":true}"#)
         );
+    }
+
+    #[tokio::test]
+    async fn subscription_accepts_creation_id_without_requesting_metadata() {
+        for category_id in [None, Some(22)] {
+            let (base, requests) = serve(vec![response(201, r#"{"feed_id":262}"#, &[])]);
+            let api = ReqwestMinifluxApi::for_test(&base, "secret");
+            assert_eq!(
+                api.subscribe("https://example.org/feed.atom", category_id)
+                    .await
+                    .unwrap(),
+                262
+            );
+            let request = requests.recv().unwrap();
+            assert!(request.starts_with("POST /v1/feeds HTTP/1.1"));
+            let payload: serde_json::Value =
+                serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+            assert_eq!(payload["feed_url"], "https://example.org/feed.atom");
+            if let Some(id) = category_id {
+                assert_eq!(payload["category_id"], id);
+            } else {
+                assert!(payload.get("category_id").is_none());
+            }
+            assert!(requests.recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn subscription_reports_server_rejection_and_invalid_response() {
+        for (status, body) in [(400, r#"{"error_message":"invalid feed"}"#), (201, "{}")] {
+            let (base, requests) = serve(vec![response(status, body, &[])]);
+            let result = ReqwestMinifluxApi::for_test(&base, "secret")
+                .subscribe("https://example.org/feed.atom", None)
+                .await;
+            if status == 400 {
+                assert!(matches!(
+                    result,
+                    Err(BrookletError::Http { status: 400, .. })
+                ));
+            } else {
+                assert!(result.is_err());
+            }
+            assert!(
+                requests
+                    .recv()
+                    .unwrap()
+                    .starts_with("POST /v1/feeds HTTP/1.1")
+            );
+            assert!(requests.recv().is_err());
+        }
     }
 
     #[tokio::test]

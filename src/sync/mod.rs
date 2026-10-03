@@ -611,7 +611,7 @@ mod tests {
             &self,
             _feed_url: &str,
             _category_id: Option<i64>,
-        ) -> Result<FeedDto, BrookletError> {
+        ) -> Result<i64, BrookletError> {
             unreachable!()
         }
     }
