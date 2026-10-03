@@ -4435,6 +4435,9 @@ fn smoke_test_article_keyboard(
         layout(window);
         header.grab_focus();
         layout(window);
+        // The test display may have no window manager to activate this window.
+        // Process its native FocusIn separately from the first key event.
+        real_event("Down", "focus", &[])?;
         real_key("Down", &[])?;
         if inbox.model.selection.selected() != 1 {
             return Err(adw::glib::bool_error!("Physical Down failed from header"));

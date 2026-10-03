@@ -123,6 +123,9 @@ pub fn run() -> Result<(), adw::glib::BoolError> {
         },
     );
     let destinations = gtk::Stack::new();
+    // This fixture checks the settled viewport. Transition frames can temporarily
+    // hide the page from picking even after the response has been applied.
+    navigation.set_animate_transitions(false);
     destinations.add_named(&navigation, Some("library"));
     destinations.add_named(&gtk::Label::new(Some("Other destination")), Some("other"));
     let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -199,7 +202,7 @@ pub fn run() -> Result<(), adw::glib::BoolError> {
         "Category refresh lost viewport anchor",
     )?;
     check(
-        row.title() == "Renamed feed" && (row.has_focus() || row.focus_child().is_some()),
+        row.title() == "Renamed feed" && focused_inside(&row),
         &format!(
             "Category refresh lost feed focus or rename: title={} has_focus={} is_focus={} child={:?} root={:?}",
             row.title(),
@@ -285,7 +288,7 @@ pub fn run() -> Result<(), adw::glib::BoolError> {
     entries.borrow_mut().pop_front().unwrap().1(Ok(initial.clone()));
     layout();
     check(
-        outside.has_focus(),
+        focused_inside(&outside),
         "Refresh stole focus from another control",
     )?;
     pages.refresh_visible();

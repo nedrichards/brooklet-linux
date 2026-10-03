@@ -55,6 +55,11 @@ window = find(x11.XDefaultRootWindow(display))
 if not window:
     raise SystemExit("The isolated keyboard regression window is unavailable")
 x11.XSetInputFocus(display, window, 2, 0)
+if mode == "focus":
+    # Let the app process FocusIn before the first physical key is injected.
+    x11.XSync(display, False)
+    x11.XCloseDisplay(display)
+    raise SystemExit(0)
 
 def event(name, pressed):
     keycode = x11.XKeysymToKeycode(display, x11.XStringToKeysym(name.encode()))
