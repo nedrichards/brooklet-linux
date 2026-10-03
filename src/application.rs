@@ -213,6 +213,7 @@ impl WeakReaderUi {
 
 #[derive(Clone)]
 struct OtherViews {
+    drill_down: Rc<ui::library::LibraryPages>,
     generation: Rc<Cell<u64>>,
     saved: ui::inbox::InboxModel,
     saved_status: adw::StatusPage,
@@ -437,6 +438,11 @@ impl BrookletApplication {
             let saved_list: gtk::ListView = builder.object("saved_list").expect("saved_list");
             let open_id = Rc::new(Cell::new(None));
             let other_views = OtherViews {
+                drill_down: ui::library::LibraryPages::new(
+                    &library_navigation,
+                    controller.clone(),
+                    &toast_overlay,
+                ),
                 generation: Rc::new(Cell::new(0)),
                 saved: ui::inbox::configure_with_action(&saved_list, false, open_id.clone()),
                 saved_status: builder.object("saved_status").expect("saved_status"),
@@ -865,11 +871,13 @@ impl BrookletApplication {
                 }
             });
             window.connect_destroy({
+                let pages = other_views.drill_down.clone();
                 let reader = reader_ui.clone();
                 let application = application.downgrade();
                 let current = current_entry.clone();
                 let undo = undo_entry.clone();
                 move |_| {
+                    pages.clear();
                     reader
                         .open_generation
                         .set(reader.open_generation.get().wrapping_add(1));
@@ -916,54 +924,11 @@ impl BrookletApplication {
             let category_action =
                 gio::SimpleAction::new("library-category", Some(&i64::static_variant_type()));
             category_action.connect_activate({
-                let controller = controller.clone();
-                let navigation = library_navigation.clone();
-                let toast = toast_overlay.clone();
+                let pages = other_views.drill_down.clone();
                 move |_, value| {
-                    let Some(category_id) = value.and_then(|value| value.get::<i64>()) else {
-                        return;
-                    };
-                    controller.feeds_cached(Some(category_id), {
-                        let navigation = navigation.clone();
-                        let toast = toast.clone();
-                        move |result| match result {
-                            Ok(feeds) => {
-                                let empty = feeds.is_empty();
-                                let list = gtk::ListBox::new();
-                                list.add_css_class("boxed-list");
-                                list.set_selection_mode(gtk::SelectionMode::None);
-                                for feed in feeds {
-                                    let row = adw::ActionRow::builder()
-                                        .title(&feed.title)
-                                        .use_markup(false)
-                                        .activatable(true)
-                                        .build();
-                                    row.set_action_name(Some("win.library-feed"));
-                                    row.set_action_target_value(Some(&feed.id.to_variant()));
-                                    row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-                                    list.append(&row);
-                                }
-                                let scroller = gtk::ScrolledWindow::new();
-                                scroller.set_child(Some(&list));
-                                let status = adw::StatusPage::new();
-                                status.set_vexpand(true);
-                                status.set_icon_name(Some("folder-symbolic"));
-                                status.set_title("No feeds in this category");
-                                status.set_description(Some(
-                                    "Feeds added in Miniflux will appear after sync.",
-                                ));
-                                let toolbar = adw::ToolbarView::new();
-                                toolbar.add_top_bar(&adw::HeaderBar::new());
-                                if empty {
-                                    toolbar.set_content(Some(&status));
-                                } else {
-                                    toolbar.set_content(Some(&scroller));
-                                }
-                                navigation.push(&adw::NavigationPage::new(&toolbar, "Feeds"));
-                            }
-                            Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
-                        }
-                    });
+                    if let Some(id) = value.and_then(|value| value.get::<i64>()) {
+                        pages.open_category(id);
+                    }
                 }
             });
             window.add_action(&category_action);
@@ -971,7 +936,7 @@ impl BrookletApplication {
                 gio::SimpleAction::new("library-feed", Some(&i64::static_variant_type()));
             feed_action.connect_activate({
                 let controller = controller.clone();
-                let navigation = library_navigation.clone();
+                let pages = other_views.drill_down.clone();
                 let reader = reader_ui.clone();
                 let current = current_entry.clone();
                 let inbox = inbox_ui.clone();
@@ -981,36 +946,7 @@ impl BrookletApplication {
                     let Some(feed_id) = value.and_then(|value| value.get::<i64>()) else {
                         return;
                     };
-                    let list = gtk::ListView::new(
-                        None::<gtk::SelectionModel>,
-                        None::<gtk::ListItemFactory>,
-                    );
-                    let model =
-                        ui::inbox::configure_with_action(&list, false, reader.active_id.clone());
-                    let scroller = gtk::ScrolledWindow::new();
-                    scroller.set_vexpand(true);
-                    scroller.set_child(Some(&list));
-                    scroller.set_visible(false);
-                    let status = adw::StatusPage::new();
-                    status.set_vexpand(true);
-                    status.set_icon_name(Some("folder-documents-symbolic"));
-                    status.set_title("No cached articles");
-                    status.set_description(Some("Articles from this feed will appear after sync."));
-                    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-                    content.append(&status);
-                    content.append(&scroller);
-                    controller.entries_for_view(format!("feed:{feed_id}"), {
-                        let model = model.clone();
-                        let toast = toast.clone();
-                        let status = status.clone();
-                        let scroller = scroller.clone();
-                        move |result| match result {
-                            Ok(entries) => {
-                                replace_view_entries(&model, &status, &scroller, entries);
-                            }
-                            Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
-                        }
-                    });
+                    let (list, model) = pages.open_feed(feed_id, reader.active_id.clone());
                     list.connect_activate({
                         let controller = controller.clone();
                         let reader = reader.downgrade();
@@ -1046,10 +982,6 @@ impl BrookletApplication {
                             }
                         }
                     });
-                    let toolbar = adw::ToolbarView::new();
-                    toolbar.add_top_bar(&adw::HeaderBar::new());
-                    toolbar.set_content(Some(&content));
-                    navigation.push(&adw::NavigationPage::new(&toolbar, "Feed articles"));
                 }
             });
             window.add_action(&feed_action);
@@ -1983,7 +1915,7 @@ fn restore_list_place(list: &gtk::ListView, scroller: &gtk::ScrolledWindow, plac
     });
 }
 
-fn replace_view_entries(
+pub(crate) fn replace_view_entries(
     model: &ui::inbox::InboxModel,
     status: &adw::StatusPage,
     scroller: &gtk::ScrolledWindow,
@@ -2831,6 +2763,7 @@ fn set_reader_origin_entries(
 }
 
 fn load_other_views(controller: Arc<AppController>, views: OtherViews, toast: adw::ToastOverlay) {
+    views.drill_down.refresh_visible();
     let token = views.generation.get().wrapping_add(1);
     views.generation.set(token);
     for (view, model, status, scroller) in [
@@ -4898,7 +4831,8 @@ fn smoke_test_reader_pipeline(keyboard_only: bool) -> Result<(), adw::glib::Bool
 pub fn keyboard_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
     register_resources();
-    smoke_test_reader_pipeline(true)
+    smoke_test_reader_pipeline(true)?;
+    ui::library::smoke_test()
 }
 
 pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
@@ -4983,12 +4917,33 @@ pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
     ui::signal_scope::smoke_test()?;
     ui::reconnect::smoke_test()?;
     ui::karakeep::smoke_test()?;
+    ui::library::smoke_test()?;
     smoke_test_reader_pipeline(false)
 }
 
 fn register_resources() {
     gio::resources_register_include!("brooklet.gresource")
         .expect("Brooklet GResources must be valid");
+}
+
+/// Isolated full-window journey using the production action and lifecycle wiring.
+pub(crate) fn library_smoke_application(
+    controller: Arc<AppController>,
+) -> Result<adw::Application, adw::glib::BoolError> {
+    let application = adw::Application::new(
+        Some("com.nedrichards.brooklet.LibraryTest"),
+        gio::ApplicationFlags::NON_UNIQUE,
+    );
+    application
+        .register(None::<&gio::Cancellable>)
+        .map_err(|error| adw::glib::bool_error!("{error}"))?;
+    let app = BrookletApplication {
+        application: application.clone(),
+        controller,
+    };
+    app.install_actions();
+    app.connect_lifecycle();
+    Ok(application)
 }
 
 #[cfg(test)]

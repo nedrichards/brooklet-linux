@@ -12,7 +12,7 @@ this plan.
    while allowing incoming articles during delivery failures.
 3. **Complete:** Repair Miniflux credentials without clearing local data.
 4. **Complete:** Expose and recover failed Karakeep deliveries; validate direct settings.
-5. Refresh visible Library drill-down pages while preserving context.
+5. **Complete:** Refresh visible Library drill-down pages while preserving context.
 6. Follow up asynchronous server feed refresh with a bounded incoming pull.
 7. Show persistent, actionable sync and delivery health.
 8. Reconcile remote deletions and test concurrent pagination changes.
@@ -93,3 +93,31 @@ remote deletion, and refresh inside a feed.
   duplicate clicks and dismiss through the controller against SQLite. Smoke
   emitted development-runtime portal/session-bus and Glycin warnings. Real
   Karakeep/Miniflux integration and system keyring recovery were not exercised.
+
+- Checkpoint 5: Dynamic feed/category pages now retain their query scope and
+  widget/model state for their navigation-stack lifetime. Visible pages reload
+  after sync, local updates and navigation/Back through the shared refresh path.
+  Feed reloads preserve ID-based selection and the existing article viewport
+  anchor; category reloads reuse feed rows and preserve focused feed/viewport.
+  Empty pages can receive new content without being reopened. Refresh errors keep
+  cached content. Generation and visible-page checks reject stale/hidden results;
+  popped pages and window teardown release state and cannot be resurrected.
+- Checkpoint 5 coverage: GTK scenarios cover inserted/updated articles, renamed
+  and inserted feeds, viewport/focus/selection preservation, out-of-order loads,
+  failure retention, navigation during a request, hidden destinations, Back,
+  empty/nonempty transitions and page cleanup. A full production-window journey
+  runs the actual Library and Sync actions through AppController and real SQLite,
+  verifying new articles, saved-state changes, no navigation-driven read writes,
+  stable selection/scope and updated category metadata on Back. This journey is
+  included in both GTK smoke and the required keyboard regression entry point;
+  with the existing X11 driver it also checks Up/Down after feed refresh.
+- Checkpoint 5 verification: all 110 working-tree and 86 isolated-commit Rust
+  tests passed. SDK formatting, GUI Clippy with warnings denied, GUI build, full
+  GTK smoke and keyboard logic checks passed in both trees. Physical X11 events
+  failed with `Physical Down failed from header` in the unchanged committed
+  baseline as well as the working tree; the added post-refresh physical check
+  also could not be verified on this display. X11 diagnostics confirmed the
+  intended test-window focus; the event driver did not reach the app controller.
+  No new keyboard-routing change was made. Development-runtime portal/session
+  bus, accessibility-bus and Glycin warnings were emitted during these checks.
+  Live-service and manual pointer/touch behavior were not exercised.

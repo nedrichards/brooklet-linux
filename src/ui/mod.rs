@@ -7,3 +7,5 @@ pub mod setup;
 pub mod signal_scope;
 
 pub mod karakeep;
+
+pub mod library;
