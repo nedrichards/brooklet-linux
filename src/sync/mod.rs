@@ -776,7 +776,7 @@ impl SyncService for AccountSyncService {
             .direct_endpoint
             .as_deref()
             .ok_or(BrookletError::InvalidSetup("a Karakeep API endpoint"))?;
-        crate::services::url_policy::service_url(endpoint)?;
+        crate::services::url_policy::karakeep_url(endpoint)?;
         let old_key = self.secrets.load_karakeep_key(account.id).await?;
         let key = key
             .filter(|key| !key.trim().is_empty())

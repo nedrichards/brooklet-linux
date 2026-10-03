@@ -74,8 +74,8 @@ allow-list that the GTK reader maps to Pango attributes.
 
 Validation calls `GET /v1/me` and `GET /v1/version` with `X-Auth-Token` and
 `Accept: application/json`, and rejects Miniflux versions older than 2.3.2.
-Credential-bearing clients require HTTPS, reject embedded credentials, and do
-not follow redirects.
+Miniflux requires HTTPS. Karakeep endpoints accept HTTP and HTTPS. Both reject
+embedded credentials and do not follow redirects.
 
 Entries use `GET /v1/entries` with `direction=desc`, explicit ordering, limit,
 offset, and optional `changed_after` or status. Entry lookup uses

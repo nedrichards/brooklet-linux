@@ -535,7 +535,7 @@ async fn direct_settings_require_valid_endpoint_key_and_server_before_persistenc
         .with_karakeep_factory(Arc::new(KarakeepFactory(direct_server.clone())));
     let mut config = KarakeepConfig {
         route: KarakeepRoute::Direct,
-        direct_endpoint: Some("http://insecure.example/api/v1/bookmarks".into()),
+        direct_endpoint: Some("ftp://invalid.example/api/v1/bookmarks".into()),
     };
     assert!(
         service
@@ -543,7 +543,7 @@ async fn direct_settings_require_valid_endpoint_key_and_server_before_persistenc
             .await
             .is_err()
     );
-    config.direct_endpoint = Some("https://karakeep.example/api/v1/bookmarks".into());
+    config.direct_endpoint = Some("http://karakeep.example/api/v1/bookmarks".into());
     assert!(service.save_karakeep_config(&config, None).await.is_err());
     assert!(direct_server.calls.lock().unwrap().is_empty());
     direct_server.status.store(401, Ordering::Release);

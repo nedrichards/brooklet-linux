@@ -191,8 +191,9 @@ startup.
 ## Networking and trust zones
 
 Configured Miniflux and Karakeep origins form a credential-bearing trust zone.
-Their URLs must be HTTPS, must not contain user info, and their clients disable
-redirects. Tokens are added only at request construction and are never included
+Miniflux URLs must be HTTPS; Karakeep endpoints accept HTTP and HTTPS.
+Neither allows user info, and both clients disable redirects.
+Tokens are added only at request construction and are never included
 in errors or tracing fields.
 
 Article images form a separate untrusted zone with a separate client and DNS

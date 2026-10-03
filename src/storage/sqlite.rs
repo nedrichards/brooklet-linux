@@ -752,6 +752,16 @@ impl SqliteStore {
             )
             .optional()?
             .unwrap_or((None, None, None));
+        // A successful upload pass skips terminal failures. Their recovery UI
+        // must remain visible until the failed receipt is retried or dismissed.
+        let failed_karakeep: Option<String> = connection
+            .query_row(
+                "SELECT last_error FROM karakeep_deliveries WHERE account_id=?1 AND state!='saved' AND last_error IS NOT NULL ORDER BY id LIMIT 1",
+                [account_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let delivery_error = delivery_error.or(failed_karakeep);
         let error = match (&refresh_error, &delivery_error) {
             (Some(refresh), Some(delivery)) => {
                 Some(format!("Delivery: {delivery}; Refresh: {refresh}"))
@@ -1779,7 +1789,20 @@ mod tests {
         };
         repository.queue_karakeep(&delivery).await.unwrap();
         let id = repository.pending_karakeep(1).await.unwrap()[0].id;
+        assert_eq!(
+            repository.sync_status(1).await.unwrap().delivery_error,
+            None
+        );
         repository.defer_karakeep(id, "offline").await.unwrap();
+        assert_eq!(
+            repository
+                .sync_status(1)
+                .await
+                .unwrap()
+                .delivery_error
+                .as_deref(),
+            Some("offline")
+        );
         assert_eq!(
             repository.pending_karakeep(1).await.unwrap()[0]
                 .error
@@ -1791,12 +1814,30 @@ mod tests {
             .await
             .unwrap();
         assert!(repository.pending_karakeep(1).await.unwrap().is_empty());
+        repository.record_delivery_error(1, None).await.unwrap();
+        assert_eq!(
+            repository
+                .sync_status(1)
+                .await
+                .unwrap()
+                .delivery_error
+                .as_deref(),
+            Some("bad request")
+        );
+        assert_eq!(
+            repository.sync_status(99).await.unwrap().delivery_error,
+            None
+        );
         assert_eq!(
             repository.entries_for_view(1, "all").await.unwrap()[0].delivery_state,
             Some(DeliveryState::NeedsAttention)
         );
         repository.queue_karakeep(&delivery).await.unwrap();
         assert_eq!(repository.pending_karakeep(1).await.unwrap().len(), 1);
+        assert_eq!(
+            repository.sync_status(1).await.unwrap().delivery_error,
+            None
+        );
     }
 
     #[tokio::test]

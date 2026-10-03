@@ -3811,8 +3811,18 @@ fn install_window_tools(
             let save_karakeep = gtk::Button::with_label("Save Karakeep settings");
             save_karakeep.set_margin_top(8);
             karakeep.add(&save_karakeep);
-            let deliveries = gtk::Button::with_label("Manage deliveries…");
+            let deliveries = gtk::Button::with_label("Review failed deliveries…");
+            deliveries.set_margin_top(8);
+            deliveries.set_visible(false);
             karakeep.add(&deliveries);
+            controller.unfinished_karakeep({
+                let deliveries = deliveries.downgrade();
+                move |result| {
+                    if let (Some(button), Ok(pending)) = (deliveries.upgrade(), result) {
+                        button.set_visible(pending.iter().any(|delivery| delivery.error.is_some()));
+                    }
+                }
+            });
             signals.track(&deliveries, deliveries.connect_clicked({
                 let window = window.clone();
                 let dialog = dialog.clone();

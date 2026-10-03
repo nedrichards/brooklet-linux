@@ -108,16 +108,22 @@ pub fn service_url(value: &str) -> Result<Url, BrookletError> {
     service_url_with_policy(value, false)
 }
 
-pub(crate) fn service_url_with_policy(
-    value: &str,
-    allow_http_for_tests: bool,
-) -> Result<Url, BrookletError> {
+pub fn karakeep_url(value: &str) -> Result<Url, BrookletError> {
+    service_url_with_policy(value, true)
+}
+
+pub(crate) fn service_url_with_policy(value: &str, allow_http: bool) -> Result<Url, BrookletError> {
     let trimmed = value.trim().trim_end_matches('/');
     let url = Url::parse(trimmed)
         .map_err(|_| BrookletError::InvalidServiceUrl("URL is not valid".into()))?;
-    if url.scheme() != "https" && !(allow_http_for_tests && url.scheme() == "http") {
+    if url.scheme() != "https" && !(allow_http && url.scheme() == "http") {
         return Err(BrookletError::InvalidServiceUrl(
-            "service URL must use HTTPS".into(),
+            if allow_http {
+                "service URL must use HTTP or HTTPS"
+            } else {
+                "service URL must use HTTPS"
+            }
+            .into(),
         ));
     }
     if !url.username().is_empty() || url.password().is_some() {
@@ -249,6 +255,25 @@ mod tests {
         assert!(service_url("https://example.com/miniflux?token=secret").is_err());
         assert!(service_url("https://example.com/miniflux#section").is_err());
         assert!(service_url("https://example.com/miniflux/").is_ok());
+    }
+
+    #[test]
+    fn karakeep_accepts_http_and_https_without_relaxing_other_url_checks() {
+        for value in [
+            "http://nas.local:3000/api/v1/bookmarks",
+            "https://example.com/api/v1/bookmarks",
+        ] {
+            assert!(karakeep_url(value).is_ok());
+        }
+        for value in [
+            "ftp://example.com",
+            "http://name:secret@example.com",
+            "http://example.com?key=secret",
+            "http://example.com#fragment",
+        ] {
+            assert!(karakeep_url(value).is_err());
+        }
+        assert!(service_url("http://nas.local:3000").is_err());
     }
 
     #[test]

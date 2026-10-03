@@ -5,10 +5,7 @@ use serde::Serialize;
 use crate::{
     error::BrookletError,
     model::{FailureKind, classify_http_status},
-    services::{
-        traits::KarakeepApi,
-        url_policy::{service_url, service_url_with_policy},
-    },
+    services::{traits::KarakeepApi, url_policy::karakeep_url},
 };
 
 pub struct ReqwestKarakeepApi {
@@ -27,23 +24,10 @@ struct Bookmark<'a> {
 
 impl ReqwestKarakeepApi {
     pub fn new(endpoint: &str, key: String) -> Result<Self, BrookletError> {
-        Self::with_policy(endpoint, key, false)
-    }
-
-    fn with_policy(
-        endpoint: &str,
-        key: String,
-        allow_http_for_tests: bool,
-    ) -> Result<Self, BrookletError> {
-        let endpoint = if allow_http_for_tests {
-            service_url_with_policy(endpoint, true)?
-        } else {
-            service_url(endpoint)?
-        };
+        let endpoint = karakeep_url(endpoint)?;
         let client = Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(30))
-            .https_only(!allow_http_for_tests)
             .redirect(Policy::none())
             .build()
             .map_err(|source| BrookletError::Transport {
@@ -182,7 +166,7 @@ mod tests {
     #[tokio::test]
     async fn direct_delivery_uses_bearer_json_and_accepts_existing_bookmark() {
         let (endpoint, requests) = serve(200);
-        let api = ReqwestKarakeepApi::with_policy(&endpoint, "secret".into(), true).unwrap();
+        let api = ReqwestKarakeepApi::new(&endpoint, "secret".into()).unwrap();
         api.save("https://example.com/article", "Article")
             .await
             .unwrap();
@@ -200,7 +184,7 @@ mod tests {
     #[tokio::test]
     async fn direct_delivery_does_not_follow_credential_redirects() {
         let (endpoint, requests) = serve(302);
-        let api = ReqwestKarakeepApi::with_policy(&endpoint, "secret".into(), true).unwrap();
+        let api = ReqwestKarakeepApi::new(&endpoint, "secret".into()).unwrap();
         assert!(matches!(
             api.save("https://example.com", "Example").await,
             Err(BrookletError::Http { status: 302, .. })
@@ -210,7 +194,7 @@ mod tests {
     #[tokio::test]
     async fn settings_validation_is_read_only_and_checks_bookmarks_response() {
         let (endpoint, requests) = serve_body(200, r#"{"bookmarks":[],"nextCursor":null}"#);
-        let api = ReqwestKarakeepApi::with_policy(&endpoint, "secret".into(), true).unwrap();
+        let api = ReqwestKarakeepApi::new(&endpoint, "secret".into()).unwrap();
         api.validate().await.unwrap();
         let request = requests.recv().unwrap();
         assert!(request.starts_with("GET /api/v1/bookmarks?limit=1&includeContent=false HTTP/1.1"));
@@ -227,7 +211,7 @@ mod tests {
             (200, r#"{"bookmarks":null}"#),
         ] {
             let (endpoint, requests) = serve_body(status, body);
-            let api = ReqwestKarakeepApi::with_policy(&endpoint, "secret".into(), true).unwrap();
+            let api = ReqwestKarakeepApi::new(&endpoint, "secret".into()).unwrap();
             assert!(api.validate().await.is_err());
             assert!(requests.recv().unwrap().starts_with("GET "));
         }
@@ -235,7 +219,7 @@ mod tests {
     #[tokio::test]
     async fn arbitrary_conflicts_are_not_mistaken_for_saved_bookmarks() {
         let (endpoint, requests) = serve(409);
-        let api = ReqwestKarakeepApi::with_policy(&endpoint, "secret".into(), true).unwrap();
+        let api = ReqwestKarakeepApi::new(&endpoint, "secret".into()).unwrap();
         assert!(matches!(
             api.save("https://example.com", "Article").await,
             Err(BrookletError::Http { status: 409, .. })

@@ -71,7 +71,7 @@ impl HealthView {
         let reconnect = gtk::Button::with_label("Reconnect account…");
         reconnect.set_action_name(Some("win.reconnect"));
         body.append(&reconnect);
-        let deliveries = gtk::Button::with_label("Manage deliveries…");
+        let deliveries = gtk::Button::with_label("Review failed deliveries…");
         deliveries.set_action_name(Some("win.delivery-review"));
         body.append(&deliveries);
         let settings = gtk::Button::with_label("Account and delivery settings…");
@@ -153,7 +153,7 @@ impl HealthView {
                     ));
                 self.retry.set_sensitive(!status.running);
                 self.deliveries
-                    .set_visible(status.queued_karakeep > 0 || status.delivery_error.is_some());
+                    .set_visible(status.queued_karakeep > 0 && status.delivery_error.is_some());
             }
             Err(BrookletError::InvalidSetup("a configured Miniflux account")) => {
                 self.bar.set_visible(false);
@@ -283,9 +283,10 @@ pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
     view.update(Ok(SyncStatus {
         running: true,
         queued_mutations: 2,
+        queued_karakeep: 1,
         ..Default::default()
     }));
-    if view.bar.property::<bool>("visible") {
+    if view.bar.property::<bool>("visible") || view.deliveries.property::<bool>("visible") {
         return Err(adw::glib::bool_error!(
             "Normal sync or queued changes showed failure UI"
         ));
