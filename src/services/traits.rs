@@ -138,6 +138,15 @@ pub trait Repository: Send + Sync {
         let _ = (account_id, error, now_ms);
         Ok(())
     }
+    /// Delivery success clears only delivery failures, preserving refresh errors.
+    async fn record_delivery_error(
+        &self,
+        account_id: i64,
+        error: Option<&str>,
+    ) -> Result<(), BrookletError> {
+        let _ = (account_id, error);
+        Ok(())
+    }
     async fn sync_status(&self, account_id: i64) -> Result<SyncStatus, BrookletError> {
         let _ = account_id;
         Ok(SyncStatus::default())

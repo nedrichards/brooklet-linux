@@ -199,6 +199,14 @@ records phases, counts, durations, endpoint classes, and stable identifiers;
 it never records tokens, API keys, authenticated headers, or full article HTML.
 Offline and retryable failures update sync state while leaving cached UI usable.
 
+Incoming sync continues when read/star upload or Karakeep delivery fails at a
+service boundary. Unsent intentions remain queued and protected from remote
+merge. Delivery errors are stored separately from refresh errors: a successful
+pull advances freshness without concealing unsent work, and a later successful
+delivery clears only its delivery error. Local database or filesystem failures
+still stop sync. Missing Miniflux credentials stop before the pull because the
+same credentials are required to fetch articles.
+
 ## Packaging
 
 Meson owns resources, metadata, installation, and the Cargo invocation.

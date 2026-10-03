@@ -168,6 +168,29 @@ impl AccountSyncService {
         result
     }
 
+    // Delivery and refresh have separate durable status. Service failures leave
+    // queued intentions protected during merge; local storage failures still abort.
+    async fn record_delivery_attempt(
+        &self,
+        account_id: i64,
+        result: Result<(), BrookletError>,
+    ) -> Result<(), BrookletError> {
+        match result {
+            Err(error @ (BrookletError::Database(_) | BrookletError::Storage(_))) => Err(error),
+            result => {
+                let error = result.err();
+                if let Some(error) = &error {
+                    tracing::warn!(account_id, failure_kind = ?error.failure_kind(),
+                        "delivery failed; continuing incoming sync with pending intentions protected");
+                }
+                let message = error.as_ref().map(ToString::to_string);
+                self.repository
+                    .record_delivery_error(account_id, message.as_deref())
+                    .await
+            }
+        }
+    }
+
     async fn run_sync_account(
         &self,
         account: &crate::model::Account,
@@ -177,73 +200,78 @@ impl AccountSyncService {
         if refresh_feeds {
             api.refresh_feeds().await?;
         }
-        let pending = self.repository.pending_mutations(account.id).await?;
         let mut accepted = Vec::new();
-        for field in [MutationField::Read, MutationField::Starred] {
-            for desired in [false, true] {
-                let batch = pending
-                    .iter()
-                    .filter(|mutation| mutation.field == field && mutation.desired == desired)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if batch.is_empty() {
-                    continue;
-                }
-                let ids = batch
-                    .iter()
-                    .map(|mutation| mutation.entry_id)
-                    .collect::<Vec<_>>();
-                match field {
-                    MutationField::Read => api.set_read(&ids, desired).await?,
-                    MutationField::Starred => api.set_starred(&ids, desired).await?,
-                }
-                accepted.extend(batch);
-            }
-        }
-        let karakeep_config = self.repository.karakeep_config(account.id).await?;
-        let direct_api = if let Some(config) = karakeep_config
-            .as_ref()
-            .filter(|config| config.route == KarakeepRoute::Direct)
-        {
-            match (
-                &config.direct_endpoint,
-                self.secrets.load_karakeep_key(account.id).await?,
-            ) {
-                (Some(endpoint), Some(key)) => Some(ReqwestKarakeepApi::new(endpoint, key)?),
-                _ => None,
-            }
-        } else {
-            None
-        };
-        for delivery in self.repository.pending_karakeep(account.id).await? {
-            let result = match delivery.route {
-                KarakeepRoute::Miniflux => api.save_to_integration(delivery.entry_id).await,
-                KarakeepRoute::Direct => match &direct_api {
-                    Some(client) => client.save(&delivery.canonical_url, &delivery.title).await,
-                    None => Err(BrookletError::InvalidSetup(
-                        "a Karakeep endpoint and API key",
-                    )),
-                },
-            };
-            match result {
-                Ok(()) => {
-                    self.repository
-                        .finish_karakeep(delivery.id, None, now_ms())
-                        .await?
-                }
-                Err(error) => {
-                    if error.failure_kind() == crate::model::FailureKind::Retryable {
-                        self.repository
-                            .defer_karakeep(delivery.id, &error.to_string())
-                            .await?;
-                        return Err(error);
+        let delivery = async {
+            let pending = self.repository.pending_mutations(account.id).await?;
+            for field in [MutationField::Read, MutationField::Starred] {
+                for desired in [false, true] {
+                    let batch = pending
+                        .iter()
+                        .filter(|mutation| mutation.field == field && mutation.desired == desired)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if batch.is_empty() {
+                        continue;
                     }
-                    self.repository
-                        .finish_karakeep(delivery.id, Some(&error.to_string()), now_ms())
-                        .await?;
+                    let ids = batch
+                        .iter()
+                        .map(|mutation| mutation.entry_id)
+                        .collect::<Vec<_>>();
+                    match field {
+                        MutationField::Read => api.set_read(&ids, desired).await?,
+                        MutationField::Starred => api.set_starred(&ids, desired).await?,
+                    }
+                    accepted.extend(batch);
                 }
             }
+            let karakeep_config = self.repository.karakeep_config(account.id).await?;
+            let direct_api = if let Some(config) = karakeep_config
+                .as_ref()
+                .filter(|config| config.route == KarakeepRoute::Direct)
+            {
+                match (
+                    &config.direct_endpoint,
+                    self.secrets.load_karakeep_key(account.id).await?,
+                ) {
+                    (Some(endpoint), Some(key)) => Some(ReqwestKarakeepApi::new(endpoint, key)?),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            for delivery in self.repository.pending_karakeep(account.id).await? {
+                let result = match delivery.route {
+                    KarakeepRoute::Miniflux => api.save_to_integration(delivery.entry_id).await,
+                    KarakeepRoute::Direct => match &direct_api {
+                        Some(client) => client.save(&delivery.canonical_url, &delivery.title).await,
+                        None => Err(BrookletError::InvalidSetup(
+                            "a Karakeep endpoint and API key",
+                        )),
+                    },
+                };
+                match result {
+                    Ok(()) => {
+                        self.repository
+                            .finish_karakeep(delivery.id, None, now_ms())
+                            .await?
+                    }
+                    Err(error) => {
+                        if error.failure_kind() == crate::model::FailureKind::Retryable {
+                            self.repository
+                                .defer_karakeep(delivery.id, &error.to_string())
+                                .await?;
+                            return Err(error);
+                        }
+                        self.repository
+                            .finish_karakeep(delivery.id, Some(&error.to_string()), now_ms())
+                            .await?;
+                    }
+                }
+            }
+            Ok(())
         }
+        .await;
+        self.record_delivery_attempt(account.id, delivery).await?;
         let categories = api
             .categories()
             .await?

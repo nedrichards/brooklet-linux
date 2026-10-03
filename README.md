@@ -22,6 +22,11 @@ minutes and catches up after a long suspend or time away. Automatic sync pauses
 on connections reported as metered or unavailable, and slows down after failures.
 You can still refresh manually at any time.
 
+A failed outgoing delivery does not block incoming article updates. Unsent
+read/star changes stay queued and protected from remote state; Karakeep outages
+also leave delivery queued. Sync diagnostics retain delivery failures even when
+article refresh succeeds. Local storage errors still stop sync.
+
 The canonical build is the Flatpak manifest at
 `flatpak/com.nedrichards.brooklet.Devel.json`. It targets GNOME 51 and is placed
 where GNOME Builder discovers it from a fresh checkout.

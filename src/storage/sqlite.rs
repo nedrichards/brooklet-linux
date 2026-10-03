@@ -116,6 +116,7 @@ const MIGRATIONS: &[&str] = &[
         CREATE INDEX entries_saved ON entries(account_id, starred, published_at_ms DESC);
     "#,
     "ALTER TABLE entries ADD COLUMN content_revision INTEGER NOT NULL DEFAULT 0; CREATE INDEX entries_delivery ON karakeep_deliveries(account_id, entry_id); CREATE INDEX entries_order ON entries(account_id, published_at_ms DESC, id DESC);",
+    "ALTER TABLE sync_state ADD COLUMN delivery_error TEXT;",
 ];
 
 pub struct SqliteRepository {
@@ -639,9 +640,10 @@ impl SqliteStore {
             .query_row(
                 "SELECT cursor_seconds FROM sync_state WHERE account_id=?1",
                 [account_id],
-                |row| row.get(0),
+                |row| row.get::<_, Option<i64>>(0),
             )
             .optional()
+            .map(Option::flatten)
             .map_err(Into::into)
     }
 
@@ -704,11 +706,24 @@ impl SqliteStore {
         Ok(())
     }
 
+    fn record_delivery_error(
+        &self,
+        account_id: i64,
+        error: Option<&str>,
+    ) -> Result<(), BrookletError> {
+        let connection = self.connection.lock().expect("SQLite mutex poisoned");
+        connection.execute(
+            "INSERT INTO sync_state(account_id,delivery_error) VALUES(?1,?2) ON CONFLICT(account_id) DO UPDATE SET delivery_error=excluded.delivery_error",
+            params![account_id, error],
+        )?;
+        Ok(())
+    }
+
     fn sync_status(&self, account_id: i64) -> Result<SyncStatus, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         let (last_successful_sync_at_ms, error) = connection
             .query_row(
-                "SELECT last_success_ms,last_error FROM sync_state WHERE account_id=?1",
+                "SELECT last_success_ms, CASE WHEN delivery_error IS NOT NULL AND last_error IS NOT NULL THEN 'Delivery: ' || delivery_error || '; Refresh: ' || last_error ELSE coalesce(delivery_error,last_error) END FROM sync_state WHERE account_id=?1",
                 [account_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -1074,6 +1089,16 @@ impl Repository for SqliteRepository {
         self.run(move |store| store.sync_status(account_id)).await
     }
 
+    async fn record_delivery_error(
+        &self,
+        account_id: i64,
+        error: Option<&str>,
+    ) -> Result<(), BrookletError> {
+        let error = error.map(str::to_owned);
+        self.run(move |store| store.record_delivery_error(account_id, error.as_deref()))
+            .await
+    }
+
     async fn reader_position(
         &self,
         entry_id: EntryId,
@@ -1336,6 +1361,68 @@ mod tests {
         let pending = repository.pending_mutations(1).await.unwrap();
         assert_eq!(pending.len(), 1);
         assert!(!pending[0].desired);
+    }
+
+    #[tokio::test]
+    async fn error_before_first_sync_has_no_cursor_and_delivery_success_preserves_refresh_error() {
+        let repository = repository_with_entry().await;
+        repository
+            .record_sync_error(1, "refresh failed", 0)
+            .await
+            .unwrap();
+        assert_eq!(repository.sync_cursor(1).await.unwrap(), None);
+        repository
+            .record_delivery_error(1, Some("delivery failed"))
+            .await
+            .unwrap();
+        let error = repository.sync_status(1).await.unwrap().error.unwrap();
+        assert!(error.contains("delivery failed"));
+        assert!(error.contains("refresh failed"));
+        repository.record_delivery_error(1, None).await.unwrap();
+        assert_eq!(
+            repository.sync_status(1).await.unwrap().error.as_deref(),
+            Some("refresh failed")
+        );
+        repository.complete_sync(1, 100, 10).await.unwrap();
+        assert_eq!(repository.sync_cursor(1).await.unwrap(), Some(100));
+        assert_eq!(repository.sync_status(1).await.unwrap().error, None);
+    }
+
+    #[tokio::test]
+    async fn delivery_status_migration_preserves_existing_account_entries_and_queue() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("old.db");
+        {
+            let connection = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..MIGRATIONS.len() - 1] {
+                connection.execute_batch(sql).unwrap();
+            }
+            connection
+                .pragma_update(None, "user_version", MIGRATIONS.len() - 1)
+                .unwrap();
+            connection.execute("INSERT INTO accounts(id,server_url,username,server_version) VALUES(1,'https://miniflux.example','reader','2.3.2')", []).unwrap();
+            connection.execute("INSERT INTO entries(account_id,id,feed_id,feed_title,category_title,title,url,published_at_ms,html,read,starred,reading_minutes) VALUES(1,42,7,'Feed','News','Story','https://example.com/42',0,'<p>Story</p>',1,0,1)", []).unwrap();
+            connection.execute("INSERT INTO pending_mutations(account_id,entry_id,field,desired,updated_at_ms) VALUES(1,42,'read',1,1234)", []).unwrap();
+        }
+        let repository = SqliteRepository::open(&path).unwrap();
+        assert_eq!(
+            repository.account().await.unwrap().unwrap().username,
+            "reader"
+        );
+        assert!(repository.cached_entry(1, 42).await.unwrap().unwrap().read);
+        let pending = repository.pending_mutations(1).await.unwrap().remove(0);
+        assert!(pending.desired);
+        repository
+            .record_delivery_error(1, Some("offline"))
+            .await
+            .unwrap();
+        assert_eq!(repository.sync_cursor(1).await.unwrap(), None);
+        assert_eq!(
+            repository.sync_status(1).await.unwrap().error.as_deref(),
+            Some("offline")
+        );
+        repository.acknowledge_mutation(&pending).await.unwrap();
+        assert!(repository.pending_mutations(1).await.unwrap().is_empty());
     }
 
     #[tokio::test]

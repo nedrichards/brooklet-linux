@@ -8,7 +8,7 @@ this plan.
 1. **Complete:** Subscription response handling: accept Miniflux's `feed_id` response and
    retain the existing post-subscription sync. Test the real response shape,
    category payloads, and failure handling.
-2. Separate upload failures from incoming sync: preserve pending intentions
+2. **Complete:** Separate upload failures from incoming sync: preserve pending intentions
    while allowing incoming articles during delivery failures.
 3. Repair Miniflux credentials without clearing local data.
 4. Expose and recover failed Karakeep deliveries; validate direct settings.
@@ -37,3 +37,17 @@ remote deletion, and refresh inside a feed.
   SDK formatting, GUI Clippy with warnings denied, GUI build, and GUI smoke
   passed. Smoke emitted development-runtime portal/session-bus and Glycin
   warnings. Live-account subscription was not exercised.
+- Checkpoint 2: service delivery failures no longer abort incoming sync. Unsent
+  read/star intentions remain protected and Karakeep retries remain queued.
+  Separate durable delivery status survives a successful pull and clears on
+  delivery recovery. Local storage failures still abort. This commit includes
+  the diagnostic migration and absent-cursor handling needed for first sync;
+  the unrelated outgoing worker and mutation revision work remains unstaged.
+- Checkpoint 2 verification: four new regressions failed before the fix. The
+  final six integration cases cover read/star failures, partial delivery,
+  Karakeep outage plus feed refresh, recovery, combined errors, local database
+  failure, and first-sync bootstrap. All 96 working-tree tests and 72 isolated
+  commit tests passed, including diagnostic migration tests. SDK formatting,
+  isolated Clippy, GUI Clippy with warnings denied, GUI build, and GUI smoke
+  passed. Smoke emitted development-runtime portal/session-bus and Glycin
+  warnings. Real-service outage and recovery were not exercised.
