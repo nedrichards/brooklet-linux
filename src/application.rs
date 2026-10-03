@@ -395,6 +395,10 @@ impl BrookletApplication {
                 .object("window")
                 .expect("window.ui must define the application window");
             window.set_application(Some(application));
+            let health_host: gtk::Box = builder
+                .object("sync_health_host")
+                .expect("sync_health_host");
+            ui::sync_health::install(&window, &health_host, controller.clone());
             let inbox_status: adw::StatusPage = builder
                 .object("inbox_status")
                 .expect("window.ui must define inbox_status");
@@ -3538,6 +3542,56 @@ fn install_window_tools(
     });
     window.add_action(&subscribe);
 
+    let reconnect = gio::SimpleAction::new("reconnect", None);
+    reconnect.connect_activate({
+        let window = window.downgrade();
+        let controller = controller.clone();
+        let toast = toast.clone();
+        move |_, _| {
+            controller.existing_account({
+                let window = window.clone();
+                let controller = controller.clone();
+                let toast = toast.clone();
+                move |result| {
+                    let Some(window) = window.upgrade() else {
+                        return;
+                    };
+                    match result {
+                        Ok(Some(account)) => {
+                            ui::reconnect::present(&window, controller, &account, {
+                                let window = window.downgrade();
+                                move |_| {
+                                    if let Some(window) = window.upgrade() {
+                                        ui::reconnect::sync_when_ready(&window);
+                                    }
+                                }
+                            })
+                        }
+                        Ok(None) => {}
+                        Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
+                    }
+                }
+            });
+        }
+    });
+    window.add_action(&reconnect);
+    let deliveries = gio::SimpleAction::new("delivery-review", None);
+    deliveries.connect_activate({
+        let window = window.downgrade();
+        let controller = controller.clone();
+        move |_, _| {
+            if let Some(window) = window.upgrade() {
+                let weak = window.downgrade();
+                ui::karakeep::present(&window, controller.clone(), move || {
+                    if let Some(window) = weak.upgrade() {
+                        ui::reconnect::sync_when_ready(&window);
+                    }
+                });
+            }
+        }
+    });
+    window.add_action(&deliveries);
+
     let preferences = gio::SimpleAction::new("preferences", None);
     preferences.connect_activate({
         let window = window.downgrade();
@@ -3726,10 +3780,9 @@ fn install_window_tools(
             page.add(&karakeep);
             let diagnostics = adw::PreferencesGroup::new();
             diagnostics.set_title("Sync diagnostics");
-            let status = adw::ActionRow::new();
-            status.set_use_markup(false);
-            status.set_title("Loading sync status…");
-            diagnostics.add(&status);
+            let health_host = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            diagnostics.add(&health_host);
+            ui::sync_health::install_dialog(&dialog, &health_host, controller.clone());
             page.add(&diagnostics);
             dialog.add(&page);
             controller.existing_account(move |result| match result {
@@ -3856,21 +3909,6 @@ fn install_window_tools(
                     );
                 }
             }));
-            controller.sync_status(move |result| match result {
-                Ok(info) => {
-                    status.set_title(&format!(
-                        "{} pending · Last sync {}",
-                        info.queued_mutations,
-                        info.last_successful_sync_at_ms.map_or_else(
-                            || "never".into(),
-                            |value| jiff::Timestamp::from_millisecond(value)
-                                .map_or_else(|_| "unknown".into(), |time| time.to_string())
-                        )
-                    ));
-                    status.set_subtitle(info.error.as_deref().unwrap_or("No sync error"));
-                }
-                Err(error) => status.set_title(&error.sync_message()),
-            });
             dialog.present(Some(&window));
         }
     });
@@ -4920,6 +4958,7 @@ pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
     ui::signal_scope::smoke_test()?;
     ui::reconnect::smoke_test()?;
     ui::karakeep::smoke_test()?;
+    ui::sync_health::smoke_test()?;
     ui::library::smoke_test()?;
     smoke_test_reader_pipeline(false)
 }

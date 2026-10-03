@@ -24,7 +24,13 @@ Adw.ApplicationWindow window {
   }
 
   content: Adw.ToastOverlay toast_overlay {
-    child: Adw.NavigationSplitView inbox_split {
+    child: Gtk.Box {
+      orientation: vertical;
+      Gtk.Box sync_health_host {
+        orientation: vertical;
+      }
+      Adw.NavigationSplitView inbox_split {
+      vexpand: true;
       min-sidebar-width: 300;
       max-sidebar-width: 420;
       sidebar-width-fraction: 0.34;
@@ -383,6 +389,7 @@ Adw.ApplicationWindow window {
           };
         };
       };
+      }
     };
   };
 }

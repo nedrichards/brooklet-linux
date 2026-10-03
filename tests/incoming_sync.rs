@@ -750,3 +750,46 @@ async fn cancelling_delayed_refresh_releases_account_and_running_state() {
     assert_eq!(*server.calls.lock().unwrap(), ["refresh", "pull"]);
     assert!(repo.account().await.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn health_separates_refresh_and_delivery_across_restart_and_recovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("health.sqlite");
+    let (repo, service, server) =
+        fixture_with_repository(Arc::new(SqliteRepository::open(&path).unwrap())).await;
+    service.set_read_local(42, true).await.unwrap();
+    let article = repo.cached_entry(1, 99).await.unwrap().unwrap();
+    service.queue_karakeep(&article).await.unwrap();
+    server.read_status.store(401, Ordering::Release);
+    server.pull_status.store(503, Ordering::Release);
+    assert!(service.sync().await.is_err());
+    let status = service.sync_status().await.unwrap();
+    assert!(status.refresh_error.as_deref().unwrap().contains("503"));
+    assert!(status.delivery_error.as_deref().unwrap().contains("401"));
+    assert_eq!(status.queued_mutations, 2);
+    assert_eq!(status.queued_karakeep, 1);
+    drop(service);
+    drop(repo);
+    let reopened = Arc::new(SqliteRepository::open(&path).unwrap());
+    assert_eq!(reopened.sync_status(1).await.unwrap(), status);
+    // A successful incoming pull clears only the refresh failure.
+    let service = AccountSyncService::new(
+        reopened.clone(),
+        Arc::new(Secrets),
+        Arc::new(Factory(server.clone())),
+    );
+    server.pull_status.store(0, Ordering::Release);
+    service.sync().await.unwrap();
+    let status = service.sync_status().await.unwrap();
+    assert_eq!(status.refresh_error, None);
+    assert!(status.delivery_error.unwrap().contains("401"));
+    assert_eq!(status.queued_mutations, 2);
+    server.read_status.store(0, Ordering::Release);
+    service.sync().await.unwrap();
+    let status = service.sync_status().await.unwrap();
+    assert_eq!(status.refresh_error, None);
+    assert_eq!(status.delivery_error, None);
+    assert_eq!(status.queued_mutations, 0);
+    assert_eq!(status.queued_karakeep, 0);
+    assert!(status.last_successful_sync_at_ms.is_some());
+}

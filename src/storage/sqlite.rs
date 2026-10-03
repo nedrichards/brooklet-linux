@@ -721,19 +721,30 @@ impl SqliteStore {
 
     fn sync_status(&self, account_id: i64) -> Result<SyncStatus, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
-        let (last_successful_sync_at_ms, error) = connection
+        let (last_successful_sync_at_ms, refresh_error, delivery_error) = connection
             .query_row(
-                "SELECT last_success_ms, CASE WHEN delivery_error IS NOT NULL AND last_error IS NOT NULL THEN 'Delivery: ' || delivery_error || '; Refresh: ' || last_error ELSE coalesce(delivery_error,last_error) END FROM sync_state WHERE account_id=?1",
+                "SELECT last_success_ms,last_error,delivery_error FROM sync_state WHERE account_id=?1",
                 [account_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?)),
             )
             .optional()?
-            .unwrap_or((None, None));
-        let queued_mutations: usize = connection.query_row("SELECT (SELECT count(*) FROM pending_mutations WHERE account_id=?1)+(SELECT count(*) FROM karakeep_deliveries WHERE account_id=?1 AND state!='saved')",[account_id],|row|row.get(0))?;
+            .unwrap_or((None, None, None));
+        let error = match (&refresh_error, &delivery_error) {
+            (Some(refresh), Some(delivery)) => {
+                Some(format!("Delivery: {delivery}; Refresh: {refresh}"))
+            }
+            _ => delivery_error.clone().or_else(|| refresh_error.clone()),
+        };
+        let (article_changes, queued_karakeep): (usize, usize) = connection.query_row(
+            "SELECT (SELECT count(*) FROM pending_mutations WHERE account_id=?1), (SELECT count(*) FROM karakeep_deliveries WHERE account_id=?1 AND state!='saved')",
+            [account_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(SyncStatus {
             running: false,
-            queued_mutations,
+            queued_mutations: article_changes + queued_karakeep,
+            queued_karakeep,
             last_successful_sync_at_ms,
+            refresh_error,
+            delivery_error,
             error,
         })
     }

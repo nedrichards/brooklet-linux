@@ -14,7 +14,7 @@ this plan.
 4. **Complete:** Expose and recover failed Karakeep deliveries; validate direct settings.
 5. **Complete:** Refresh visible Library drill-down pages while preserving context.
 6. **Complete:** Follow up asynchronous server feed refresh with bounded incoming pulls.
-7. Show persistent, actionable sync and delivery health.
+7. **Complete:** Show persistent, actionable sync and delivery failures.
 8. Reconcile remote deletions and test concurrent pagination changes.
 9. Retain and display feed parsing errors and disabled state.
 10. Show recoverable startup database failures without destroying the database.
@@ -150,3 +150,31 @@ remote deletion, and refresh inside a feed.
   Physical keyboard delivery remains unverified on this display as documented
   for checkpoint 5. Development-runtime portal/session-bus and Glycin warnings
   were emitted. Real-service feed scheduling was not exercised.
+
+- Checkpoint 7: The main window shows recovery controls only for a recorded sync
+  or delivery failure (or unavailable status). Healthy idle, ordinary syncing and
+  queued changes remain unobtrusive. The failure message remains during retries
+  and disappears after recovery. Details offer Sync now, Reconnect, delivery
+  management and account/delivery settings. Preferences provides live diagnostics
+  for normal state, pending article changes/Karakeep deliveries and last success.
+- Status now exposes the already-persisted refresh and delivery errors separately,
+  preserving the combined error for existing consumers. No schema migration is
+  needed. Successful refresh cannot conceal a delivery failure or unfinished
+  changes. Background status reads never trigger service requests or local edits;
+  requests cannot overlap and hidden windows do not poll. Window disposal and
+  Preferences closure stop monitors; late results cannot update closed views.
+- Checkpoint 7 coverage: headline regressions and a SQLite/service restart journey
+  verify separate failures, pending counts, independent recovery and last success.
+  GTK checks verify failure-only visibility, literal error text, duplicate-read
+  suppression, setup detection while hidden, shutdown cleanup and stale-result
+  rejection. The production-window Library journey verifies live failure/recovery
+  without navigation changes and clicks the actual Reconnect/delivery buttons.
+- Checkpoint 7 verification: all 119 working-tree and 95 isolated-commit Rust
+  tests passed. SDK formatting, GUI Clippy with warnings denied, GUI build and
+  full GTK smoke passed in both trees. Working-tree keyboard logic checks passed.
+  Intermittent GTK focus/viewport assertions were observed during development;
+  Library fixture settling increased from 180 to 350 ms without removing any
+  assertions, and the final full gates passed. Physical keyboard delivery remains
+  unverified on this display as documented for checkpoint 5. Development-runtime
+  portal/session-bus, GDK frame-timing and Glycin warnings were emitted. Real
+  account outages and system keyring recovery were not exercised.

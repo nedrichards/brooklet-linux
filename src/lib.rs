@@ -10,3 +10,5 @@ pub mod services;
 pub mod setup;
 pub mod storage;
 pub mod sync;
+
+pub mod sync_health;

@@ -186,9 +186,13 @@ impl Default for StoragePolicy {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SyncStatus {
     pub running: bool,
     pub queued_mutations: usize,
+    pub queued_karakeep: usize,
+    pub refresh_error: Option<String>,
+    pub delivery_error: Option<String>,
     pub last_successful_sync_at_ms: Option<i64>,
     pub error: Option<String>,
 }

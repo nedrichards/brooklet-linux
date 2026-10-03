@@ -7,7 +7,7 @@ use std::{
 type Pending<T> = Rc<RefCell<VecDeque<(i64, Completion<T>)>>>;
 
 fn layout() {
-    let deadline = Instant::now() + Duration::from_millis(180);
+    let deadline = Instant::now() + Duration::from_millis(350);
     while Instant::now() < deadline {
         while adw::glib::MainContext::default().pending() {
             adw::glib::MainContext::default().iteration(false);
@@ -644,6 +644,86 @@ fn sync_journey(refresh: bool) -> Result<(), adw::glib::BoolError> {
         builder_nav.visible_page().as_ref() == Some(&category),
         "Back lost category scope",
     )?;
+    if refresh {
+        fn find_health(widget: &gtk::Widget) -> Option<gtk::Box> {
+            if widget.widget_name() == "sync-health" {
+                return widget.clone().downcast().ok();
+            }
+            let mut child = widget.first_child();
+            while let Some(widget) = child {
+                if let Some(view) = find_health(&widget) {
+                    return Some(view);
+                }
+                child = widget.next_sibling();
+            }
+            None
+        }
+        let health = find_health(window.upcast_ref()).expect("production health view");
+        let headline = health
+            .first_child()
+            .unwrap()
+            .downcast::<gtk::Label>()
+            .unwrap();
+        runtime
+            .block_on(repo.record_sync_error(1, "HTTP 401", 0))
+            .unwrap();
+        runtime
+            .block_on(repo.record_delivery_error(1, Some("HTTP 503")))
+            .unwrap();
+        wait_until(|| headline.text() == "Sync needs attention")?;
+        check(
+            health.property::<bool>("visible"),
+            "Failure did not reveal health controls",
+        )?;
+        check(
+            builder_nav.visible_page().as_ref() == Some(&category),
+            "Health update changed Library scope",
+        )?;
+        let window_actions = window.clone().downcast::<adw::ApplicationWindow>().unwrap();
+        for (action, title) in [
+            ("win.reconnect", "Reconnect to Miniflux"),
+            ("win.delivery-review", "Karakeep deliveries"),
+        ] {
+            let menu = health
+                .last_child()
+                .unwrap()
+                .downcast::<gtk::MenuButton>()
+                .unwrap();
+            menu.popup();
+            layout();
+            let body = menu.popover().unwrap().child().unwrap();
+            let mut child = body.first_child();
+            let mut clicked = false;
+            while let Some(widget) = child {
+                if let Some(button) = widget.downcast_ref::<gtk::Button>()
+                    && button.action_name().as_deref() == Some(action)
+                {
+                    button.emit_clicked();
+                    clicked = true;
+                    break;
+                }
+                child = widget.next_sibling();
+            }
+            check(clicked, "Health recovery button was missing")?;
+            wait_until(|| window_actions.visible_dialog().is_some())?;
+            let dialog = window_actions.visible_dialog().unwrap();
+            check(
+                dialog.title().as_str() == title,
+                "Health recovery action opened the wrong dialog",
+            )?;
+            dialog.close();
+            wait_until(|| window_actions.visible_dialog().is_none())?;
+        }
+        runtime
+            .block_on(repo.record_delivery_error(1, None))
+            .unwrap();
+        runtime.block_on(repo.complete_sync(1, 1, 1)).unwrap();
+        wait_until(|| headline.text().starts_with("Last sync"))?;
+        check(
+            !health.property::<bool>("visible"),
+            "Recovered health remained prominent",
+        )?;
+    }
     window.close();
     layout();
     drop(app);
