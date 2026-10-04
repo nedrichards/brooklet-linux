@@ -124,3 +124,9 @@ the button, menu and R, including already-unread and pending-read states.
 Set `BROOKLET_READER_REVIEW_DIR` to a temporary output directory to capture
 native screenshots of these layouts during these fixtures. The physical
 keyboard driver also delivers R in both wide and narrow readers.
+
+The full Library journey also opens a cached article through the production
+window, checks that both primary toolbar buttons are sensitive, dispatches
+Open in Browser through a stub launcher, and uses Mark as Unread to restore
+the article and its source selection. It completes application shutdown and checks that the application is
+released before registering the same Library test ID again.

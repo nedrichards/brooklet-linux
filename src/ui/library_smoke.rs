@@ -375,12 +375,24 @@ pub fn run() -> Result<(), adw::glib::BoolError> {
     )?;
     window.close();
     layout();
-    sync_journey(false)?;
-    sync_journey(true)
+    for refresh in [false, true] {
+        let application = sync_journey(refresh)?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while application.upgrade().is_some() && Instant::now() < deadline {
+            layout();
+        }
+        check(
+            application.upgrade().is_none(),
+            "Closed Library application was retained",
+        )?;
+    }
+    Ok(())
 }
 
 /// Follow the production navigation and Sync actions with real controller/storage.
-fn sync_journey(refresh: bool) -> Result<(), adw::glib::BoolError> {
+fn sync_journey(
+    refresh: bool,
+) -> Result<adw::glib::WeakRef<adw::Application>, adw::glib::BoolError> {
     use async_trait::async_trait;
     use brooklet::{
         api::miniflux::{CategoryDto, EntriesDto, EntryDto, EntryQuery, FeedDto, ServerIdentity},
@@ -391,7 +403,7 @@ fn sync_journey(refresh: bool) -> Result<(), adw::glib::BoolError> {
         sync::{AccountSyncService, MinifluxApiFactory, SyncService},
     };
     use std::sync::atomic::{AtomicBool, Ordering};
-    struct Server(Arc<AtomicBool>, Arc<AtomicBool>);
+    struct Server(Arc<AtomicBool>, Arc<AtomicBool>, Arc<AtomicBool>);
     #[async_trait]
     impl MinifluxApi for Server {
         async fn validate(&self) -> Result<ServerIdentity, BrookletError> {
@@ -487,7 +499,11 @@ fn sync_journey(refresh: bool) -> Result<(), adw::glib::BoolError> {
             })
         }
         async fn set_read(&self, _: &[i64], _: bool) -> Result<(), BrookletError> {
-            unreachable!("Navigation or refresh changed read state")
+            assert!(
+                self.2.load(Ordering::Acquire),
+                "Navigation or refresh changed read state"
+            );
+            Ok(())
         }
         async fn set_starred(&self, _: &[i64], _: bool) -> Result<(), BrookletError> {
             unreachable!("Navigation or refresh changed saved state")
@@ -509,7 +525,11 @@ fn sync_journey(refresh: bool) -> Result<(), adw::glib::BoolError> {
     }
     impl MinifluxApiFactory for Server {
         fn create(&self, _: &str, _: String) -> Result<Box<dyn MinifluxApi>, BrookletError> {
-            Ok(Box::new(Server(self.0.clone(), self.1.clone())))
+            Ok(Box::new(Server(
+                self.0.clone(),
+                self.1.clone(),
+                self.2.clone(),
+            )))
         }
     }
     struct Secrets;
@@ -573,11 +593,16 @@ fn sync_journey(refresh: bool) -> Result<(), adw::glib::BoolError> {
         .map_err(|e| adw::glib::bool_error!("{e}"))?;
     let updated = Arc::new(AtomicBool::new(false));
     let deleted = Arc::new(AtomicBool::new(false));
+    let reader_actions = Arc::new(AtomicBool::new(false));
     let secrets = Arc::new(Secrets);
     let service = Arc::new(AccountSyncService::new(
         repo.clone(),
         secrets.clone(),
-        Arc::new(Server(updated.clone(), deleted.clone())),
+        Arc::new(Server(
+            updated.clone(),
+            deleted.clone(),
+            reader_actions.clone(),
+        )),
     ));
     runtime
         .block_on(service.sync())
@@ -600,6 +625,7 @@ fn sync_journey(refresh: bool) -> Result<(), adw::glib::BoolError> {
         .map_err(|e| adw::glib::bool_error!("{e}"))?,
     );
     let app = crate::application::library_smoke_application(controller.clone())?;
+    let weak_app = app.downgrade();
     app.activate();
     layout();
     let window = app
@@ -821,13 +847,97 @@ fn sync_journey(refresh: bool) -> Result<(), adw::glib::BoolError> {
             "Hard-deleted article remained cached",
         )?;
     }
-    window.close();
+    // Activate an article through production wiring before testing its chrome.
+    reader_actions.store(true, Ordering::Release);
+    if !refresh {
+        window
+            .activate_action("win.library-feed", Some(&21_i64.to_variant()))
+            .map_err(|e| adw::glib::bool_error!("{e}"))?;
+    }
+    let page = builder_nav.visible_page().unwrap();
+    let list = find_list(page.upcast_ref()).unwrap();
+    wait_until(|| list.model().is_some_and(|model| model.n_items() >= 2))?;
+    inbox::select_id(&list, 99);
+    let selection = list
+        .model()
+        .unwrap()
+        .downcast::<gtk::SingleSelection>()
+        .unwrap();
+    list.emit_by_name::<()>("activate", &[&selection.selected()]);
+    wait_until(|| {
+        runtime
+            .block_on(repo.cached_entry(1, 99))
+            .unwrap()
+            .is_some_and(|entry| entry.read)
+    })?;
+    fn button(widget: &gtk::Widget, action: &str) -> Option<gtk::Button> {
+        if let Some(button) = widget.downcast_ref::<gtk::Button>()
+            && button.action_name().as_deref() == Some(action)
+        {
+            return Some(button.clone());
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            if let Some(button) = button(&widget, action) {
+                return Some(button);
+            }
+            child = widget.next_sibling();
+        }
+        None
+    }
+    let browser = button(window.upcast_ref(), "reader.open-browser").unwrap();
+    let unread = button(window.upcast_ref(), "reader.keep-unread").unwrap();
+    check(
+        browser.is_sensitive() && unread.is_sensitive(),
+        "Open article reader buttons were disabled",
+    )?;
+    let opens = Rc::new(Cell::new(0));
+    let open = adw::gio::SimpleAction::new("open-browser", None);
+    open.connect_activate({
+        let opens = opens.clone();
+        move |_, _| opens.set(opens.get() + 1)
+    });
+    window
+        .clone()
+        .downcast::<adw::ApplicationWindow>()
+        .unwrap()
+        .add_action(&open);
+    browser.emit_clicked();
+    check(
+        opens.get() == 1,
+        "Reader browser button did not dispatch its action",
+    )?;
+    unread.emit_clicked();
+    wait_until(|| {
+        runtime
+            .block_on(repo.cached_entry(1, 99))
+            .unwrap()
+            .is_some_and(|entry| !entry.read)
+    })?;
+    check(
+        inbox::selected_id(&list) == Some(99),
+        "Mark as unread lost the source selection",
+    )?;
+    // Pair registration/startup with run/shutdown. GtkApplication keeps its own
+    // action muxer reference until shutdown, even after all windows close.
+    app.connect_activate({
+        let window = window.downgrade();
+        move |_| {
+            if let Some(window) = window.upgrade() {
+                window.close();
+            }
+        }
+    });
+    check(
+        app.run_with_args(&["brooklet-library-test"]) == adw::glib::ExitCode::SUCCESS,
+        "Library application shutdown failed",
+    )?;
     layout();
     drop(app);
     drop(controller);
     drop(runtime);
     let _ = std::fs::remove_dir_all(directory);
-    Ok(())
+    Ok(weak_app)
 }
 fn find_navigation(widget: &gtk::Widget) -> Option<adw::NavigationView> {
     if let Some(view) = widget.downcast_ref::<adw::NavigationView>() {

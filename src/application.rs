@@ -795,7 +795,7 @@ impl BrookletApplication {
                 undo: undo_entry.clone(),
             };
             install_reader_actions(&window, &builder, tools.clone());
-            install_reader_controls(&window, &builder, &reader_ui);
+            install_reader_controls(&window, &reader_ui);
             install_window_tools(&window, application, &builder, tools);
             let destinations: adw::ViewStack =
                 builder.object("destinations").expect("destinations");
@@ -2991,13 +2991,7 @@ fn update_reader_controls(reader: &ReaderUi, entry: Option<&Entry>) {
     )));
 }
 
-fn install_reader_controls(
-    window: &adw::ApplicationWindow,
-    builder: &gtk::Builder,
-    reader: &ReaderUi,
-) {
-    let page: adw::NavigationPage = builder.object("reader_page").unwrap();
-    page.insert_action_group("reader", Some(&reader.actions));
+fn install_reader_controls(window: &adw::ApplicationWindow, reader: &ReaderUi) {
     for name in [
         "open-browser",
         "keep-unread",
@@ -3038,6 +3032,7 @@ fn install_reader_controls(
     }
     compact_labels(reader.title.upcast_ref());
     update_reader_controls(reader, None);
+    window.insert_action_group("reader", Some(&reader.actions));
 }
 
 fn install_keep_unread_action(
@@ -3748,11 +3743,11 @@ fn install_window_tools(
     let preferences = gio::SimpleAction::new("preferences", None);
     preferences.connect_activate({
         let window = window.downgrade();
-        let application = application.clone();
+        let application = application.downgrade();
         let controller = controller.clone();
         let toast = toast.clone();
         move |_, _| {
-            let Some(window) = window.upgrade() else {
+            let (Some(window), Some(application)) = (window.upgrade(), application.upgrade()) else {
                 return;
             };
             let dialog = adw::PreferencesDialog::new();

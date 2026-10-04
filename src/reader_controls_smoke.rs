@@ -51,7 +51,7 @@ pub(super) fn run(
             Err(adw::glib::bool_error!("{message}"))
         }
     }
-    install_reader_controls(window, builder, reader);
+    install_reader_controls(window, reader);
     update_shortcut_tooltips(window.upcast_ref());
     check(
         !reader.menu.is_sensitive()
@@ -132,8 +132,12 @@ pub(super) fn run(
         reader.split.set_show_content(true);
         settle();
         check(
-            browser.is_mapped() && keep.is_mapped() && reader.menu.is_mapped(),
-            "Primary reader actions disappeared on resize",
+            browser.is_mapped()
+                && keep.is_mapped()
+                && reader.menu.is_mapped()
+                && browser.is_sensitive()
+                && keep.is_sensitive(),
+            "Primary reader actions disappeared or became disabled on resize",
         )?;
         check(
             navigation.is_visible() == layout.current_breakpoint().is_none(),
