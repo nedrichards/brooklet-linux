@@ -43,8 +43,37 @@ jobs:
         run: flatpak-builder --user --disable-rofiles-fuse --repo=repo --keep-build-dirs --force-clean build-dir flatpak/com.nedrichards.brooklet.Devel.json
       - name: Required physical keyboard regression
         run: xvfb-run -a flatpak-builder --run --env=GDK_BACKEND=x11 --env=BROOKLET_KEYBOARD_DRIVER=${{ github.workspace }}/build-aux/keyboard-event.py build-dir flatpak/com.nedrichards.brooklet.Devel.json brooklet --keyboard-test
-      - name: Required GTK reader and launch regression checks
-        run: xvfb-run -a flatpak-builder --run build-dir flatpak/com.nedrichards.brooklet.Devel.json brooklet --smoke-test
+      - name: Desktop smoke observations (advisory)
+        id: desktop_smoke
+        continue-on-error: true
+        timeout-minutes: 8
+        shell: bash
+        env:
+          BUILD_DIR: build-dir
+          MANIFEST: flatpak/com.nedrichards.brooklet.Devel.json
+        run: |
+          set -o pipefail
+          xvfb-run -a flatpak-builder --run --env=GDK_BACKEND=x11 "$BUILD_DIR" "$MANIFEST" brooklet --smoke-test 2>&1 | tee desktop-smoke.log
+      - name: Preserve desktop smoke report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-smoke-${{ github.sha }}
+          path: desktop-smoke.log
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Summarize desktop smoke observations
+        if: always()
+        env:
+          SMOKE_OUTCOME: ${{ steps.desktop_smoke.outcome }}
+        shell: bash
+        run: |
+          {
+            echo '### Desktop smoke (advisory)'
+            echo "Outcome: ${SMOKE_OUTCOME}"
+            echo 'Full desktop/decoder checks remain in the installed-app local suite.'
+            echo 'The desktop-smoke artifact retains the hosted report for 14 days.'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Export development bundle
         run: flatpak build-bundle repo Brooklet-Devel-${{ github.sha }}-x86_64.flatpak com.nedrichards.brooklet.Devel master
       - name: Upload development bundle

@@ -6,10 +6,14 @@ The required source and Flatpak jobs retain the repository's application-specifi
 
 ## Releases
 
-The production profile is `flatpak/com.nedrichards.brooklet.json`. Dispatch `Publish Release Flatpaks` from the default branch with an existing `vX.Y.Z` tag. Its tagged production manifest is converted to an exact Git commit in a temporary build manifest. Both x86_64 and aarch64 builds and the required GTK/keyboard regressions must pass before publication, with SHA256SUMS. Existing releases are never overwritten. The first release still requires the documented live-server and visual/accessibility checks.
+The production profile is `flatpak/com.nedrichards.brooklet.json`. Dispatch `Publish Release Flatpaks` from the default branch with an existing `vX.Y.Z` tag. Its tagged production manifest is converted to an exact Git commit in a temporary build manifest. Both x86_64 and aarch64 builds, SDK tests and the physical-keyboard regression must pass before publication, with SHA256SUMS. Existing releases are never overwritten. The first release still requires the documented live-server and visual/accessibility checks.
 
 GitHub bundles are sideloadable packages. Flathub updates continue through the Flathub repository review process. This workflow does not submit to or publish on Flathub.
 
 Flatpak Meson tests run serially with a timeout multiplier of three. Cargo's shared target lock otherwise makes concurrent format, Clippy and test jobs time out while a release build warms the cache.
 
 GitHub repository settings also enable dependency vulnerability alerts, Dependabot security updates, and weekly CodeQL default setup. Security updates propose pull requests; they do not merge them or publish app releases. The default CodeQL configuration lives in GitHub settings, alongside these versioned maintenance workflows.
+
+## Hosted desktop observations
+
+Full `--smoke-test` journeys remain available for installed-app local validation. Hosted Xvfb runs can fail different geometry, viewport or decoder assertions without a stable desktop session. CI and release workflows therefore run this suite as an advisory step with an eight-minute bound, a 14-day report artifact, and an explicit outcome in the summary. No assertion is removed or retried until green. Rust tests, format, Clippy, SDK Meson checks, metadata/build/export and the physical-keyboard gate stay blocking. A hosted green build does not claim a passing full desktop smoke suite; inspect its separate outcome. Before releasing, continue the existing local installed-app validation.

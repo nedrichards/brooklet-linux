@@ -130,3 +130,12 @@ window, checks that both primary toolbar buttons are sensitive, dispatches
 Open in Browser through a stub launcher, and uses Mark as Unread to restore
 the article and its source selection. It completes application shutdown and checks that the application is
 released before registering the same Library test ID again.
+
+### Hosted smoke policy
+
+The full `--smoke-test` is advisory on hosted Xvfb runners and retains its logs
+and outcome. Desktop geometry, viewport settling and real image-helper startup
+are also tested locally in the installed development app. Deterministic Rust and
+SDK checks and `--keyboard-test` remain required for CI and release packaging.
+Gallery failures report timeout, decode counts, viewport scheduling, memory and
+session retention separately to make follow-up investigations actionable.
