@@ -110,3 +110,17 @@ source-list focus in wide and narrow layouts. Handler checks also cover paging,
 lock modifiers, action targeting and mutation repeat suppression. See
 [Keyboard shortcuts](keyboard-shortcuts.md) for the full contract and driver
 requirements. Any failed keyboard assertion fails the Flatpak CI job.
+
+## Reader toolbar regression
+
+`brooklet --reader-test` runs the isolated reader pipeline and interaction
+checks, including image and lifecycle coverage. The full GTK smoke and
+keyboard fixtures retain the same reader checks. They exercise the header
+at narrow, wide, and split-view boundary widths, with long headlines and
+larger text.
+They cover disabled actions, menu groups and Save/Unsave labels, shared
+shortcut hints, open-article targeting, and Mark as Unread and Return through
+the button, menu and R, including already-unread and pending-read states.
+Set `BROOKLET_READER_REVIEW_DIR` to a temporary output directory to capture
+native screenshots of these layouts during these fixtures. The physical
+keyboard driver also delivers R in both wide and narrow readers.

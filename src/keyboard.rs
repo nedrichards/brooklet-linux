@@ -209,8 +209,8 @@ pub const BINDINGS: &[Binding] = &[
     ),
     binding!(
         message("Article lists and reader"),
-        message("Toggle read or unread"),
-        message("Selected or open article; marking the reader unread returns to its list"),
+        message("Toggle read state or mark unread"),
+        message("Toggle in lists; mark unread and return to the source list in the reader"),
         ["r"],
         Command::Read,
         Context::Articles
@@ -343,23 +343,29 @@ fn hint(binding: &Binding) -> String {
     gtk::accelerator_get_label(key, modifiers).to_string()
 }
 
+fn action_binding(action: &str) -> Option<&'static Binding> {
+    let action = action.strip_prefix("reader.").unwrap_or(action);
+    let command = match action {
+        "win.toggle-star" | "toggle-star" => Command::Save,
+        "win.open-browser" | "open-browser" => Command::Browser,
+        "win.copy-link" | "copy-link" => Command::Copy,
+        "win.next-article" | "next-article" => Command::NextArticle,
+        "win.previous-article" | "previous-article" => Command::PreviousArticle,
+        "win.keep-unread" | "keep-unread" => Command::Read,
+        "win.undo" => Command::Undo,
+        _ => {
+            return BINDINGS.iter().find(
+                |binding| matches!(binding.command, Command::Action(name) if name == action),
+            );
+        }
+    };
+    BINDINGS.iter().find(|binding| binding.command == command)
+}
+
 pub fn action_hint(action: &str) -> String {
-    let command =
-        match action {
-            "win.toggle-star" => Command::Save,
-            "win.open-browser" => Command::Browser,
-            "win.copy-link" => Command::Copy,
-            "win.next-article" => Command::NextArticle,
-            "win.previous-article" => Command::PreviousArticle,
-            _ => return BINDINGS
-                .iter()
-                .find(|binding| matches!(binding.command, Command::Action(name) if name == action))
-                .map(hint)
-                .unwrap_or_default(),
-        };
-    BINDINGS
-        .iter()
-        .find(|binding| binding.command == command)
-        .map(hint)
-        .unwrap_or_default()
+    action_binding(action).map(hint).unwrap_or_default()
+}
+
+pub fn action_accelerator(action: &str) -> Option<&'static str> {
+    action_binding(action).map(|binding| binding.keys[0])
 }

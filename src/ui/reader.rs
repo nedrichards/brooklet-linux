@@ -101,7 +101,7 @@ pub struct ImageSlot {
 pub fn empty(entry: &Entry, content: &gtk::Box, message: &str) {
     content.append(&label(message, true));
     if matches!(url::Url::parse(&entry.url), Ok(url) if matches!(url.scheme(), "http" | "https")) {
-        let link = gtk::LinkButton::with_label(&entry.url, "Open original article");
+        let link = gtk::LinkButton::with_label(&entry.url, "Open in Browser");
         link.set_halign(gtk::Align::Start);
         content.append(&link);
     }
@@ -313,7 +313,7 @@ pub fn show(entry: &Entry, title: &adw::WindowTitle, content: &gtk::Box) -> Vec<
         content.append(&label("This article has no cached body.", true));
         if matches!(url::Url::parse(&entry.url), Ok(url) if matches!(url.scheme(), "http" | "https"))
         {
-            let link = gtk::LinkButton::with_label(&entry.url, "Open original article");
+            let link = gtk::LinkButton::with_label(&entry.url, "Open in Browser");
             link.set_halign(gtk::Align::Start);
             content.append(&link);
         }

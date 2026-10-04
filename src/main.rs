@@ -14,6 +14,15 @@ fn main() -> adw::glib::ExitCode {
             }
         };
     }
+    if std::env::args_os().any(|argument| argument == "--reader-test") {
+        return match application::reader_test() {
+            Ok(()) => adw::glib::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("Brooklet reader regression failed: {error}");
+                adw::glib::ExitCode::FAILURE
+            }
+        };
+    }
     if std::env::args_os().any(|argument| argument == "--smoke-test") {
         return match application::smoke_test() {
             Ok(()) => adw::glib::ExitCode::SUCCESS,

@@ -28,6 +28,7 @@ cargo_target = custom_target(
     'build.rs',
     'src/main.rs',
     'src/application.rs',
+    'src/reader_controls_smoke.rs',
     'src/keyboard.rs',
     'src/auto_refresh.rs',
     'src/outgoing.rs',

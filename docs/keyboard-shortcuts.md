@@ -13,7 +13,8 @@ marks an article read.
 | Article list | Enter | Open selected article |
 | Reader | Space / Shift+Space | Scroll a page down/up |
 | Reader | N / P | Open next/previous article in the source collection |
-| List or reader | R | Toggle read state; marking the reader unread returns to its source list |
+| Article list | R | Toggle the selected article’s read state |
+| Reader | R | Mark as Unread and Return to the source list |
 | List or reader | S / Ctrl+D | Save or unsave selected/open article |
 | List or reader | B | Open selected/open article in browser |
 | List or reader | Ctrl+Shift+C | Copy selected/open article's link |
@@ -62,3 +63,19 @@ The full `--smoke-test` separately checks reader rendering and image lifecycle.
 The X11 gate proves event delivery in the synthetic fixture. It does not
 substitute for a manual pass under the desktop's Wayland compositor or with
 assistive technology.
+
+## Reader actions
+
+Open in Browser and Mark as Unread and Return remain in the reader header at
+all supported widths. Previous/next appear together when the reader pane is
+wider than 620sp; the duplicate header title hides at 400sp and below so that
+primary actions and window controls fit even with larger text. The complete
+headline remains in the article body. Previous/next remain available through
+the article menu and P/N.
+The menu groups primary actions, saving/link actions, then navigation, with
+shortcut hints drawn from the same definitions as hover descriptions and help.
+Save changes to Unsave for a starred article. Reader controls are disabled
+until an article is open; previous/next are disabled at collection boundaries.
+Mark as Unread and Return and R both restore source-list focus and selection,
+including when the article is already unread. List shortcuts continue to act
+on the selected article independently of the reader.

@@ -15,14 +15,6 @@ Adw.ApplicationWindow window {
     }
   }
 
-  Adw.Breakpoint {
-    condition ("max-width: 550sp")
-    setters {
-      previous_article_button.visible: false;
-      next_article_button.visible: false;
-    }
-  }
-
   content: Adw.ToastOverlay toast_overlay {
     child: Gtk.Box {
       orientation: vertical;
@@ -317,68 +309,95 @@ Adw.ApplicationWindow window {
 
       content: Adw.NavigationPage reader_page {
         title: _("Reader");
-        child: Adw.ToolbarView {
-          [top]
-          Adw.HeaderBar {
-            title-widget: Adw.WindowTitle reader_title {
-              title: _("Reader");
-            };
-            [end]
-            Gtk.Button {
-              icon-name: "mail-unread-symbolic";
-              action-name: "win.keep-unread";
-              tooltip-text: _("Keep Unread");
-              accessibility { label: _("Keep Unread"); }
-            }
-            [end]
-            Gtk.Button previous_article_button {
-              icon-name: "go-up-symbolic";
-              action-name: "win.previous-article";
-              tooltip-text: _("Previous Article");
-              accessibility { label: _("Previous Article"); }
-            }
-            [end]
-            Gtk.Button next_article_button {
-              icon-name: "go-down-symbolic";
-              action-name: "win.next-article";
-              tooltip-text: _("Next Article");
-              accessibility { label: _("Next Article"); }
-            }
-            [end]
-            Gtk.MenuButton reader_menu {
-              icon-name: "view-more-symbolic";
-              tooltip-text: _("Article actions");
-              accessibility { label: _("Article actions"); }
+        child: Adw.BreakpointBin reader_layout {
+          width-request: 280;
+          height-request: 100;
+          Adw.Breakpoint {
+            condition ("max-width: 620sp")
+            setters {
+              reader_navigation.visible: false;
             }
           }
-          content: Gtk.Box {
-            orientation: vertical;
-
-            Adw.StatusPage reader_placeholder {
-              vexpand: true;
-              styles ["reader-placeholder"]
-              icon-name: "x-office-document-symbolic";
-              title: _("Choose an article");
-              description: _("Selection moves through the list; activation opens an article.");
+          Adw.Breakpoint {
+            condition ("max-width: 400sp")
+            setters {
+              reader_navigation.visible: false;
+              reader_title.visible: false;
             }
-
-            Gtk.ScrolledWindow reader_scroller {
-              visible: false;
-              vexpand: true;
-              hscrollbar-policy: never;
-              child: Adw.Clamp {
-                maximum-size: 760;
-                tightening-threshold: 560;
-                child: Gtk.Box reader_content {
-                  orientation: vertical;
-                  spacing: 18;
-                  margin-top: 32;
-                  margin-bottom: 48;
-                  margin-start: 24;
-                  margin-end: 24;
-                };
+          }
+          child: Adw.ToolbarView {
+            [top]
+            Adw.HeaderBar {
+              title-widget: Adw.WindowTitle reader_title {
+                title: _("Reader");
               };
+              [start]
+              Gtk.Box reader_navigation {
+                spacing: 0;
+                Gtk.Button previous_article_button {
+                  icon-name: "go-up-symbolic";
+                  action-name: "reader.previous-article";
+                  tooltip-text: _("Previous Article");
+                  accessibility { label: _("Previous Article"); }
+                }
+                Gtk.Button next_article_button {
+                  icon-name: "go-down-symbolic";
+                  action-name: "reader.next-article";
+                  tooltip-text: _("Next Article");
+                  accessibility { label: _("Next Article"); }
+                }
+              }
+              [end]
+              Gtk.Box {
+                spacing: 0;
+                Gtk.Button open_browser_button {
+                  icon-name: "web-browser-symbolic";
+                  action-name: "reader.open-browser";
+                  tooltip-text: _("Open in Browser");
+                  accessibility { label: _("Open in Browser"); }
+                }
+                Gtk.Button keep_unread_button {
+                  icon-name: "mail-unread-symbolic";
+                  action-name: "reader.keep-unread";
+                  tooltip-text: _("Mark as Unread and Return");
+                  accessibility { label: _("Mark as Unread and Return"); }
+                }
+                Gtk.MenuButton reader_menu {
+                  icon-name: "view-more-symbolic";
+                  tooltip-text: _("Article actions");
+                  accessibility { label: _("Article actions"); }
+                }
+              }
             }
+            content: Gtk.Box {
+              orientation: vertical;
+
+              Adw.StatusPage reader_placeholder {
+                vexpand: true;
+                styles ["reader-placeholder"]
+                icon-name: "x-office-document-symbolic";
+                title: _("Choose an article");
+                description: _("Selection moves through the list; activation opens an article.");
+              }
+
+              Gtk.ScrolledWindow reader_scroller {
+                visible: false;
+                vexpand: true;
+                hscrollbar-policy: never;
+                child: Adw.Clamp {
+                  maximum-size: 760;
+                  tightening-threshold: 560;
+                  child: Gtk.Box reader_content {
+                    orientation: vertical;
+                    spacing: 18;
+                    margin-top: 32;
+                    margin-bottom: 48;
+                    margin-start: 24;
+                    margin-end: 24;
+                  };
+                };
+              }
+            };
           };
         };
       };

@@ -123,6 +123,8 @@ struct ListPlace {
 struct ReaderUi {
     split: adw::NavigationSplitView,
     title: adw::WindowTitle,
+    actions: gio::SimpleActionGroup,
+    menu: gtk::MenuButton,
     placeholder: adw::StatusPage,
     scroller: gtk::ScrolledWindow,
     content: gtk::Box,
@@ -144,6 +146,8 @@ struct ReaderUi {
 struct WeakReaderUi {
     split: adw::glib::WeakRef<adw::NavigationSplitView>,
     title: adw::glib::WeakRef<adw::WindowTitle>,
+    actions: gio::SimpleActionGroup,
+    menu: adw::glib::WeakRef<gtk::MenuButton>,
     placeholder: adw::glib::WeakRef<adw::StatusPage>,
     scroller: adw::glib::WeakRef<gtk::ScrolledWindow>,
     content: adw::glib::WeakRef<gtk::Box>,
@@ -165,6 +169,8 @@ impl ReaderUi {
         WeakReaderUi {
             split: self.split.downgrade(),
             title: self.title.downgrade(),
+            actions: self.actions.clone(),
+            menu: self.menu.downgrade(),
             placeholder: self.placeholder.downgrade(),
             scroller: self.scroller.downgrade(),
             content: self.content.downgrade(),
@@ -188,6 +194,8 @@ impl WeakReaderUi {
         Some(ReaderUi {
             split: self.split.upgrade()?,
             title: self.title.upgrade()?,
+            actions: self.actions.clone(),
+            menu: self.menu.upgrade()?,
             placeholder: self.placeholder.upgrade()?,
             scroller: self.scroller.upgrade()?,
             content: self.content.upgrade()?,
@@ -548,6 +556,8 @@ impl BrookletApplication {
             let reader_ui = ReaderUi {
                 split: inbox_split,
                 title: reader_title,
+                actions: gio::SimpleActionGroup::new(),
+                menu: builder.object("reader_menu").unwrap(),
                 placeholder: reader_placeholder,
                 scroller: reader_scroller,
                 content: reader_content,
@@ -775,20 +785,6 @@ impl BrookletApplication {
                 }
             });
             window.add_action(&undo_action);
-            let reader_menu: gtk::MenuButton = builder.object("reader_menu").expect("reader_menu");
-            let menu = gio::Menu::new();
-            menu.append(Some("Previous Article"), Some("win.previous-article"));
-            menu.append(Some("Next Article"), Some("win.next-article"));
-            for (label, action) in [
-                ("Keep Unread", "win.keep-unread"),
-                ("Save / Unsave", "win.toggle-star"),
-                ("Send to Karakeep", "win.send-karakeep"),
-                ("Open in Browser", "win.open-browser"),
-                ("Copy Link", "win.copy-link"),
-            ] {
-                menu.append(Some(label), Some(action));
-            }
-            reader_menu.set_menu_model(Some(&menu));
             let tools = WindowTools {
                 controller: controller.clone(),
                 reader: reader_ui.clone(),
@@ -799,6 +795,7 @@ impl BrookletApplication {
                 undo: undo_entry.clone(),
             };
             install_reader_actions(&window, &builder, tools.clone());
+            install_reader_controls(&window, &builder, &reader_ui);
             install_window_tools(&window, application, &builder, tools);
             let destinations: adw::ViewStack =
                 builder.object("destinations").expect("destinations");
@@ -1672,25 +1669,7 @@ fn install_article_cursor_keys(
                         }
                     }
                     ArticleKeyFocus::Reader => {
-                        if let Some(entry) = read_context.current.borrow().clone() {
-                            let entry_id = entry.id;
-                            let reader = read_context.reader.clone();
-                            let destinations = destinations.clone();
-                            let inbox = read_context.inbox.list.clone();
-                            let returned = Rc::new(Cell::new(false));
-                            let return_to_list = Rc::new(move || {
-                                if !returned.replace(true) {
-                                    return_to_article_list(
-                                        &reader,
-                                        &destinations,
-                                        &inbox,
-                                        entry_id,
-                                    );
-                                }
-                            });
-                            toggle_read(read_context.clone(), entry, None, Some(return_to_list));
-                            return adw::glib::Propagation::Stop;
-                        }
+                        return activate("win.keep-unread");
                     }
                     ArticleKeyFocus::Other => {}
                 }
@@ -2460,6 +2439,9 @@ fn mark_unread_from(
     } = context;
     let entry_id = entry.id;
     if !entry.read && !inbox.read_in_flight.borrow().contains(&entry_id) {
+        if let Some(return_to_list) = return_to_list {
+            return_to_list();
+        }
         return;
     }
     if inbox.read_in_flight.borrow().contains(&entry_id) {
@@ -2646,6 +2628,7 @@ fn undo_mark_read(
 }
 
 fn open_article(reader_ui: &ReaderUi, inbox_ui: &InboxUi, entry: &Entry) {
+    update_reader_controls(reader_ui, Some(entry));
     release_read_pin_unless(inbox_ui, Some(entry.id));
     if let Some(list) = reader_ui
         .source_list
@@ -2951,6 +2934,139 @@ fn article_action_target(
     }
 }
 
+fn reader_menu_model(starred: bool) -> gio::Menu {
+    let menu = gio::Menu::new();
+    for entries in [
+        vec![
+            ("Open in Browser", "reader.open-browser"),
+            ("Mark as Unread and Return", "reader.keep-unread"),
+        ],
+        vec![
+            (
+                if starred { "Unsave" } else { "Save" },
+                "reader.toggle-star",
+            ),
+            ("Send to Karakeep", "reader.send-karakeep"),
+            ("Copy Link", "reader.copy-link"),
+        ],
+        vec![
+            ("Previous Article", "reader.previous-article"),
+            ("Next Article", "reader.next-article"),
+        ],
+    ] {
+        let section = gio::Menu::new();
+        for (label, action) in entries {
+            let item = gio::MenuItem::new(Some(label), Some(action));
+            if let Some(accelerator) = keyboard::action_accelerator(action) {
+                item.set_attribute_value("accel", Some(&accelerator.to_variant()));
+            }
+            section.append_item(&item);
+        }
+        menu.append_section(None, &section);
+    }
+    menu
+}
+
+fn update_reader_controls(reader: &ReaderUi, entry: Option<&Entry>) {
+    for name in reader.actions.list_actions() {
+        if let Some(action) = reader
+            .actions
+            .lookup_action(&name)
+            .and_downcast::<gio::SimpleAction>()
+        {
+            let enabled = entry.is_some()
+                && match name.as_str() {
+                    "previous-article" => reader.origin_index.get() > 0,
+                    "next-article" => {
+                        reader.origin_index.get() + 1 < reader.origin_set.borrow().len()
+                    }
+                    _ => true,
+                };
+            action.set_enabled(enabled);
+        }
+    }
+    reader.menu.set_sensitive(entry.is_some());
+    reader.menu.set_menu_model(Some(&reader_menu_model(
+        entry.is_some_and(|entry| entry.starred),
+    )));
+}
+
+fn install_reader_controls(
+    window: &adw::ApplicationWindow,
+    builder: &gtk::Builder,
+    reader: &ReaderUi,
+) {
+    let page: adw::NavigationPage = builder.object("reader_page").unwrap();
+    page.insert_action_group("reader", Some(&reader.actions));
+    for name in [
+        "open-browser",
+        "keep-unread",
+        "toggle-star",
+        "send-karakeep",
+        "copy-link",
+        "previous-article",
+        "next-article",
+    ] {
+        let action = gio::SimpleAction::new(name, None);
+        action.connect_activate({
+            let window = window.downgrade();
+            let scroller = reader.scroller.downgrade();
+            move |_, _| {
+                if let (Some(window), Some(scroller)) = (window.upgrade(), scroller.upgrade()) {
+                    // Reader chrome always targets the open article, even if a list had focus.
+                    scroller.grab_focus();
+                    let _ = gtk::prelude::WidgetExt::activate_action(
+                        &window,
+                        &format!("win.{name}"),
+                        None,
+                    );
+                }
+            }
+        });
+        reader.actions.add_action(&action);
+    }
+    fn compact_labels(widget: &gtk::Widget) {
+        if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            label.set_max_width_chars(24);
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            compact_labels(&widget);
+            child = widget.next_sibling();
+        }
+    }
+    compact_labels(reader.title.upcast_ref());
+    update_reader_controls(reader, None);
+}
+
+fn install_keep_unread_action(
+    window: &adw::ApplicationWindow,
+    builder: &gtk::Builder,
+    context: ReadContext,
+) {
+    let destinations: adw::ViewStack = builder.object("destinations").unwrap();
+    let keep = gio::SimpleAction::new("keep-unread", None);
+    keep.connect_activate(move |_, _| {
+        let Some(entry) = context.current.borrow().clone() else {
+            return;
+        };
+        let reader = context.reader.clone();
+        let destinations = destinations.clone();
+        let inbox = context.inbox.list.clone();
+        let entry_id = entry.id;
+        mark_unread_from(
+            context.clone(),
+            entry,
+            None,
+            Some(Rc::new(move || {
+                return_to_article_list(&reader, &destinations, &inbox, entry_id);
+            })),
+        );
+    });
+    window.add_action(&keep);
+}
+
 fn install_reader_actions(
     window: &adw::ApplicationWindow,
     builder: &gtk::Builder,
@@ -3047,30 +3163,18 @@ fn install_reader_actions(
         });
         window.add_action(&action);
     }
-    let keep = gio::SimpleAction::new("keep-unread", None);
-    keep.connect_activate({
-        let controller = controller.clone();
-        let current = current.clone();
-        let reader = reader.clone();
-        let inbox = inbox.clone();
-        let toast = toast.clone();
-        let undo = undo.clone();
-        move |_, _| {
-            let Some(entry) = current.borrow().clone() else {
-                return;
-            };
-            mark_unread(
-                controller.clone(),
-                inbox.clone(),
-                reader.clone(),
-                current.clone(),
-                undo.clone(),
-                toast.clone(),
-                entry,
-            );
-        }
-    });
-    window.add_action(&keep);
+    install_keep_unread_action(
+        window,
+        builder,
+        ReadContext {
+            controller: controller.clone(),
+            current: current.clone(),
+            reader: reader.clone(),
+            inbox: inbox.clone(),
+            toast: toast.clone(),
+            undo: undo.clone(),
+        },
+    );
     let star = gio::SimpleAction::new("toggle-star", None);
     let star_in_flight = Rc::new(RefCell::new(HashSet::new()));
     star.connect_activate({
@@ -3119,6 +3223,7 @@ fn install_reader_actions(
                         if let Some(window) = window.upgrade() {
                             update_visible_starred(window.upcast_ref(), entry_id, desired);
                         }
+                        update_reader_controls(&reader, current.borrow().as_ref());
                         load_other_views(controller, views, toast.clone());
                         toast.add_toast(adw::Toast::new(if desired {
                             "Saved"
@@ -4660,9 +4765,23 @@ fn smoke_test_article_keyboard(
                 "Narrow Escape lost source-list focus"
             ));
         }
+        let narrow_selection = inbox.model.selection.selected();
         real_key("Up", &[])?;
+        // Collapsing reparents the list and queues focus/layout work. Observe
+        // the cursor result rather than assuming three frames finish it all.
+        for _ in 0..10 {
+            if inbox.model.selection.selected() == 0 {
+                break;
+            }
+            layout(window);
+        }
         if inbox.model.selection.selected() != 0 {
-            return Err(adw::glib::bool_error!("Narrow list Up failed"));
+            return Err(adw::glib::bool_error!(
+                "Narrow list Up failed: before={narrow_selection}, after={}, focus={:?}",
+                inbox.model.selection.selected(),
+                gtk::prelude::GtkWindowExt::focus(window)
+                    .map(|widget| widget.type_().name().to_string())
+            ));
         }
         window.set_default_size(1080, 720);
         reader.active_id.set(None);
@@ -4926,6 +5045,9 @@ fn smoke_test_automatic_inbox(
     Ok(())
 }
 
+#[path = "reader_controls_smoke.rs"]
+mod reader_controls_smoke;
+
 fn smoke_test_reader_pipeline(keyboard_only: bool) -> Result<(), adw::glib::BoolError> {
     use brooklet::services::traits::Repository;
     let repository = Arc::new(
@@ -5057,6 +5179,8 @@ fn smoke_test_reader_pipeline(keyboard_only: bool) -> Result<(), adw::glib::Bool
     let reader = ReaderUi {
         split: builder.object("inbox_split").unwrap(),
         title: builder.object("reader_title").unwrap(),
+        actions: gio::SimpleActionGroup::new(),
+        menu: builder.object("reader_menu").unwrap(),
         placeholder: builder.object("reader_placeholder").unwrap(),
         scroller: builder.object("reader_scroller").unwrap(),
         content: builder.object("reader_content").unwrap(),
@@ -5082,6 +5206,14 @@ fn smoke_test_reader_pipeline(keyboard_only: bool) -> Result<(), adw::glib::Bool
         vec![long.clone(), replacement.clone()],
     )?;
     smoke_test_automatic_inbox(&window, &inbox, &reader, &repository, &replacement)?;
+    reader_controls_smoke::run(
+        &window,
+        &builder,
+        &inbox,
+        &reader,
+        &repository,
+        &replacement,
+    )?;
     if keyboard_only {
         window.destroy();
         drop(reader);
@@ -5176,6 +5308,12 @@ fn smoke_test_reader_pipeline(keyboard_only: bool) -> Result<(), adw::glib::Bool
     let result = ui::reader_images::smoke_test(image_controller);
     let _ = std::fs::remove_dir_all(cache_directory);
     result
+}
+
+pub fn reader_test() -> Result<(), adw::glib::BoolError> {
+    adw::init()?;
+    register_resources();
+    smoke_test_reader_pipeline(false)
 }
 
 pub fn keyboard_test() -> Result<(), adw::glib::BoolError> {
