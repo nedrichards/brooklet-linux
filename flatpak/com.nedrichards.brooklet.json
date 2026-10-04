@@ -1,5 +1,5 @@
 {
-  "app-id": "com.nedrichards.brooklet.Devel",
+  "app-id": "com.nedrichards.brooklet",
   "runtime": "org.gnome.Platform",
   "runtime-version": "51",
   "sdk": "org.gnome.Sdk",
@@ -46,8 +46,8 @@
       "name": "brooklet",
       "buildsystem": "meson",
       "config-opts": [
-        "--buildtype=debugoptimized",
-        "-Dprofile=development"
+        "--buildtype=release",
+        "-Dprofile=release"
       ],
       "run-tests": true,
       "sources": [

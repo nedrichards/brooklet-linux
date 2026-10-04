@@ -84,3 +84,6 @@ Brooklet is licensed under GPL-3.0-or-later. See `COPYING`.
 
 For private cache audits and native rendering previews, see
 [Reader testing](docs/reader-testing.md).
+
+Dependency checks, CI artifacts, and release packaging are described in
+[Maintenance](docs/maintenance.md).

@@ -40,8 +40,42 @@ jobs:
           flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
           flatpak install --user --noninteractive flathub org.gnome.Platform//51 org.gnome.Sdk//51 org.freedesktop.Sdk.Extension.rust-stable//26.08
       - name: Configure, build, test, and validate
-        run: flatpak-builder --user --disable-rofiles-fuse --force-clean build-dir flatpak/com.nedrichards.brooklet.Devel.json
+        run: flatpak-builder --user --disable-rofiles-fuse --repo=repo --keep-build-dirs --force-clean build-dir flatpak/com.nedrichards.brooklet.Devel.json
       - name: Required physical keyboard regression
         run: xvfb-run -a flatpak-builder --run --env=GDK_BACKEND=x11 --env=BROOKLET_KEYBOARD_DRIVER=${{ github.workspace }}/build-aux/keyboard-event.py build-dir flatpak/com.nedrichards.brooklet.Devel.json brooklet --keyboard-test
       - name: Required GTK reader and launch regression checks
         run: xvfb-run -a flatpak-builder --run build-dir flatpak/com.nedrichards.brooklet.Devel.json brooklet --smoke-test
+      - name: Export development bundle
+        run: flatpak build-bundle repo Brooklet-Devel-${{ github.sha }}-x86_64.flatpak com.nedrichards.brooklet.Devel master
+      - name: Upload development bundle
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: Brooklet-Devel-${{ github.sha }}-x86_64
+          path: Brooklet-Devel-${{ github.sha }}-x86_64.flatpak
+          if-no-files-found: error
+          retention-days: 14
+      - name: Summarize development bundle
+        env:
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          {
+            echo '### Development Flatpak'
+            echo "Download: ${ARTIFACT_URL}"
+            echo "Built checkout: ${GITHUB_SHA}"
+            echo "PR head: ${PR_HEAD}"
+            echo 'Retention: 14 days'
+            echo 'Install after extracting the artifact:'
+            echo '```console'
+            echo "flatpak install --user ./Brooklet-Devel-${GITHUB_SHA}-x86_64.flatpak"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve Flatpak test logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: flatpak-test-logs-${{ github.sha }}
+          path: .flatpak-builder/build/**/meson-logs/testlog.*
+          if-no-files-found: warn
+          retention-days: 14
