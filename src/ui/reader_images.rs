@@ -521,12 +521,34 @@ pub fn smoke_test(controller: Arc<AppController>) -> Result<(), glib::BoolError>
     if !expired.get() {
         deadline.remove();
     }
+    let loaded = images
+        .slots
+        .borrow()
+        .iter()
+        .filter(|slot| matches!(slot.state, State::Loaded(_)))
+        .count();
+    let decode_failures = images
+        .slots
+        .borrow()
+        .iter()
+        .filter(|slot| slot.state == State::Failed)
+        .count();
+    let last_waiting = images.slots.borrow()[39].state == State::Waiting;
+    let resident = images.resident.get();
     let weak = Rc::downgrade(&images);
     drop(images);
     window.destroy();
-    if weak.upgrade().is_some() || failed.get() {
+    let retained = weak.upgrade().is_some();
+    if retained || failed.get() {
         return Err(glib::bool_error!(
-            "Cached gallery decoding, viewport bounds, or session teardown failed"
+            "Cached gallery check failed: expired={}, loaded={}, decode_failures={}, last_waiting={}, max_jobs={}, resident_bytes={}, retained={}",
+            expired.get(),
+            loaded,
+            decode_failures,
+            last_waiting,
+            concurrency.get(),
+            resident,
+            retained
         ));
     }
     Ok(())
