@@ -83,6 +83,7 @@ pub trait SyncService: Send + Sync {
         feed_id: Option<i64>,
         category_id: Option<i64>,
         read: Option<bool>,
+        scope: &str,
     ) -> Result<Vec<Entry>, BrookletError>;
     async fn categories_cached(&self) -> Result<Vec<Category>, BrookletError>;
     async fn feeds_cached(&self, category_id: Option<i64>) -> Result<Vec<Feed>, BrookletError>;
@@ -681,10 +682,11 @@ impl SyncService for AccountSyncService {
         feed_id: Option<i64>,
         category_id: Option<i64>,
         read: Option<bool>,
+        scope: &str,
     ) -> Result<Vec<Entry>, BrookletError> {
         let account = self.configured_account().await?;
         self.repository
-            .search_entries(account.id, query, feed_id, category_id, read)
+            .search_entries(account.id, query, feed_id, category_id, read, scope)
             .await
     }
 

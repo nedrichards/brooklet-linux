@@ -427,6 +427,7 @@ impl SqliteStore {
         Ok(entries)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn search_entries(
         &self,
         account_id: i64,
@@ -434,6 +435,7 @@ impl SqliteStore {
         feed_id: Option<i64>,
         category_id: Option<i64>,
         read: Option<bool>,
+        scope: &str,
     ) -> Result<Vec<Entry>, BrookletError> {
         let pattern = format!(
             "%{}%",
@@ -444,7 +446,7 @@ impl SqliteStore {
                 .replace('_', "\\_")
         );
         let sql = format!(
-            "{} LEFT JOIN feeds f ON f.account_id=e.account_id AND f.id=e.feed_id WHERE e.account_id=?1 AND (?2='' OR e.title LIKE ?3 ESCAPE '\\' OR e.feed_title LIKE ?3 ESCAPE '\\' OR COALESCE(e.author,'') LIKE ?3 ESCAPE '\\' OR e.html LIKE ?3 ESCAPE '\\') AND (?4 IS NULL OR e.feed_id=?4) AND (?5 IS NULL OR f.category_id=?5) AND (?6 IS NULL OR e.read=?6) ORDER BY e.published_at_ms DESC LIMIT 500",
+            "{} LEFT JOIN feeds f ON f.account_id=e.account_id AND f.id=e.feed_id WHERE e.account_id=?1 AND (?2='' OR e.title LIKE ?3 ESCAPE '\\' OR e.feed_title LIKE ?3 ESCAPE '\\' OR COALESCE(e.author,'') LIKE ?3 ESCAPE '\\' OR e.html LIKE ?3 ESCAPE '\\') AND (?4 IS NULL OR e.feed_id=?4) AND (?5 IS NULL OR f.category_id=?5) AND (?6 IS NULL OR e.read=?6) AND (?7!='inbox' OR e.read=0) AND (?7!='saved' OR e.starred=1) ORDER BY e.published_at_ms DESC, e.id DESC LIMIT 501",
             summary_select()
         );
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
@@ -457,7 +459,8 @@ impl SqliteStore {
                     pattern,
                     feed_id,
                     category_id,
-                    read
+                    read,
+                    scope
                 ],
                 read_entry,
             )?
@@ -1054,10 +1057,14 @@ impl Repository for SqliteRepository {
         feed_id: Option<i64>,
         category_id: Option<i64>,
         read: Option<bool>,
+        scope: &str,
     ) -> Result<Vec<Entry>, BrookletError> {
         let query = query.to_owned();
-        self.run(move |store| store.search_entries(account_id, &query, feed_id, category_id, read))
-            .await
+        let scope = scope.to_owned();
+        self.run(move |store| {
+            store.search_entries(account_id, &query, feed_id, category_id, read, &scope)
+        })
+        .await
     }
 
     async fn set_read_local(
@@ -1428,7 +1435,7 @@ mod tests {
         assert_ne!(before.content_revision, after.content_revision);
         assert!(
             repository
-                .search_entries(1, "Changed body", None, None, None)
+                .search_entries(1, "Changed body", None, None, None, "all")
                 .await
                 .unwrap()[0]
                 .html
@@ -1888,7 +1895,7 @@ mod tests {
         );
         assert_eq!(
             repository
-                .search_entries(1, "Story", None, None, None)
+                .search_entries(1, "Story", None, None, None, "all")
                 .await
                 .unwrap()
                 .len(),
@@ -2006,6 +2013,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_scopes_combine_with_text_and_status_before_limiting() {
+        let repository = repository_with_entry().await;
+        let entries = (0..510)
+            .map(|index| Entry {
+                id: 100 + index,
+                published_at_ms: index,
+                read: index != 0,
+                starred: index == 0,
+                ..example_entry()
+            })
+            .collect::<Vec<_>>();
+        repository
+            .merge_changed_page(1, &entries, &[])
+            .await
+            .unwrap();
+        let saved = repository
+            .search_entries(1, "Story", Some(9), None, Some(false), "saved")
+            .await
+            .unwrap();
+        assert_eq!(
+            saved.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+            vec![100]
+        );
+        let inbox = repository
+            .search_entries(1, "", None, None, None, "inbox")
+            .await
+            .unwrap();
+        assert!(inbox.iter().all(|entry| !entry.read));
+        assert!(inbox.iter().any(|entry| entry.id == 100));
+        assert!(
+            repository
+                .search_entries(1, "Story", None, None, Some(true), "saved")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            repository
+                .search_entries(2, "", None, None, None, "saved")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            repository
+                .search_entries(1, "", None, None, None, "all")
+                .await
+                .unwrap()
+                .len(),
+            501
+        );
+    }
+
+    #[tokio::test]
     async fn search_treats_wildcards_and_backslashes_as_literal_text() {
         let repository = repository_with_entry().await;
         let entry = Entry {
@@ -2019,7 +2080,7 @@ mod tests {
             .unwrap();
         for query in ["%", "_", "\\"] {
             let found = repository
-                .search_entries(1, query, None, None, None)
+                .search_entries(1, query, None, None, None, "all")
                 .await
                 .unwrap();
             assert_eq!(found.len(), 1, "query {query}");

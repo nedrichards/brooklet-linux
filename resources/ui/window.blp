@@ -63,6 +63,12 @@ Adw.ApplicationWindow window {
                       tooltip-text: _("Sync");
                       accessibility { label: _("Sync"); }
                     }
+                    Gtk.Button {
+                      icon-name: "system-search-symbolic";
+                      action-name: "app.search";
+                      tooltip-text: _("Search Articles");
+                      accessibility { label: _("Search Articles"); }
+                    }
                     Gtk.MenuButton app_menu {
                       icon-name: "open-menu-symbolic";
                       tooltip-text: _("Main Menu");
@@ -111,6 +117,13 @@ Adw.ApplicationWindow window {
                     title: _("Saved");
                     subtitle: _("Starred in Miniflux");
                   };
+                  [end]
+                  Gtk.Button {
+                      icon-name: "system-search-symbolic";
+                      action-name: "app.search";
+                      tooltip-text: _("Search Articles");
+                      accessibility { label: _("Search Articles"); }
+                    }
                 }
                 content: Gtk.Box {
                   orientation: vertical;
@@ -145,8 +158,8 @@ Adw.ApplicationWindow window {
                       Gtk.Button {
                         icon-name: "system-search-symbolic";
                         action-name: "app.search";
-                        tooltip-text: _("Search Library");
-                        accessibility { label: _("Search Library"); }
+                        tooltip-text: _("Search Articles");
+                        accessibility { label: _("Search Articles"); }
                       }
                     }
                     content: Gtk.ScrolledWindow {

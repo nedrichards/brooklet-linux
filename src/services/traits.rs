@@ -88,6 +88,7 @@ pub trait Repository: Send + Sync {
         let _ = (account_id, view);
         Ok(Vec::new())
     }
+    #[allow(clippy::too_many_arguments)]
     async fn search_entries(
         &self,
         account_id: i64,
@@ -95,8 +96,9 @@ pub trait Repository: Send + Sync {
         feed_id: Option<i64>,
         category_id: Option<i64>,
         read: Option<bool>,
+        scope: &str,
     ) -> Result<Vec<Entry>, BrookletError> {
-        let _ = (account_id, query, feed_id, category_id, read);
+        let _ = (account_id, query, feed_id, category_id, read, scope);
         Ok(Vec::new())
     }
     async fn categories_cached(&self, account_id: i64) -> Result<Vec<Category>, BrookletError> {

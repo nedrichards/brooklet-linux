@@ -264,6 +264,8 @@ struct SearchState {
     feed: gtk::DropDown,
     category: gtk::DropDown,
     read: gtk::DropDown,
+    scope: gtk::DropDown,
+    count: gtk::Label,
     feed_ids: Rc<RefCell<Vec<Option<i64>>>>,
     category_ids: Rc<RefCell<Vec<Option<i64>>>>,
     model: ui::inbox::InboxModel,
@@ -297,11 +299,24 @@ impl SearchState {
             .get(self.category.selected() as usize)
             .copied()
             .flatten();
-        let read = match self.read.selected() {
-            1 => Some(false),
-            2 => Some(true),
+        let read = match (self.scope.selected(), self.read.selected()) {
+            (1, _) | (_, 1) => Some(false),
+            (_, 2) => Some(true),
             _ => None,
         };
+        let scope = match self.scope.selected() {
+            1 => "inbox",
+            2 => "saved",
+            _ => "all",
+        }
+        .to_string();
+        self.read.set_sensitive(scope != "inbox");
+        let count = self.count.clone();
+        count.set_label("Searching…");
+        self.status.set_title("Searching cached articles…");
+        self.status.set_description(None);
+        self.status.set_visible(true);
+        self.scroller.set_visible(false);
         let text = self.query.text().to_string();
         let model = self.model.clone();
         let generation = self.generation.clone();
@@ -317,22 +332,39 @@ impl SearchState {
                 return;
             }
             let completed = request.clone();
-            let task = controller.search_entries(text, feed, category, read, move |result| {
-                if generation.get() != token {
-                    return;
-                }
-                completed.borrow_mut().take();
-                match result {
-                    Ok(entries) => {
-                        let empty = entries.is_empty();
-                        ui::inbox::replace(&model, entries);
-                        status.set_visible(empty);
-                        scroller.set_visible(!empty);
-                        scroller.vadjustment().set_value(0.0);
+            let task =
+                controller.search_entries(text, feed, category, read, scope, move |result| {
+                    if generation.get() != token {
+                        return;
                     }
-                    Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
-                }
-            });
+                    completed.borrow_mut().take();
+                    match result {
+                        Ok(mut entries) => {
+                            let capped = entries.len() > 500;
+                            entries.truncate(500);
+                            count.set_label(&if capped {
+                                "Showing the newest 500 matches · narrow your search".to_string()
+                            } else {
+                                format!("{} cached articles", entries.len())
+                            });
+                            let empty = entries.is_empty();
+                            ui::inbox::replace(&model, entries);
+                            status.set_title("No matching articles");
+                            status.set_description(Some(
+                                "Try a different search or reset the filters.",
+                            ));
+                            status.set_visible(empty);
+                            scroller.set_visible(!empty);
+                            scroller.vadjustment().set_value(0.0);
+                        }
+                        Err(error) => {
+                            count.set_label("Search could not finish");
+                            status.set_title("Unable to search");
+                            status.set_description(Some(&error.sync_message()));
+                            toast.add_toast(adw::Toast::new(&error.sync_message()));
+                        }
+                    }
+                });
             *request.borrow_mut() = Some(task);
         });
         *self.pending.borrow_mut() = Some(source);
@@ -3288,61 +3320,40 @@ fn install_reader_actions(
     window.add_action(&browser);
 }
 
-fn install_window_tools(
+fn install_article_search(
     window: &adw::ApplicationWindow,
     application: &adw::Application,
     builder: &gtk::Builder,
-    tools: WindowTools,
+    context: ReadContext,
 ) {
-    let WindowTools {
+    let ReadContext {
         controller,
         reader,
         current,
         inbox,
-        views,
         toast,
         undo,
-    } = tools;
-    let close = gio::SimpleAction::new("close", None);
-    close.connect_activate({
-        let window = window.downgrade();
-        move |_, _| {
-            if let Some(window) = window.upgrade() {
-                window.close();
-            }
-        }
-    });
-    window.add_action(&close);
-    update_shortcut_tooltips(window.upcast_ref());
-    let menu_button: gtk::MenuButton = builder.object("app_menu").expect("app_menu");
-    let menu = gio::Menu::new();
-    menu.append(Some("Mark All Read"), Some("win.mark-all-read"));
-    for (label, action) in [
-        ("Refresh Feeds", "win.refresh-feeds"),
-        ("Subscribe…", "win.subscribe"),
-        ("Preferences", "win.preferences"),
-        ("Keyboard Shortcuts", "app.show-shortcuts"),
-        ("About Brooklet", "win.about"),
-    ] {
-        menu.append(Some(label), Some(action));
-    }
-    menu_button.set_widget_name("app_menu");
-    menu_button.set_menu_model(Some(&menu));
-
-    let search_dialog = Rc::new(RefCell::new(None::<(adw::Dialog, gtk::SearchEntry)>));
+    } = context;
+    let destinations: adw::ViewStack = builder.object("destinations").expect("destinations");
+    let navigation: adw::NavigationView = builder
+        .object("library_navigation")
+        .expect("library_navigation");
+    let search_page = Rc::new(RefCell::new(
+        None::<(adw::NavigationPage, gtk::SearchEntry, SearchState)>,
+    ));
     window.connect_destroy({
-        let search_dialog = search_dialog.clone();
+        let search_page = search_page.clone();
         move |_| {
-            let open = search_dialog.borrow_mut().take();
-            if let Some((dialog, _)) = open {
-                dialog.close();
-            }
+            let open = search_page.borrow_mut().take();
+            drop(open);
         }
     });
     let search = gio::SimpleAction::new("search", None);
     search.connect_activate({
+        let destinations = destinations.clone();
+        let navigation = navigation.clone();
         let window = window.downgrade();
-        let search_dialog = search_dialog.clone();
+        let search_page = search_page.clone();
         let controller = controller.clone();
         let reader = reader.clone();
         let current = current.clone();
@@ -3353,23 +3364,25 @@ fn install_window_tools(
             let Some(window) = window.upgrade() else {
                 return;
             };
-            if let Some((_, query)) = search_dialog.borrow().as_ref() {
+            if reader.split.is_collapsed() {
+                reader.split.set_show_content(false);
+            }
+            if let Some((page, query, state)) = search_page.borrow().as_ref() {
+                destinations.set_visible_child_name("library");
+                if navigation.visible_page().as_ref() != Some(page) {
+                    navigation.push(page);
+                }
+                state.refresh();
                 query.grab_focus();
                 return;
             }
-            let dialog = adw::Dialog::new();
-            dialog.set_title("Search Library");
-            dialog.set_content_width(620);
-            dialog.set_content_height(600);
+            let toolbar = adw::ToolbarView::new();
+            toolbar.add_top_bar(&adw::HeaderBar::new());
+            let page = adw::NavigationPage::new(&toolbar, "Search Articles");
+            page.set_tag(Some("article-search"));
             let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
             let query = gtk::SearchEntry::new();
-            dialog.connect_closed({
-                let search_dialog = search_dialog.clone();
-                move |_| {
-                    search_dialog.borrow_mut().take();
-                }
-            });
-            *search_dialog.borrow_mut() = Some((dialog.clone(), query.clone()));
+            query.set_widget_name("article-search-query");
             query.set_placeholder_text(Some("Search title, feed, author and content"));
             query.set_margin_start(12);
             query.set_margin_end(12);
@@ -3381,6 +3394,15 @@ fn install_window_tools(
             filters.set_column_spacing(8);
             filters.set_margin_start(12);
             filters.set_margin_end(12);
+            let scope = gtk::DropDown::from_strings(&["Library", "Inbox", "Saved"]);
+            scope.set_widget_name("article-search-scope");
+            scope.set_tooltip_text(Some("Search scope"));
+            scope.set_selected(match destinations.visible_child_name().as_deref() {
+                Some("inbox") => 1,
+                Some("saved") => 2,
+                _ => 0,
+            });
+            filters.append(&scope);
             let feed = gtk::DropDown::from_strings(&["All feeds"]);
             feed.set_hexpand(true);
             feed.set_tooltip_text(Some("Narrow by feed"));
@@ -3393,11 +3415,24 @@ fn install_window_tools(
             read.set_tooltip_text(Some("Narrow by read status"));
             filters.append(&read);
             body.append(&filters);
+            let summary = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            summary.set_margin_start(12);
+            summary.set_margin_end(12);
+            let count = gtk::Label::new(None);
+            count.add_css_class("dim-label");
+            count.set_wrap(true);
+            count.set_xalign(0.0);
+            count.set_hexpand(true);
+            summary.append(&count);
+            let reset = gtk::Button::with_label("Reset");
+            summary.append(&reset);
+            body.append(&summary);
             let scroller = gtk::ScrolledWindow::new();
             scroller.set_vexpand(true);
             scroller.set_visible(false);
             let list =
                 gtk::ListView::new(None::<gtk::SelectionModel>, None::<gtk::ListItemFactory>);
+            list.set_widget_name("article-search-results");
             let model = ui::inbox::configure_with_action(&list, false, reader.active_id.clone());
             scroller.set_child(Some(&list));
             let status = adw::StatusPage::new();
@@ -3407,13 +3442,15 @@ fn install_window_tools(
             status.set_description(Some("Try a different search or filter."));
             body.append(&status);
             body.append(&scroller);
-            dialog.set_child(Some(&body));
+            toolbar.set_content(Some(&body));
             let state = SearchState {
                 controller: controller.clone(),
                 query: query.clone(),
                 feed: feed.clone(),
                 category: category.clone(),
                 read: read.clone(),
+                scope: scope.clone(),
+                count,
                 feed_ids: Rc::new(RefCell::new(vec![None])),
                 category_ids: Rc::new(RefCell::new(vec![None])),
                 model: model.clone(),
@@ -3436,6 +3473,29 @@ fn install_window_tools(
                 query.clone().upcast::<adw::glib::Object>().downgrade(),
                 signal,
             ));
+            let signal = scope.connect_selected_notify({
+                let state = state.clone();
+                move |_| state.refresh()
+            });
+            signals.borrow_mut().push((
+                scope.clone().upcast::<adw::glib::Object>().downgrade(),
+                signal,
+            ));
+            let signal = reset.connect_clicked({
+                let state = state.clone();
+                move |_| {
+                    state.query.set_text("");
+                    state.scope.set_selected(0);
+                    state.feed.set_selected(0);
+                    state.category.set_selected(0);
+                    state.read.set_selected(0);
+                    state.refresh();
+                    state.query.grab_focus();
+                }
+            });
+            signals
+                .borrow_mut()
+                .push((reset.upcast::<adw::glib::Object>().downgrade(), signal));
             let signal = feed.connect_selected_notify({
                 let state = state.clone();
                 move |_| state.refresh()
@@ -3470,7 +3530,7 @@ fn install_window_tools(
                 read.clone().upcast::<adw::glib::Object>().downgrade(),
                 signal,
             ));
-            dialog.connect_closed({
+            window.connect_destroy({
                 let signals = signals.clone();
                 let generation = state.generation.clone();
                 let pending = state.pending.clone();
@@ -3519,9 +3579,10 @@ fn install_window_tools(
                     }
                 }
             });
+            *search_page.borrow_mut() = Some((page.clone(), query.clone(), state.clone()));
             state.refresh();
             list.connect_activate({
-                let dialog = dialog.downgrade();
+                let page = page.downgrade();
                 let controller = controller.clone();
                 let reader = reader.downgrade();
                 let current = current.clone();
@@ -3529,8 +3590,8 @@ fn install_window_tools(
                 let toast = toast.downgrade();
                 let undo = undo.clone();
                 move |list, position| {
-                    let (Some(dialog), Some(reader), Some(inbox), Some(toast)) = (
-                        dialog.upgrade(),
+                    let (Some(_page), Some(reader), Some(inbox), Some(toast)) = (
+                        page.upgrade(),
                         reader.upgrade(),
                         inbox.upgrade(),
                         toast.upgrade(),
@@ -3539,7 +3600,7 @@ fn install_window_tools(
                     };
                     if let Some(entry) = ui::inbox::entry_at(&model, position) {
                         set_reader_origin(&reader, &model, list, entry.id, false);
-                        dialog.close();
+                        // Keep the search page and its list alive as the reader origin.
                         *current.borrow_mut() = Some(entry.clone());
                         open_article(&reader, &inbox, &entry);
                         if !entry.read {
@@ -3560,11 +3621,70 @@ fn install_window_tools(
                     }
                 }
             });
-            dialog.present(Some(&window));
+            destinations.set_visible_child_name("library");
+            navigation.add(&page);
+            navigation.push(&page);
             query.grab_focus();
         }
     });
     application.add_action(&search);
+}
+
+fn install_window_tools(
+    window: &adw::ApplicationWindow,
+    application: &adw::Application,
+    builder: &gtk::Builder,
+    tools: WindowTools,
+) {
+    let WindowTools {
+        controller,
+        reader,
+        current,
+        inbox,
+        views,
+        toast,
+        undo,
+    } = tools;
+    let close = gio::SimpleAction::new("close", None);
+    close.connect_activate({
+        let window = window.downgrade();
+        move |_, _| {
+            if let Some(window) = window.upgrade() {
+                window.close();
+            }
+        }
+    });
+    window.add_action(&close);
+    update_shortcut_tooltips(window.upcast_ref());
+    let menu_button: gtk::MenuButton = builder.object("app_menu").expect("app_menu");
+    let menu = gio::Menu::new();
+    menu.append(Some("Mark All Read"), Some("win.mark-all-read"));
+    for (label, action) in [
+        ("Search Articles", "app.search"),
+        ("Refresh Feeds", "win.refresh-feeds"),
+        ("Subscribe…", "win.subscribe"),
+        ("Preferences", "win.preferences"),
+        ("Keyboard Shortcuts", "app.show-shortcuts"),
+        ("About Brooklet", "win.about"),
+    ] {
+        menu.append(Some(label), Some(action));
+    }
+    menu_button.set_widget_name("app_menu");
+    menu_button.set_menu_model(Some(&menu));
+
+    install_article_search(
+        window,
+        application,
+        builder,
+        ReadContext {
+            controller: controller.clone(),
+            reader: reader.clone(),
+            current: current.clone(),
+            inbox: inbox.clone(),
+            toast: toast.clone(),
+            undo: undo.clone(),
+        },
+    );
 
     let refresh = gio::SimpleAction::new("refresh-feeds", None);
     refresh.connect_activate({
@@ -5043,7 +5163,102 @@ fn smoke_test_automatic_inbox(
 #[path = "reader_controls_smoke.rs"]
 mod reader_controls_smoke;
 
-fn smoke_test_reader_pipeline(keyboard_only: bool) -> Result<(), adw::glib::BoolError> {
+fn smoke_test_integrated_search(
+    window: &adw::ApplicationWindow,
+    builder: &gtk::Builder,
+    reader: &ReaderUi,
+    inbox: &InboxUi,
+) -> Result<(), adw::glib::BoolError> {
+    fn named(widget: &gtk::Widget, name: &str) -> Option<gtk::Widget> {
+        if widget.widget_name() == name {
+            return Some(widget.clone());
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            if let Some(found) = named(&widget, name) {
+                return Some(found);
+            }
+            child = widget.next_sibling();
+        }
+        None
+    }
+    fn wait_for(condition: impl Fn() -> bool) -> Result<(), adw::glib::BoolError> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !condition() {
+            while adw::glib::MainContext::default().iteration(false) {}
+            if std::time::Instant::now() > deadline {
+                return Err(adw::glib::bool_error!("Search results timed out"));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
+    }
+    let application = adw::Application::builder()
+        .application_id("com.nedrichards.brooklet.SearchTest")
+        .build();
+    install_article_search(
+        window,
+        &application,
+        builder,
+        ReadContext {
+            controller: reader.controller.clone(),
+            reader: reader.clone(),
+            inbox: inbox.clone(),
+            current: Rc::new(RefCell::new(None)),
+            toast: builder.object("toast_overlay").unwrap(),
+            undo: Rc::new(RefCell::new(Vec::new())),
+        },
+    );
+    let destinations: adw::ViewStack = builder.object("destinations").unwrap();
+    destinations.set_visible_child_name("saved");
+    let action = application.lookup_action("search").unwrap();
+    action.activate(None);
+    let navigation: adw::NavigationView = builder.object("library_navigation").unwrap();
+    let page = navigation.visible_page().unwrap();
+    if page.tag().as_deref() != Some("article-search")
+        || destinations.visible_child_name().as_deref() != Some("library")
+    {
+        return Err(adw::glib::bool_error!(
+            "Search was not integrated into Library navigation"
+        ));
+    }
+    let query = named(page.upcast_ref(), "article-search-query")
+        .unwrap()
+        .downcast::<gtk::SearchEntry>()
+        .unwrap();
+    let scope = named(page.upcast_ref(), "article-search-scope")
+        .unwrap()
+        .downcast::<gtk::DropDown>()
+        .unwrap();
+    let list = named(page.upcast_ref(), "article-search-results")
+        .unwrap()
+        .downcast::<gtk::ListView>()
+        .unwrap();
+    if scope.selected() != 2 {
+        return Err(adw::glib::bool_error!(
+            "Saved search lost its initial scope"
+        ));
+    }
+    query.set_text("Synthetic");
+    scope.set_selected(0);
+    wait_for(|| list.model().is_some_and(|model| model.n_items() > 0) && list.is_mapped())?;
+    if !navigation.pop() {
+        return Err(adw::glib::bool_error!("Search Back failed"));
+    }
+    action.activate(None);
+    if navigation.visible_page().as_ref() != Some(&page) || query.text() != "Synthetic" {
+        return Err(adw::glib::bool_error!("Search query was lost after Back"));
+    }
+    wait_for(|| list.is_mapped())?;
+    navigation.pop();
+    application.remove_action("search");
+    Ok(())
+}
+
+fn smoke_test_reader_pipeline(
+    keyboard_only: bool,
+    search_only: bool,
+) -> Result<(), adw::glib::BoolError> {
     use brooklet::services::traits::Repository;
     let repository = Arc::new(
         SqliteRepository::open_in_memory().map_err(|error| adw::glib::bool_error!("{error}"))?,
@@ -5192,6 +5407,17 @@ fn smoke_test_reader_pipeline(keyboard_only: bool) -> Result<(), adw::glib::Bool
         origin_inbox: Rc::new(Cell::new(false)),
         source_list: Rc::new(RefCell::new(None)),
     };
+    if search_only {
+        window.present();
+        let result = smoke_test_integrated_search(&window, &builder, &reader, &inbox);
+        window.destroy();
+        drop(reader);
+        drop(inbox);
+        drop(window);
+        drop(builder);
+        let _ = std::fs::remove_dir_all(cache_directory);
+        return result;
+    }
     install_reader_position_tracking(&reader);
     smoke_test_article_keyboard(
         &window,
@@ -5209,6 +5435,7 @@ fn smoke_test_reader_pipeline(keyboard_only: bool) -> Result<(), adw::glib::Bool
         &repository,
         &replacement,
     )?;
+    smoke_test_integrated_search(&window, &builder, &reader, &inbox)?;
     if keyboard_only {
         window.destroy();
         drop(reader);
@@ -5305,16 +5532,22 @@ fn smoke_test_reader_pipeline(keyboard_only: bool) -> Result<(), adw::glib::Bool
     result
 }
 
+pub fn search_test() -> Result<(), adw::glib::BoolError> {
+    adw::init()?;
+    register_resources();
+    smoke_test_reader_pipeline(false, true)
+}
+
 pub fn reader_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
     register_resources();
-    smoke_test_reader_pipeline(false)
+    smoke_test_reader_pipeline(false, false)
 }
 
 pub fn keyboard_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
     register_resources();
-    smoke_test_reader_pipeline(true)?;
+    smoke_test_reader_pipeline(true, false)?;
     ui::library::smoke_test()
 }
 
@@ -5403,7 +5636,7 @@ pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
     ui::karakeep::smoke_test()?;
     ui::sync_health::smoke_test()?;
     ui::library::smoke_test()?;
-    smoke_test_reader_pipeline(false)
+    smoke_test_reader_pipeline(false, false)
 }
 
 fn register_resources() {

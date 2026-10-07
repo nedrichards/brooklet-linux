@@ -22,7 +22,7 @@ marks an article read.
 | Navigation | Escape / Alt+Left | Dismiss popup/dialog, return from reader, or go back within Library |
 | Navigation | F6 / Shift+F6 | Switch focus between list and reader in wide layouts |
 | Navigation | Ctrl+1 / Ctrl+2 / Ctrl+3 | Show Inbox / Saved / Library |
-| Application | Ctrl+F | Search Library |
+| Application | Ctrl+F | Open the integrated article search page |
 | Application | Ctrl+R | Sync articles |
 | Application | Ctrl+, | Preferences |
 | Application | F10 | Main menu |

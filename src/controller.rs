@@ -227,13 +227,14 @@ impl AppController {
         feed_id: Option<i64>,
         category_id: Option<i64>,
         read: Option<bool>,
+        scope: String,
         callback: impl FnOnce(Result<Vec<Entry>, BrookletError>) + 'static,
     ) -> tokio::task::AbortHandle {
         let service = self.sync_service.clone();
         self.dispatch_abortable(
             async move {
                 service
-                    .search_entries(&query, feed_id, category_id, read)
+                    .search_entries(&query, feed_id, category_id, read, &scope)
                     .await
             },
             callback,
