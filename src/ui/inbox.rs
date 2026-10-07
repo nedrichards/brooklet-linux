@@ -148,7 +148,10 @@ pub fn configure_with_action(
         title.set_wrap(true);
         title.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         title.set_lines(2);
-        title.add_css_class("heading");
+        // A line limit only constrains wrapped labels with ellipsization.
+        // Bound shaping/layout for long titles, including search results.
+        title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        title.add_css_class("article-title");
         content.append(&title);
 
         let metadata = gtk::Label::new(None);
@@ -194,6 +197,21 @@ pub fn configure_with_action(
             .and_downcast::<gtk::Label>()
             .expect("first row child must be the title label");
         title.set_label(&entry.entry().title);
+        // Apply the weight to the text itself so the read-state distinction
+        // survives theme rules in both light and dark mode. Always replace the
+        // attributes: recycled rows may previously have held the other state.
+        let attributes = gtk::pango::AttrList::new();
+        attributes.insert(gtk::pango::AttrInt::new_weight(if entry.entry().read {
+            gtk::pango::Weight::Normal
+        } else {
+            gtk::pango::Weight::Bold
+        }));
+        title.set_attributes(Some(&attributes));
+        if entry.entry().read {
+            title.remove_css_class("unread");
+        } else {
+            title.add_css_class("unread");
+        }
         set_open_marker(&row, entry.entry(), open_id.get());
         if let Some(read_toggle) = content.next_sibling().and_downcast::<gtk::Button>() {
             let is_read = entry.entry().read;

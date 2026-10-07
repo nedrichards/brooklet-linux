@@ -53,3 +53,11 @@ listview.article-list > row:focus-visible {
   background: color-mix(in srgb, currentColor 6%, transparent);
   border-radius: 4px;
 }
+
+.article-title {
+  font-weight: normal;
+}
+
+.article-title.unread {
+  font-weight: bold;
+}

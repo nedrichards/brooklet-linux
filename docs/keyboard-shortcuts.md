@@ -44,6 +44,10 @@ Subscribe, Refresh Feeds, Mark All Read and Karakeep delivery are reachable
 through keyboard-operated menus. Shortcuts and their help entries are defined
 together in `src/keyboard.rs`; button hints use the same definitions.
 
+Double-click or double-tap the Inbox navigation icon to scroll Inbox to the
+top. Single presses keep normal destination navigation. Read article titles
+use normal weight; unread titles use bold weight across article lists.
+
 ## Regression checks
 
 `brooklet --keyboard-test` uses a temporary database with synthetic articles;

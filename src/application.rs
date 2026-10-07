@@ -265,7 +265,6 @@ struct SearchState {
     category: gtk::DropDown,
     read: gtk::DropDown,
     scope: gtk::DropDown,
-    count: gtk::Label,
     feed_ids: Rc<RefCell<Vec<Option<i64>>>>,
     category_ids: Rc<RefCell<Vec<Option<i64>>>>,
     model: ui::inbox::InboxModel,
@@ -311,12 +310,14 @@ impl SearchState {
         }
         .to_string();
         self.read.set_sensitive(scope != "inbox");
-        let count = self.count.clone();
-        count.set_label("Searching…");
         self.status.set_title("Searching cached articles…");
         self.status.set_description(None);
-        self.status.set_visible(true);
-        self.scroller.set_visible(false);
+        // Keep the mapped list alive while the next query runs. Hiding it
+        // discards its layout and flashes the loading page on every keystroke.
+        if self.model.store.n_items() == 0 {
+            self.status.set_visible(true);
+            self.scroller.set_visible(false);
+        }
         let text = self.query.text().to_string();
         let model = self.model.clone();
         let generation = self.generation.clone();
@@ -326,7 +327,7 @@ impl SearchState {
         let controller = self.controller.clone();
         let pending = self.pending.clone();
         let request = self.request.clone();
-        let source = adw::glib::timeout_add_local_once(Duration::from_millis(180), move || {
+        let source = adw::glib::timeout_add_local_once(Duration::from_millis(60), move || {
             pending.borrow_mut().take();
             if generation.get() != token {
                 return;
@@ -340,27 +341,22 @@ impl SearchState {
                     completed.borrow_mut().take();
                     match result {
                         Ok(mut entries) => {
-                            let capped = entries.len() > 500;
                             entries.truncate(500);
-                            count.set_label(&if capped {
-                                "Showing the newest 500 matches · narrow your search".to_string()
-                            } else {
-                                format!("{} cached articles", entries.len())
-                            });
                             let empty = entries.is_empty();
                             ui::inbox::replace(&model, entries);
                             status.set_title("No matching articles");
                             status.set_description(Some(
-                                "Try a different search or reset the filters.",
+                                "Try a different search or clear the filters.",
                             ));
                             status.set_visible(empty);
                             scroller.set_visible(!empty);
                             scroller.vadjustment().set_value(0.0);
                         }
                         Err(error) => {
-                            count.set_label("Search could not finish");
                             status.set_title("Unable to search");
                             status.set_description(Some(&error.sync_message()));
+                            status.set_visible(true);
+                            scroller.set_visible(false);
                             toast.add_toast(adw::Toast::new(&error.sync_message()));
                         }
                     }
@@ -831,6 +827,10 @@ impl BrookletApplication {
             install_window_tools(&window, application, &builder, tools);
             let destinations: adw::ViewStack =
                 builder.object("destinations").expect("destinations");
+            let switcher: adw::ViewSwitcherBar = builder
+                .object("destination_switcher")
+                .expect("destination_switcher");
+            install_inbox_top_shortcut(&switcher, &inbox_ui.scroller);
             for navigation in [
                 destinations.clone().upcast::<adw::glib::Object>(),
                 library_navigation.clone().upcast::<adw::glib::Object>(),
@@ -3382,6 +3382,9 @@ fn install_article_search(
             page.set_tag(Some("article-search"));
             let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
             let query = gtk::SearchEntry::new();
+            // Debounce once in SearchState, with immediate cancellation of
+            // superseded requests as soon as the editable text changes.
+            query.set_search_delay(0);
             query.set_widget_name("article-search-query");
             query.set_placeholder_text(Some("Search title, feed, author and content"));
             query.set_margin_start(12);
@@ -3415,18 +3418,6 @@ fn install_article_search(
             read.set_tooltip_text(Some("Narrow by read status"));
             filters.append(&read);
             body.append(&filters);
-            let summary = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            summary.set_margin_start(12);
-            summary.set_margin_end(12);
-            let count = gtk::Label::new(None);
-            count.add_css_class("dim-label");
-            count.set_wrap(true);
-            count.set_xalign(0.0);
-            count.set_hexpand(true);
-            summary.append(&count);
-            let reset = gtk::Button::with_label("Reset");
-            summary.append(&reset);
-            body.append(&summary);
             let scroller = gtk::ScrolledWindow::new();
             scroller.set_vexpand(true);
             scroller.set_visible(false);
@@ -3450,7 +3441,6 @@ fn install_article_search(
                 category: category.clone(),
                 read: read.clone(),
                 scope: scope.clone(),
-                count,
                 feed_ids: Rc::new(RefCell::new(vec![None])),
                 category_ids: Rc::new(RefCell::new(vec![None])),
                 model: model.clone(),
@@ -3481,21 +3471,6 @@ fn install_article_search(
                 scope.clone().upcast::<adw::glib::Object>().downgrade(),
                 signal,
             ));
-            let signal = reset.connect_clicked({
-                let state = state.clone();
-                move |_| {
-                    state.query.set_text("");
-                    state.scope.set_selected(0);
-                    state.feed.set_selected(0);
-                    state.category.set_selected(0);
-                    state.read.set_selected(0);
-                    state.refresh();
-                    state.query.grab_focus();
-                }
-            });
-            signals
-                .borrow_mut()
-                .push((reset.upcast::<adw::glib::Object>().downgrade(), signal));
             let signal = feed.connect_selected_notify({
                 let state = state.clone();
                 move |_| state.refresh()
@@ -4211,6 +4186,55 @@ fn install_window_tools(
     window.add_action(&about);
 }
 
+// Capture the second press before the switcher's button handles it. Picking
+// the actual button keeps the shortcut correct across resizing and RTL layouts.
+fn install_inbox_top_shortcut(switcher: &adw::ViewSwitcherBar, scroller: &gtk::ScrolledWindow) {
+    fn has_inbox_icon(widget: &gtk::Widget) -> bool {
+        if let Some(image) = widget.downcast_ref::<gtk::Image>()
+            && image.icon_name().as_deref() == Some("mail-unread-symbolic")
+        {
+            return true;
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            if has_inbox_icon(&widget) {
+                return true;
+            }
+            child = widget.next_sibling();
+        }
+        false
+    }
+
+    let gesture = gtk::GestureClick::builder()
+        .button(1)
+        .propagation_phase(gtk::PropagationPhase::Capture)
+        .build();
+    let weak_switcher = switcher.downgrade();
+    let weak_scroller = scroller.downgrade();
+    gesture.connect_pressed(move |gesture, presses, x, y| {
+        if presses != 2 {
+            return;
+        }
+        let (Some(switcher), Some(scroller)) = (weak_switcher.upgrade(), weak_scroller.upgrade())
+        else {
+            return;
+        };
+        let mut picked = switcher.pick(x, y, gtk::PickFlags::DEFAULT);
+        while let Some(widget) = picked {
+            if widget.is::<gtk::ToggleButton>() {
+                if has_inbox_icon(&widget) {
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                    let adjustment = scroller.vadjustment();
+                    adjustment.set_value(adjustment.lower());
+                }
+                break;
+            }
+            picked = widget.parent();
+        }
+    });
+    switcher.add_controller(gesture);
+}
+
 fn show_account(inbox_status: &adw::StatusPage, setup_button: &gtk::Button) {
     inbox_status.set_description(Some(
         "Your account is connected. Run a sync to fetch your Inbox.",
@@ -4304,6 +4328,59 @@ fn smoke_test_image_anchor() -> Result<(), adw::glib::BoolError> {
     } else {
         Ok(())
     }
+}
+
+fn smoke_test_inbox_top_shortcut(builder: &gtk::Builder) -> Result<(), adw::glib::BoolError> {
+    fn buttons(widget: &gtk::Widget, result: &mut Vec<gtk::ToggleButton>) {
+        if let Some(button) = widget.downcast_ref::<gtk::ToggleButton>() {
+            result.push(button.clone());
+            return;
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            buttons(&widget, result);
+            child = widget.next_sibling();
+        }
+    }
+    let switcher: adw::ViewSwitcherBar = builder.object("destination_switcher").unwrap();
+    // Use an isolated adjustment to verify the real switcher hit targets without
+    // disturbing the article-keyboard fixture's scroll state.
+    let scroller = gtk::ScrolledWindow::new();
+    install_inbox_top_shortcut(&switcher, &scroller);
+    let controllers = switcher.observe_controllers();
+    let gesture = (0..controllers.n_items())
+        .filter_map(|index| controllers.item(index).and_downcast::<gtk::GestureClick>())
+        .find(|gesture| gesture.propagation_phase() == gtk::PropagationPhase::Capture)
+        .ok_or_else(|| adw::glib::bool_error!("Inbox shortcut gesture missing"))?;
+    let mut targets = Vec::new();
+    buttons(switcher.upcast_ref(), &mut targets);
+    if targets.len() != 3 {
+        return Err(adw::glib::bool_error!("Expected three destination buttons"));
+    }
+    let adjustment = scroller.vadjustment();
+    for (index, button) in targets.iter().enumerate() {
+        let bounds = button
+            .compute_bounds(&switcher)
+            .ok_or_else(|| adw::glib::bool_error!("Destination button has no bounds"))?;
+        let x = f64::from(bounds.x() + bounds.width() / 2.0);
+        let y = f64::from(bounds.y() + bounds.height() / 2.0);
+        adjustment.configure(500.0, 0.0, 1000.0, 1.0, 100.0, 100.0);
+        gesture.emit_by_name::<()>("pressed", &[&1_i32, &x, &y]);
+        if adjustment.value() != 500.0 {
+            return Err(adw::glib::bool_error!(
+                "Single destination press moved Inbox"
+            ));
+        }
+        gesture.emit_by_name::<()>("pressed", &[&2_i32, &x, &y]);
+        let expected = if index == 0 { 0.0 } else { 500.0 };
+        if adjustment.value() != expected {
+            return Err(adw::glib::bool_error!(
+                "Inbox double press targeted wrong destination"
+            ));
+        }
+    }
+    switcher.remove_controller(&gesture);
+    Ok(())
 }
 
 /// Exercise the installed window capture controller, not just cursor arithmetic.
@@ -4401,6 +4478,7 @@ fn smoke_test_article_keyboard(
     header.set_sensitive(true);
     window.present();
     layout(window);
+    smoke_test_inbox_top_shortcut(builder)?;
     if !setup.grab_focus() {
         return Err(adw::glib::bool_error!(
             "Setup focus fixture was unavailable"
@@ -5242,6 +5320,15 @@ fn smoke_test_integrated_search(
     query.set_text("Synthetic");
     scope.set_selected(0);
     wait_for(|| list.model().is_some_and(|model| model.n_items() > 0) && list.is_mapped())?;
+    // Filter changes must leave existing results mapped during debounce and
+    // backend work, rather than tearing down the list's layout.
+    scope.set_selected(1);
+    if !list.is_mapped() {
+        return Err(adw::glib::bool_error!(
+            "Search hid existing results while updating filters"
+        ));
+    }
+    scope.set_selected(0);
     if !navigation.pop() {
         return Err(adw::glib::bool_error!("Search Back failed"));
     }
