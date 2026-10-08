@@ -463,15 +463,10 @@ async fn deletion_marker_upgrade_preserves_existing_cache_and_pending_work() {
     drop(repo);
     // Recreate the previous released schema with its existing rows and queue.
     let connection = rusqlite::Connection::open(&path).unwrap();
-    let version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap();
     connection
-        .execute_batch("ALTER TABLE entries DROP COLUMN remote_removed; ALTER TABLE feeds DROP COLUMN parsing_error_message; ALTER TABLE feeds DROP COLUMN parsing_error_count; ALTER TABLE feeds DROP COLUMN disabled")
+        .execute_batch("DROP INDEX entries_feed_order; ALTER TABLE entries DROP COLUMN remote_removed; ALTER TABLE feeds DROP COLUMN parsing_error_message; ALTER TABLE feeds DROP COLUMN parsing_error_count; ALTER TABLE feeds DROP COLUMN disabled")
         .unwrap();
-    connection
-        .pragma_update(None, "user_version", version - 2)
-        .unwrap();
+    connection.pragma_update(None, "user_version", 6).unwrap();
     drop(connection);
     let upgraded = SqliteRepository::open(&path).unwrap();
     assert_eq!(upgraded.cached_entry(1, 1).await.unwrap().unwrap(), before);
@@ -550,13 +545,8 @@ async fn feed_health_survives_restart_failed_pull_and_clears_on_recovery() {
     drop(repo);
     // Upgrade the prior feed schema without disturbing articles or intentions.
     let connection = rusqlite::Connection::open(&path).unwrap();
-    let version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap();
-    connection.execute_batch("ALTER TABLE feeds DROP COLUMN parsing_error_message; ALTER TABLE feeds DROP COLUMN parsing_error_count; ALTER TABLE feeds DROP COLUMN disabled").unwrap();
-    connection
-        .pragma_update(None, "user_version", version - 1)
-        .unwrap();
+    connection.execute_batch("DROP INDEX entries_feed_order; ALTER TABLE feeds DROP COLUMN parsing_error_message; ALTER TABLE feeds DROP COLUMN parsing_error_count; ALTER TABLE feeds DROP COLUMN disabled").unwrap();
+    connection.pragma_update(None, "user_version", 7).unwrap();
     drop(connection);
     let upgraded = SqliteRepository::open(&path).unwrap();
     assert_eq!(upgraded.feeds_cached(1, None).await.unwrap(), healthy);

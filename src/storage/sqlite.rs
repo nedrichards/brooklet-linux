@@ -120,6 +120,7 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE sync_state ADD COLUMN delivery_error TEXT;",
     "ALTER TABLE entries ADD COLUMN remote_removed INTEGER NOT NULL DEFAULT 0;",
     "ALTER TABLE feeds ADD COLUMN parsing_error_message TEXT NOT NULL DEFAULT ''; ALTER TABLE feeds ADD COLUMN parsing_error_count INTEGER NOT NULL DEFAULT 0; ALTER TABLE feeds ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0;",
+    "DROP INDEX entries_inbox; CREATE INDEX entries_inbox ON entries(account_id,read,published_at_ms DESC,id DESC); DROP INDEX entries_saved; CREATE INDEX entries_saved ON entries(account_id,published_at_ms DESC,id DESC) WHERE starred=1; CREATE INDEX entries_feed_order ON entries(account_id,feed_id,published_at_ms DESC,id DESC);",
 ];
 
 pub struct SqliteRepository {
@@ -161,6 +162,7 @@ impl SqliteRepository {
             connection.pragma_update(None, "journal_mode", "WAL")?;
         }
         migrate(&mut connection)?;
+        connection.set_prepared_statement_cache_capacity(32);
         Ok(Self {
             store: Arc::new(SqliteStore {
                 connection: Mutex::new(connection),
@@ -213,8 +215,13 @@ const ENTRY_SELECT: &str = r#"SELECT e.id, e.account_id, e.feed_id, e.feed_title
     FROM entries e
     LEFT JOIN karakeep_deliveries k ON k.account_id=e.account_id AND k.entry_id=e.id"#;
 
-fn summary_select() -> String {
-    ENTRY_SELECT.replace("e.html,", "'' AS html,")
+fn summary_select() -> &'static str {
+    // Share the projection text as well as its prepared statement; never read HTML for lists.
+    r#"SELECT e.id, e.account_id, e.feed_id, e.feed_title,
+    e.category_title, e.title, e.url, e.author, e.published_at_ms, '' AS html,
+    e.read, e.starred, e.reading_minutes, k.state, k.last_error, e.content_revision
+    FROM entries e
+    LEFT JOIN karakeep_deliveries k ON k.account_id=e.account_id AND k.entry_id=e.id"#
 }
 
 fn content_revision(html: &str) -> i64 {
@@ -254,11 +261,8 @@ impl SqliteStore {
     fn cached_entry(&self, account_id: i64, entry_id: i64) -> Result<Option<Entry>, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         connection
-            .query_row(
-                &format!("{ENTRY_SELECT} WHERE e.account_id=?1 AND e.id=?2"),
-                params![account_id, entry_id],
-                read_entry,
-            )
+            .prepare_cached(&format!("{ENTRY_SELECT} WHERE e.account_id=?1 AND e.id=?2"))?
+            .query_row(params![account_id, entry_id], read_entry)
             .optional()
             .map_err(Into::into)
     }
@@ -266,18 +270,17 @@ impl SqliteStore {
     fn account(&self) -> Result<Option<Account>, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         connection
-            .query_row(
+            .prepare_cached(
                 "SELECT id, server_url, username, server_version FROM accounts WHERE id = 1",
-                [],
-                |row| {
-                    Ok(Account {
-                        id: row.get(0)?,
-                        server_url: row.get(1)?,
-                        username: row.get(2)?,
-                        server_version: row.get(3)?,
-                    })
-                },
-            )
+            )?
+            .query_row([], |row| {
+                Ok(Account {
+                    id: row.get(0)?,
+                    server_url: row.get(1)?,
+                    username: row.get(2)?,
+                    server_version: row.get(3)?,
+                })
+            })
             .optional()
             .map_err(Into::into)
     }
@@ -332,7 +335,7 @@ impl SqliteStore {
             [account_id],
         )?;
         {
-            let mut statement = transaction.prepare(
+            let mut statement = transaction.prepare_cached(
                 r#"INSERT INTO entries (
                        account_id, id, feed_id, feed_title, category_title, title, url,
                        author, published_at_ms, html, read, starred, reading_minutes, content_revision
@@ -389,7 +392,7 @@ impl SqliteStore {
             "{} WHERE e.account_id=?1 AND e.read=0 ORDER BY e.published_at_ms DESC, e.id DESC",
             summary_select()
         );
-        let mut statement = connection.prepare(&sql)?;
+        let mut statement = connection.prepare_cached(&sql)?;
         statement
             .query_map([account_id], read_entry)?
             .collect::<Result<Vec<_>, _>>()
@@ -415,7 +418,7 @@ impl SqliteStore {
             summary_select()
         );
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
-        let mut statement = connection.prepare(&sql)?;
+        let mut statement = connection.prepare_cached(&sql)?;
         let entries = if let Some(feed_id) = feed_id {
             statement
                 .query_map(params![account_id, feed_id], read_entry)?
@@ -500,7 +503,7 @@ impl SqliteStore {
             summary_select()
         );
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
-        let mut statement = connection.prepare(&sql)?;
+        let mut statement = connection.prepare_cached(&sql)?;
         statement
             .query_map(
                 params![
@@ -547,7 +550,7 @@ impl SqliteStore {
 
     fn pending_mutations(&self, account_id: i64) -> Result<Vec<PendingMutation>, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
-        let mut statement = connection.prepare(
+        let mut statement = connection.prepare_cached(
             r#"SELECT account_id, entry_id, field, desired, updated_at_ms
                FROM pending_mutations
                WHERE account_id = ?1
@@ -620,8 +623,8 @@ impl SqliteStore {
         let mut connection = self.connection.lock().expect("SQLite mutex poisoned");
         let transaction = connection.transaction()?;
         {
-            let mut update = transaction.prepare("UPDATE entries SET read=?3,last_opened_at_ms=CASE WHEN ?3 THEN unixepoch('subsec')*1000 ELSE last_opened_at_ms END WHERE account_id=?1 AND id=?2")?;
-            let mut pending = transaction.prepare("INSERT INTO pending_mutations(account_id,entry_id,field,desired,updated_at_ms) VALUES(?1,?2,'read',?3,CAST(unixepoch('subsec')*1000 AS INTEGER)) ON CONFLICT(account_id,entry_id,field) DO UPDATE SET desired=excluded.desired,updated_at_ms=max(pending_mutations.updated_at_ms+1,excluded.updated_at_ms)")?;
+            let mut update = transaction.prepare_cached("UPDATE entries SET read=?3,last_opened_at_ms=CASE WHEN ?3 THEN unixepoch('subsec')*1000 ELSE last_opened_at_ms END WHERE account_id=?1 AND id=?2")?;
+            let mut pending = transaction.prepare_cached("INSERT INTO pending_mutations(account_id,entry_id,field,desired,updated_at_ms) VALUES(?1,?2,'read',?3,CAST(unixepoch('subsec')*1000 AS INTEGER)) ON CONFLICT(account_id,entry_id,field) DO UPDATE SET desired=excluded.desired,updated_at_ms=max(pending_mutations.updated_at_ms+1,excluded.updated_at_ms)")?;
             for id in entry_ids {
                 if update.execute(params![account_id, id, read])? > 0 {
                     pending.execute(params![account_id, id, read])?;
@@ -635,7 +638,7 @@ impl SqliteStore {
     fn categories_cached(&self, account_id: i64) -> Result<Vec<Category>, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
         let mut statement = connection
-            .prepare("SELECT id,title FROM categories WHERE account_id=?1 ORDER BY title")?;
+            .prepare_cached("SELECT id,title FROM categories WHERE account_id=?1 ORDER BY title")?;
         statement
             .query_map([account_id], |row| {
                 Ok(Category {
@@ -653,7 +656,7 @@ impl SqliteStore {
         category_id: Option<i64>,
     ) -> Result<Vec<Feed>, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
-        let mut statement = connection.prepare("SELECT id,category_id,title,site_url,feed_url,parsing_error_message,parsing_error_count,disabled FROM feeds WHERE account_id=?1 AND (?2 IS NULL OR category_id=?2) ORDER BY title")?;
+        let mut statement = connection.prepare_cached("SELECT id,category_id,title,site_url,feed_url,parsing_error_message,parsing_error_count,disabled FROM feeds WHERE account_id=?1 AND (?2 IS NULL OR category_id=?2) ORDER BY title")?;
         statement
             .query_map(params![account_id, category_id], |row| {
                 Ok(Feed {
@@ -683,11 +686,11 @@ impl SqliteStore {
         transaction.execute("DELETE FROM categories WHERE account_id=?1", [account_id])?;
         {
             let mut category_stmt = transaction
-                .prepare("INSERT INTO categories(account_id,id,title) VALUES(?1,?2,?3)")?;
+                .prepare_cached("INSERT INTO categories(account_id,id,title) VALUES(?1,?2,?3)")?;
             for category in categories {
                 category_stmt.execute(params![account_id, category.id, category.title])?;
             }
-            let mut feed_stmt = transaction.prepare("INSERT INTO feeds(account_id,id,category_id,title,site_url,feed_url,parsing_error_message,parsing_error_count,disabled) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)")?;
+            let mut feed_stmt = transaction.prepare_cached("INSERT INTO feeds(account_id,id,category_id,title,site_url,feed_url,parsing_error_message,parsing_error_count,disabled) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)")?;
             for feed in feeds {
                 feed_stmt.execute(params![
                     account_id,
@@ -728,7 +731,7 @@ impl SqliteStore {
         let mut connection = self.connection.lock().expect("SQLite mutex poisoned");
         let transaction = connection.transaction()?;
         {
-            let mut remove = transaction.prepare("DELETE FROM entries WHERE account_id=?1 AND id=?2 AND NOT EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id) AND NOT EXISTS(SELECT 1 FROM karakeep_deliveries k WHERE k.account_id=entries.account_id AND k.entry_id=entries.id AND k.state!='saved')")?;
+            let mut remove = transaction.prepare_cached("DELETE FROM entries WHERE account_id=?1 AND id=?2 AND NOT EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id) AND NOT EXISTS(SELECT 1 FROM karakeep_deliveries k WHERE k.account_id=entries.account_id AND k.entry_id=entries.id AND k.state!='saved')")?;
             for id in removed_ids {
                 transaction.execute(
                     "UPDATE entries SET remote_removed=1 WHERE account_id=?1 AND id=?2",
@@ -736,7 +739,15 @@ impl SqliteStore {
                 )?;
                 remove.execute(params![account_id, id])?;
             }
-            let mut merge = transaction.prepare("INSERT INTO entries(account_id,id,feed_id,feed_title,category_title,title,url,author,published_at_ms,html,read,starred,reading_minutes,content_revision) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) ON CONFLICT(account_id,id) DO UPDATE SET remote_removed=0,feed_id=excluded.feed_id,feed_title=excluded.feed_title,category_title=excluded.category_title,title=excluded.title,url=excluded.url,author=excluded.author,published_at_ms=excluded.published_at_ms,html=excluded.html,content_revision=excluded.content_revision,read=CASE WHEN EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id AND m.field='read') THEN entries.read ELSE excluded.read END,starred=CASE WHEN EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id AND m.field='starred') THEN entries.starred ELSE excluded.starred END,reading_minutes=excluded.reading_minutes")?;
+            // Compare the effective row before writing. Pending local read/star overrides
+            // remain authoritative, and an unchanged response must not churn the WAL.
+            let mut merge = transaction.prepare_cached(r#"INSERT INTO entries(account_id,id,feed_id,feed_title,category_title,title,url,author,published_at_ms,html,read,starred,reading_minutes,content_revision) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+                ON CONFLICT(account_id,id)
+                DO UPDATE SET remote_removed=0,feed_id=excluded.feed_id,feed_title=excluded.feed_title,category_title=excluded.category_title,title=excluded.title,url=excluded.url,author=excluded.author,published_at_ms=excluded.published_at_ms,html=excluded.html,content_revision=excluded.content_revision,read=CASE WHEN EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id AND m.field='read') THEN entries.read ELSE excluded.read END,starred=CASE WHEN EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id AND m.field='starred') THEN entries.starred ELSE excluded.starred END,reading_minutes=excluded.reading_minutes
+                WHERE entries.remote_removed!=0
+                OR (entries.feed_id,entries.feed_title,entries.category_title,entries.title,entries.url,entries.author,entries.published_at_ms,entries.html,entries.content_revision,entries.reading_minutes) IS NOT (excluded.feed_id,excluded.feed_title,excluded.category_title,excluded.title,excluded.url,excluded.author,excluded.published_at_ms,excluded.html,excluded.content_revision,excluded.reading_minutes)
+                OR (entries.read IS NOT excluded.read AND NOT EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id AND m.field='read'))
+                OR (entries.starred IS NOT excluded.starred AND NOT EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id AND m.field='starred'))"#)?;
             for entry in entries {
                 merge.execute(params![
                     entry.account_id,
@@ -884,7 +895,7 @@ impl SqliteStore {
         queued_only: bool,
     ) -> Result<Vec<KarakeepDelivery>, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
-        let mut statement = connection.prepare("SELECT id,account_id,entry_id,canonical_url,title,route,state,last_error FROM karakeep_deliveries WHERE account_id=?1 AND state!='saved' AND (?2=0 OR state='queued') ORDER BY id")?;
+        let mut statement = connection.prepare_cached("SELECT id,account_id,entry_id,canonical_url,title,route,state,last_error FROM karakeep_deliveries WHERE account_id=?1 AND state!='saved' AND (?2=0 OR state='queued') ORDER BY id")?;
         statement
             .query_map(params![account_id, queued_only], |row| {
                 let route: String = row.get(5)?;
@@ -1052,8 +1063,8 @@ impl Repository for SqliteRepository {
     async fn cached_entry_ids(&self, account_id: i64) -> Result<Vec<EntryId>, BrookletError> {
         self.run(move |store| {
             let connection = store.connection.lock().expect("SQLite mutex poisoned");
-            let mut statement =
-                connection.prepare("SELECT id FROM entries WHERE account_id=?1 ORDER BY id")?;
+            let mut statement = connection
+                .prepare_cached("SELECT id FROM entries WHERE account_id=?1 ORDER BY id")?;
             Ok(statement
                 .query_map([account_id], |row| row.get(0))?
                 .collect::<Result<Vec<_>, _>>()?)
@@ -1407,6 +1418,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_remote_rows_do_not_rewrite_cache_or_acknowledge_local_intentions() {
+        let repository = repository_with_entry().await;
+        let incoming = example_entry();
+        repository
+            .merge_changed_page(1, std::slice::from_ref(&incoming), &[])
+            .await
+            .unwrap();
+        let changes = || repository.store.connection.lock().unwrap().total_changes();
+        let before = changes();
+        for _ in 0..5 {
+            repository
+                .merge_changed_page(1, std::slice::from_ref(&incoming), &[])
+                .await
+                .unwrap();
+        }
+        assert_eq!(changes(), before, "Unchanged remote rows caused writes");
+        repository
+            .set_read_local(1, incoming.id, true)
+            .await
+            .unwrap();
+        repository
+            .set_starred_local(1, incoming.id, true)
+            .await
+            .unwrap();
+        let pending = repository.pending_mutations(1).await.unwrap();
+        let before = changes();
+        repository
+            .merge_changed_page(1, std::slice::from_ref(&incoming), &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            changes(),
+            before,
+            "Stale remote state rewrote locally overridden fields"
+        );
+        assert_eq!(repository.pending_mutations(1).await.unwrap(), pending);
+        let changed = Entry {
+            author: Some("Updated author".into()),
+            html: "<p>Updated body</p>".into(),
+            ..incoming.clone()
+        };
+        repository
+            .merge_changed_page(1, std::slice::from_ref(&changed), &[])
+            .await
+            .unwrap();
+        assert_eq!(changes(), before + 1);
+        let cached = repository
+            .cached_entry(1, incoming.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cached.author, changed.author);
+        assert_eq!(cached.html, changed.html);
+        assert!(cached.read && cached.starred);
+        // Cached statements cache plans, never result rows. An acknowledgement allows fresh remote state.
+        for mutation in pending {
+            repository.acknowledge_mutation(&mutation).await.unwrap();
+        }
+        repository
+            .merge_changed_page(1, std::slice::from_ref(&changed), &[])
+            .await
+            .unwrap();
+        let cached = repository
+            .cached_entry(1, incoming.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!cached.read && !cached.starred);
+        // NULL is significant in the row comparison too.
+        repository
+            .merge_changed_page(1, std::slice::from_ref(&incoming), &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            repository
+                .cached_entry(1, incoming.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .author,
+            None
+        );
+    }
+
+    #[test]
+    fn view_order_indexes_avoid_temporary_sorts() {
+        let repository = SqliteRepository::open_in_memory().unwrap();
+        let connection = repository.store.connection.lock().unwrap();
+        for filter in ["1=1", "read=0", "read=1", "starred=1", "feed_id=7"] {
+            let sql = format!(
+                "EXPLAIN QUERY PLAN SELECT id FROM entries WHERE account_id=1 AND {filter} ORDER BY published_at_ms DESC,id DESC LIMIT 129"
+            );
+            let details = connection
+                .prepare(&sql)
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert!(
+                !details.iter().any(|detail| detail.contains("TEMP B-TREE")),
+                "{filter}: {details:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn summary_pages_preserve_ties_and_seek_past_inserts_and_deletions() {
         let repository = repository_with_entry().await;
         let entries = (1..=310)
@@ -1500,11 +1618,17 @@ mod tests {
         let pending = repo.pending_mutations(1).await.unwrap();
         drop(repo);
         let connection = Connection::open(&path).unwrap();
-        // A malformed prior schema causes the second statement of the last
-        // migration to fail. Its first statement must also roll back.
-        connection.execute_batch("ALTER TABLE feeds DROP COLUMN parsing_error_message; ALTER TABLE feeds DROP COLUMN disabled;").unwrap();
+        // Target the feed-health migration explicitly, so later migrations do not
+        // silently change this rollback scenario.
+        let feeds_version = MIGRATIONS
+            .iter()
+            .position(|sql| sql.starts_with("ALTER TABLE feeds ADD COLUMN parsing_error_message"))
+            .unwrap();
+        // A malformed prior schema causes the second statement to fail.
+        // Its first statement must also roll back.
+        connection.execute_batch("ALTER TABLE feeds DROP COLUMN parsing_error_message; ALTER TABLE feeds DROP COLUMN disabled; DROP INDEX entries_feed_order;").unwrap();
         connection
-            .pragma_update(None, "user_version", MIGRATIONS.len() - 1)
+            .pragma_update(None, "user_version", feeds_version)
             .unwrap();
         drop(connection);
         assert!(SqliteRepository::open(&path).is_err());
@@ -1517,7 +1641,7 @@ mod tests {
         let version: usize = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, MIGRATIONS.len() - 1);
+        assert_eq!(version, feeds_version);
         connection
             .execute_batch("ALTER TABLE feeds DROP COLUMN parsing_error_count")
             .unwrap();
