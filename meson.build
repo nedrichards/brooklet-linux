@@ -56,6 +56,7 @@ cargo_target = custom_target(
     'src/ui/mod.rs',
     'src/ui/entry_object.rs',
     'src/ui/inbox.rs',
+    'src/ui/paging.rs',
     'src/ui/reader.rs',
     'src/ui/reader_table.rs',
     'src/ui/reader_images.rs',

@@ -54,6 +54,38 @@ pub struct Entry {
     pub delivery_error: Option<String>,
 }
 
+/// Stable descending summary order; ties use the account-scoped entry ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EntryCursor {
+    pub published_at_ms: i64,
+    pub id: EntryId,
+}
+impl From<&Entry> for EntryCursor {
+    fn from(entry: &Entry) -> Self {
+        Self {
+            published_at_ms: entry.published_at_ms,
+            id: entry.id,
+        }
+    }
+}
+pub const SUMMARY_PAGE_SIZE: usize = 128;
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EntryPage {
+    pub entries: Vec<Entry>,
+    pub next: Option<EntryCursor>,
+}
+impl EntryPage {
+    pub fn from_entries(mut entries: Vec<Entry>, limit: usize) -> Self {
+        let limit = limit.max(1);
+        let more = entries.len() > limit;
+        entries.truncate(limit);
+        let next = more
+            .then(|| entries.last().map(EntryCursor::from))
+            .flatten();
+        Self { entries, next }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "content", rename_all = "snake_case")]
 pub enum Inline {

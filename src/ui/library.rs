@@ -16,6 +16,7 @@ use std::{
 type Completion<T> = Box<dyn FnOnce(Result<Vec<T>, BrookletError>)>;
 type Loader<T> = Rc<dyn Fn(i64, Completion<T>)>;
 struct Loaders {
+    paging: Option<(Arc<AppController>, adw::glib::WeakRef<adw::ToastOverlay>)>,
     feeds: Loader<Feed>,
     entries: Loader<Entry>,
     error: Rc<dyn Fn(BrookletError)>,
@@ -50,6 +51,7 @@ impl LibraryPages {
         Self::with_loaders(
             navigation,
             Loaders {
+                paging: Some((controller.clone(), toast.clone())),
                 feeds: Rc::new(move |id, complete| {
                     feeds_controller.feeds_cached(Some(id), complete)
                 }),
@@ -129,6 +131,19 @@ impl LibraryPages {
             generation: Cell::new(0),
             reload: Rc::default(),
         });
+        if let Contents::Feed { id, model } = &page.contents
+            && let Some((controller, toast)) = &self.loaders.paging
+            && let Some(toast) = toast.upgrade()
+        {
+            crate::application::install_view_paging(
+                model,
+                &page.status,
+                &page.scroller,
+                controller.clone(),
+                format!("feed:{id}"),
+                &toast,
+            );
+        }
         page.status.set_title(empty_title);
         self.pages.borrow_mut().push(page.clone());
         navigation.push(&page.page);
@@ -186,6 +201,13 @@ impl LibraryPages {
         }
     }
     fn reload(&self, page: &Rc<Page>) {
+        if let Contents::Feed { model, .. } = &page.contents {
+            let pager = model.pager.borrow().clone();
+            if let Some(pager) = pager {
+                pager.reload();
+                return;
+            }
+        }
         let token = page.generation.get().wrapping_add(1);
         page.generation.set(token);
         let weak = Rc::downgrade(page);

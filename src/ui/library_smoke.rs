@@ -108,6 +108,7 @@ pub fn run() -> Result<(), adw::glib::BoolError> {
     let pages = LibraryPages::with_loaders(
         &navigation,
         Loaders {
+            paging: None,
             entries: Rc::new({
                 let entries = entries.clone();
                 move |id, complete| entries.borrow_mut().push_back((id, complete))
@@ -922,6 +923,45 @@ fn sync_journey(
         inbox::selected_id(&list) == Some(99),
         "Mark as unread lost the source selection",
     )?;
+    // Bulk read/Undo must include summaries that have never been loaded into the Inbox.
+    let extra = (5001..=5300)
+        .map(|id| Entry {
+            published_at_ms: 2_000_000_000_000 + id,
+            ..story(id)
+        })
+        .collect::<Vec<_>>();
+    runtime
+        .block_on(repo.merge_changed_page(1, &extra, &[]))
+        .unwrap();
+    let unread_before = runtime.block_on(repo.unread_entries(1)).unwrap().len();
+    check(
+        unread_before > brooklet::model::SUMMARY_PAGE_SIZE,
+        "Bulk fixture did not exceed one page",
+    )?;
+    find_destinations(window.upcast_ref())
+        .unwrap()
+        .set_visible_child_name("inbox");
+    layout();
+    let inbox_list = find_list(
+        find_destinations(window.upcast_ref())
+            .unwrap()
+            .visible_child()
+            .unwrap()
+            .upcast_ref(),
+    )
+    .unwrap();
+    check(
+        (inbox_list.model().unwrap().n_items() as usize) < unread_before,
+        "Bulk fixture accidentally loaded all rows",
+    )?;
+    window
+        .activate_action("win.mark-all-read", None)
+        .map_err(|e| adw::glib::bool_error!("{e}"))?;
+    wait_until(|| runtime.block_on(repo.unread_entries(1)).unwrap().is_empty())?;
+    window
+        .activate_action("win.undo", None)
+        .map_err(|e| adw::glib::bool_error!("{e}"))?;
+    wait_until(|| runtime.block_on(repo.unread_entries(1)).unwrap().len() == unread_before)?;
     // Pair registration/startup with run/shutdown. GtkApplication keeps its own
     // action muxer reference until shutdown, even after all windows close.
     app.connect_activate({

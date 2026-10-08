@@ -15,8 +15,9 @@ use crate::{
     },
     error::BrookletError,
     model::{
-        Category, Entry, EntryId, Feed, KarakeepConfig, KarakeepDelivery, KarakeepRoute,
-        MutationField, ReaderPosition, StoragePolicy, SyncStatus, incremental_start,
+        Category, Entry, EntryCursor, EntryId, EntryPage, Feed, KarakeepConfig, KarakeepDelivery,
+        KarakeepRoute, MutationField, ReaderPosition, SUMMARY_PAGE_SIZE, StoragePolicy, SyncStatus,
+        incremental_start,
     },
     services::traits::{KarakeepApi, MinifluxApi, Repository, SecretStore},
 };
@@ -26,6 +27,7 @@ const PAGE_SIZE: usize = 100;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncResult {
     pub inbox: Vec<Entry>,
+    pub inbox_next: Option<EntryCursor>,
     pub fetched: usize,
 }
 
@@ -76,6 +78,25 @@ pub trait SyncService: Send + Sync {
         entry_id: EntryId,
         starred: bool,
     ) -> Result<(), BrookletError>;
+    async fn entries_page(
+        &self,
+        view: &str,
+        after: Option<EntryCursor>,
+        limit: usize,
+    ) -> Result<EntryPage, BrookletError> {
+        let entries = self.entries_for_view(view).await?;
+        Ok(EntryPage::from_entries(
+            entries
+                .into_iter()
+                .filter(|entry| {
+                    after.is_none_or(|c| {
+                        (entry.published_at_ms, entry.id) < (c.published_at_ms, c.id)
+                    })
+                })
+                .collect(),
+            limit,
+        ))
+    }
     async fn entries_for_view(&self, view: &str) -> Result<Vec<Entry>, BrookletError>;
     async fn search_entries(
         &self,
@@ -497,8 +518,15 @@ impl AccountSyncService {
         self.repository
             .apply_retention(account.id, now_ms())
             .await?;
-        let inbox = self.repository.unread_entries(account.id).await?;
-        Ok(SyncResult { inbox, fetched })
+        let page = self
+            .repository
+            .entries_page(account.id, "inbox", None, SUMMARY_PAGE_SIZE)
+            .await?;
+        Ok(SyncResult {
+            inbox: page.entries,
+            inbox_next: page.next,
+            fetched,
+        })
     }
     async fn reconcile_missing(
         &self,
@@ -671,6 +699,17 @@ impl SyncService for AccountSyncService {
             .await
     }
 
+    async fn entries_page(
+        &self,
+        view: &str,
+        after: Option<EntryCursor>,
+        limit: usize,
+    ) -> Result<EntryPage, BrookletError> {
+        let account = self.configured_account().await?;
+        self.repository
+            .entries_page(account.id, view, after, limit)
+            .await
+    }
     async fn entries_for_view(&self, view: &str) -> Result<Vec<Entry>, BrookletError> {
         let account = self.configured_account().await?;
         self.repository.entries_for_view(account.id, view).await

@@ -1,5 +1,5 @@
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     rc::Rc,
     time::{SystemTime, UNIX_EPOCH},
@@ -14,6 +14,7 @@ use super::entry_object::EntryObject;
 pub struct InboxModel {
     pub store: gio::ListStore,
     pub selection: gtk::SingleSelection,
+    pub pager: Rc<RefCell<Option<Rc<super::paging::PagedList>>>>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -233,7 +234,11 @@ pub fn configure_with_action(
     });
     list.set_factory(Some(&factory));
 
-    InboxModel { store, selection }
+    InboxModel {
+        store,
+        selection,
+        pager: Rc::default(),
+    }
 }
 
 pub fn replace(model: &InboxModel, entries: Vec<Entry>) {
@@ -296,6 +301,45 @@ pub fn replace(model: &InboxModel, entries: Vec<Entry>) {
         model.selection.set_selected(
             selected_position.map_or(gtk::INVALID_LIST_POSITION, |position| position as u32),
         );
+    }
+}
+
+/// Append a keyset page without cloning or rebuilding existing summary objects.
+pub fn append_page(model: &InboxModel, mut entries: Vec<Entry>) {
+    let mut incoming = entries.iter().map(|entry| entry.id).collect::<HashSet<_>>();
+    for item in model.store.iter::<EntryObject>().filter_map(Result::ok) {
+        incoming.remove(&item.entry().id);
+    }
+    entries.retain(|entry| incoming.contains(&entry.id));
+    if entries.is_empty() {
+        return;
+    }
+    let count = model.store.n_items();
+    let last = model
+        .store
+        .item(count.saturating_sub(1))
+        .and_downcast::<EntryObject>();
+    if last.is_none_or(|last| {
+        entries.iter().all(|entry| {
+            (entry.published_at_ms, entry.id) < (last.entry().published_at_ms, last.entry().id)
+        })
+    }) {
+        let objects = entries
+            .into_iter()
+            .map(EntryObject::new)
+            .collect::<Vec<_>>();
+        model.store.splice(count, 0, &objects);
+    } else {
+        // Undo can insert an older article ahead of an unvisited page. Preserve order.
+        let mut all = model
+            .store
+            .iter::<EntryObject>()
+            .filter_map(Result::ok)
+            .map(|item| item.entry().clone())
+            .collect::<Vec<_>>();
+        all.extend(entries);
+        all.sort_by_key(|entry| std::cmp::Reverse((entry.published_at_ms, entry.id)));
+        replace(model, all);
     }
 }
 
@@ -587,7 +631,11 @@ mod tests {
         let store = gio::ListStore::new::<EntryObject>();
         let selection = gtk::SingleSelection::new(Some(store.clone()));
         selection.set_autoselect(false);
-        let model = InboxModel { store, selection };
+        let model = InboxModel {
+            store,
+            selection,
+            pager: Rc::default(),
+        };
         replace(&model, vec![example_entry(2), example_entry(1)]);
         model.selection.set_selected(1);
 
@@ -656,7 +704,11 @@ mod tests {
         gtk::init().unwrap();
         let store = gio::ListStore::new::<EntryObject>();
         let selection = gtk::SingleSelection::new(Some(store.clone()));
-        let model = InboxModel { store, selection };
+        let model = InboxModel {
+            store,
+            selection,
+            pager: Rc::default(),
+        };
         let entries = (0..5000)
             .map(|id| Entry {
                 html: "x".repeat(16 * 1024),

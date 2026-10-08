@@ -7,8 +7,8 @@ use adw::glib;
 use crate::{
     error::BrookletError,
     model::{
-        Account, Category, Entry, EntryId, Feed, KarakeepConfig, KarakeepDelivery, ReaderPosition,
-        StoragePolicy, SyncStatus,
+        Account, Category, Entry, EntryCursor, EntryId, EntryPage, Feed, KarakeepConfig,
+        KarakeepDelivery, ReaderPosition, StoragePolicy, SyncStatus,
     },
     setup::{SetupRequest, SetupService},
     sync::{SyncResult, SyncService},
@@ -221,6 +221,19 @@ impl AppController {
         );
     }
 
+    pub fn entries_page(
+        &self,
+        view: String,
+        after: Option<EntryCursor>,
+        limit: usize,
+        callback: impl FnOnce(Result<EntryPage, BrookletError>) + 'static,
+    ) -> tokio::task::AbortHandle {
+        let service = self.sync_service.clone();
+        self.dispatch_abortable(
+            async move { service.entries_page(&view, after, limit).await },
+            callback,
+        )
+    }
     pub fn search_entries(
         &self,
         query: String,

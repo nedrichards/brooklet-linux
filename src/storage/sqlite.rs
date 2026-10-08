@@ -9,8 +9,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::{
     error::BrookletError,
     model::{
-        Account, Category, DeliveryState, Entry, EntryId, Feed, KarakeepConfig, KarakeepDelivery,
-        KarakeepRoute, MutationField, PendingMutation, ReaderPosition, StoragePolicy, SyncStatus,
+        Account, Category, DeliveryState, Entry, EntryCursor, EntryId, EntryPage, Feed,
+        KarakeepConfig, KarakeepDelivery, KarakeepRoute, MutationField, PendingMutation,
+        ReaderPosition, StoragePolicy, SyncStatus,
     },
     services::traits::Repository,
 };
@@ -425,6 +426,55 @@ impl SqliteStore {
                 .collect::<Result<Vec<_>, _>>()?
         };
         Ok(entries)
+    }
+
+    fn entries_page(
+        &self,
+        account_id: i64,
+        view: &str,
+        after: Option<EntryCursor>,
+        limit: usize,
+    ) -> Result<EntryPage, BrookletError> {
+        let (filter, feed_id) = match view {
+            "inbox" | "unread" => ("e.read=0", None),
+            "saved" => ("e.starred=1", None),
+            "read" => ("e.read=1", None),
+            "all" => ("1=1", None),
+            _ => match view
+                .strip_prefix("feed:")
+                .and_then(|v| v.parse::<i64>().ok())
+            {
+                Some(id) => ("e.feed_id=?2", Some(id)),
+                None => return Ok(EntryPage::default()),
+            },
+        };
+        let limit = limit.clamp(1, (i64::MAX as usize).saturating_sub(1));
+        let seek = if after.is_some() {
+            "AND (e.published_at_ms,e.id) < (?3,?4)"
+        } else {
+            ""
+        };
+        // Explicit numbered parameters keep the cached SQL shape stable for each view.
+        let sql = format!(
+            "{} WHERE e.account_id=?1 AND {filter} {seek} ORDER BY e.published_at_ms DESC,e.id DESC LIMIT ?5",
+            summary_select()
+        );
+        let connection = self.connection.lock().expect("SQLite mutex poisoned");
+        let mut statement = connection.prepare_cached(&sql)?;
+        // Bind unused numbered slots too: the SQL's highest index is always five.
+        let entries = statement
+            .query_map(
+                params![
+                    account_id,
+                    feed_id,
+                    after.map(|c| c.published_at_ms),
+                    after.map(|c| c.id),
+                    (limit + 1) as i64
+                ],
+                read_entry,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(EntryPage::from_entries(entries, limit))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1040,6 +1090,17 @@ impl Repository for SqliteRepository {
             .await
     }
 
+    async fn entries_page(
+        &self,
+        account_id: i64,
+        view: &str,
+        after: Option<EntryCursor>,
+        limit: usize,
+    ) -> Result<EntryPage, BrookletError> {
+        let view = view.to_owned();
+        self.run(move |store| store.entries_page(account_id, &view, after, limit))
+            .await
+    }
     async fn entries_for_view(
         &self,
         account_id: i64,
@@ -1343,6 +1404,84 @@ mod tests {
                 .unwrap(),
             "keep me"
         );
+    }
+
+    #[tokio::test]
+    async fn summary_pages_preserve_ties_and_seek_past_inserts_and_deletions() {
+        let repository = repository_with_entry().await;
+        let entries = (1..=310)
+            .map(|id| Entry {
+                id,
+                published_at_ms: 100,
+                feed_id: if id % 2 == 0 { 7 } else { 8 },
+                starred: id % 3 == 0,
+                read: id % 5 == 0,
+                ..example_entry()
+            })
+            .collect::<Vec<_>>();
+        repository
+            .merge_changed_page(1, &entries, &[])
+            .await
+            .unwrap();
+        for view in ["all", "inbox", "unread", "read", "saved", "feed:7"] {
+            let expected = repository.entries_for_view(1, view).await.unwrap();
+            let mut actual = Vec::new();
+            let mut after = None;
+            loop {
+                let page = repository.entries_page(1, view, after, 37).await.unwrap();
+                assert!(page.entries.len() <= 37);
+                assert!(page.entries.iter().all(|entry| entry.html.is_empty()));
+                after = page.next;
+                actual.extend(page.entries);
+                if after.is_none() {
+                    break;
+                }
+            }
+            assert_eq!(actual, expected, "{view}");
+        }
+        assert!(
+            repository
+                .entries_page(2, "all", None, 128)
+                .await
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        assert!(
+            repository
+                .entries_page(1, "feed:invalid", None, 128)
+                .await
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        let first = repository.entries_page(1, "all", None, 37).await.unwrap();
+        let cursor = first.next.unwrap();
+        repository
+            .merge_changed_page(
+                1,
+                &[Entry {
+                    id: 999,
+                    published_at_ms: 1000,
+                    ..example_entry()
+                }],
+                &[first.entries[0].id],
+            )
+            .await
+            .unwrap();
+        let next = repository
+            .entries_page(1, "all", Some(cursor), 37)
+            .await
+            .unwrap();
+        assert!(
+            next.entries
+                .iter()
+                .all(|e| (e.published_at_ms, e.id) < (cursor.published_at_ms, cursor.id))
+        );
+        assert_eq!(next.entries[0].id, cursor.id - 1);
+        let single = repository.entries_page(1, "all", None, 0).await.unwrap();
+        assert_eq!(single.entries.len(), 1);
+        assert!(single.next.is_some());
     }
 
     #[tokio::test]

@@ -6,8 +6,8 @@ use crate::{
     },
     error::BrookletError,
     model::{
-        Account, Category, Entry, EntryId, Feed, KarakeepConfig, KarakeepDelivery, PendingMutation,
-        ReaderPosition, StoragePolicy, SyncStatus,
+        Account, Category, Entry, EntryCursor, EntryId, EntryPage, Feed, KarakeepConfig,
+        KarakeepDelivery, PendingMutation, ReaderPosition, StoragePolicy, SyncStatus,
     },
 };
 
@@ -87,6 +87,29 @@ pub trait Repository: Send + Sync {
     ) -> Result<Vec<Entry>, BrookletError> {
         let _ = (account_id, view);
         Ok(Vec::new())
+    }
+    async fn entries_page(
+        &self,
+        account_id: i64,
+        view: &str,
+        after: Option<EntryCursor>,
+        limit: usize,
+    ) -> Result<EntryPage, BrookletError> {
+        let mut entries = if matches!(view, "inbox" | "unread") {
+            self.unread_entries(account_id).await?
+        } else {
+            self.entries_for_view(account_id, view).await?
+        };
+        entries.sort_by_key(|e| std::cmp::Reverse((e.published_at_ms, e.id)));
+        let entries = entries
+            .into_iter()
+            .filter(|entry| {
+                after.is_none_or(|cursor| {
+                    (entry.published_at_ms, entry.id) < (cursor.published_at_ms, cursor.id)
+                })
+            })
+            .collect();
+        Ok(EntryPage::from_entries(entries, limit))
     }
     #[allow(clippy::too_many_arguments)]
     async fn search_entries(

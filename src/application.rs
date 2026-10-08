@@ -14,7 +14,7 @@ use brooklet::{
     config,
     controller::AppController,
     error::BrookletError,
-    model::{Entry, ReaderPosition},
+    model::{Entry, EntryPage, ReaderPosition, SUMMARY_PAGE_SIZE},
     services::secret_store::Oo7SecretStore,
     setup::{AccountSetupService, MinifluxIdentityValidator},
     storage::sqlite::SqliteRepository,
@@ -49,6 +49,7 @@ struct InboxUi {
 struct WeakInboxModel {
     store: adw::glib::WeakRef<gio::ListStore>,
     selection: adw::glib::WeakRef<gtk::SingleSelection>,
+    pager: Rc<RefCell<Option<Rc<ui::paging::PagedList>>>>,
 }
 
 #[derive(Clone)]
@@ -73,6 +74,7 @@ impl InboxUi {
             model: WeakInboxModel {
                 store: self.model.store.downgrade(),
                 selection: self.model.selection.downgrade(),
+                pager: self.model.pager.clone(),
             },
             list: self.list.downgrade(),
             status: self.status.downgrade(),
@@ -95,6 +97,7 @@ impl WeakInboxUi {
             model: ui::inbox::InboxModel {
                 store: self.model.store.upgrade()?,
                 selection: self.model.selection.upgrade()?,
+                pager: self.model.pager.clone(),
             },
             list: self.list.upgrade()?,
             status: self.status.upgrade()?,
@@ -583,6 +586,42 @@ impl BrookletApplication {
                 refresh_policy: Rc::new(RefCell::new(AutoRefreshPolicy::default())),
             };
             install_read_pin_tracking(&inbox_ui);
+            install_inbox_paging(&inbox_ui, controller.clone(), &toast_overlay);
+            for (view, model, status, scroller) in [
+                (
+                    "saved",
+                    &other_views.saved,
+                    &other_views.saved_status,
+                    &other_views.saved_scroller,
+                ),
+                (
+                    "all",
+                    &other_views.library_all,
+                    &other_views.library_all_status,
+                    &other_views.library_all_scroller,
+                ),
+                (
+                    "unread",
+                    &other_views.library_unread,
+                    &other_views.library_unread_status,
+                    &other_views.library_unread_scroller,
+                ),
+                (
+                    "read",
+                    &other_views.library_read,
+                    &other_views.library_read_status,
+                    &other_views.library_read_scroller,
+                ),
+            ] {
+                install_view_paging(
+                    model,
+                    status,
+                    scroller,
+                    controller.clone(),
+                    view.into(),
+                    &toast_overlay,
+                );
+            }
             let reader_ui = ReaderUi {
                 split: inbox_split,
                 title: reader_title,
@@ -758,39 +797,55 @@ impl BrookletApplication {
                 let undo = undo_entry.clone();
                 let toast = toast_overlay.clone();
                 move |_, _| {
-                    let entries = (0..inbox.model.store.n_items())
-                        .filter_map(|position| ui::inbox::entry_at(&inbox.model, position))
-                        .filter(|entry| !entry.read)
-                        .collect::<Vec<_>>();
-                    if entries.is_empty() {
-                        return;
-                    }
-                    let ids = entries.iter().map(|entry| entry.id).collect::<Vec<_>>();
-                    controller.set_read_many_local(ids, true, {
-                        let inbox = inbox.clone();
-                        let undo = undo.clone();
-                        let toast = toast.clone();
-                        move |result| match result {
-                            Ok(()) => {
-                                let count = entries.len();
-                                dismiss_undo_toast(&inbox);
-                                *undo.borrow_mut() = entries;
-                                *inbox.emptied_place.borrow_mut() =
-                                    Some(capture_list_place(&inbox.list, &inbox.scroller));
-                                inbox.pinned_read.borrow_mut().take();
-                                inbox.rebuilding.set(true);
-                                ui::inbox::replace(&inbox.model, Vec::new());
-                                inbox.rebuilding.set(false);
-                                update_inbox_visibility(&inbox);
-                                let message = format!("Marked {count} articles read");
-                                let notification = adw::Toast::new(&message);
-                                notification.set_button_label(Some("Undo"));
-                                notification.set_action_name(Some("win.undo"));
-                                *inbox.undo_toast.borrow_mut() = Some(notification.clone());
-                                toast.add_toast(notification);
+                    let controller = controller.clone();
+                    let inbox = inbox.clone();
+                    let undo = undo.clone();
+                    let toast = toast.clone();
+                    let reload_controller = controller.clone();
+                    // Bulk actions include unread entries in unvisited pages.
+                    controller.entries_for_view("inbox".into(), move |result| {
+                        let entries = match result {
+                            Ok(entries) => entries,
+                            Err(error) => {
+                                toast.add_toast(adw::Toast::new(&error.sync_message()));
+                                return;
                             }
-                            Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
+                        };
+                        if entries.is_empty() {
+                            return;
                         }
+                        let ids = entries.iter().map(|entry| entry.id).collect::<Vec<_>>();
+                        reload_controller.set_read_many_local(ids, true, {
+                            let inbox = inbox.clone();
+                            let undo = undo.clone();
+                            let toast = toast.clone();
+                            move |result| match result {
+                                Ok(()) => {
+                                    let count = entries.len();
+                                    dismiss_undo_toast(&inbox);
+                                    *undo.borrow_mut() = entries;
+                                    *inbox.emptied_place.borrow_mut() =
+                                        Some(capture_list_place(&inbox.list, &inbox.scroller));
+                                    inbox.pinned_read.borrow_mut().take();
+                                    if let Some(pager) = inbox.model.pager.borrow().as_ref() {
+                                        pager.clear();
+                                    }
+                                    inbox.rebuilding.set(true);
+                                    ui::inbox::replace(&inbox.model, Vec::new());
+                                    inbox.rebuilding.set(false);
+                                    update_inbox_visibility(&inbox);
+                                    let message = format!("Marked {count} articles read");
+                                    let notification = adw::Toast::new(&message);
+                                    notification.set_button_label(Some("Undo"));
+                                    notification.set_action_name(Some("win.undo"));
+                                    *inbox.undo_toast.borrow_mut() = Some(notification.clone());
+                                    toast.add_toast(notification);
+                                }
+                                Err(error) => {
+                                    toast.add_toast(adw::Toast::new(&error.sync_message()))
+                                }
+                            }
+                        });
                     });
                 }
             });
@@ -1113,14 +1168,19 @@ impl BrookletApplication {
                 move |result| match result {
                     Ok(Some(_account)) => {
                         show_account(&inbox_status, &setup_button);
-                        controller.cached_inbox({
+                        controller.entries_page("inbox".into(), None, SUMMARY_PAGE_SIZE, {
                             let controller = controller.clone();
                             let inbox_ui = inbox_ui.clone();
                             let toast_overlay = toast_overlay.clone();
                             let views = views.clone();
                             move |result| {
                                 match result {
-                                    Ok(entries) => refresh_inbox(&controller, &inbox_ui, entries),
+                                    Ok(page) => {
+                                        let pager = inbox_ui.model.pager.borrow().clone();
+                                        if let Some(pager) = pager {
+                                            pager.snapshot(page);
+                                        }
+                                    }
                                     Err(error) => toast_overlay
                                         .add_toast(adw::Toast::new(&error.sync_message())),
                                 }
@@ -2097,7 +2157,15 @@ fn begin_sync(
             Ok(result) => {
                 let before = inbox_snapshot(&inbox_ui);
                 let changes = ui::inbox::InboxChanges::between(&before, &result.inbox);
-                refresh_inbox(&reload_controller, &inbox_ui, result.inbox);
+                let pager = inbox_ui.model.pager.borrow().clone();
+                if let Some(pager) = pager {
+                    pager.snapshot(EntryPage {
+                        entries: result.inbox,
+                        next: result.inbox_next,
+                    });
+                } else {
+                    refresh_inbox(&reload_controller, &inbox_ui, result.inbox);
+                }
                 load_other_views(reload_controller, views, toast_overlay.clone());
                 if let Some(message) = changes.toast_message() {
                     toast_overlay.add_toast(adw::Toast::new(&message));
@@ -2310,7 +2378,11 @@ fn update_source_read_state(list: Option<&gtk::ListView>, entry: &Entry, read: b
     let Some(store) = selection.model().and_downcast::<gio::ListStore>() else {
         return;
     };
-    let model = ui::inbox::InboxModel { store, selection };
+    let model = ui::inbox::InboxModel {
+        store,
+        selection,
+        pager: Rc::default(),
+    };
     let selected_id = ui::inbox::selected_id(list);
     let leaves_view = (read && list.has_css_class("unread-only-list"))
         || (!read && list.has_css_class("read-only-list"));
@@ -2813,6 +2885,59 @@ fn set_reader_origin(
         .map(|object| object.shared_entry())
         .collect::<Vec<_>>();
     set_reader_origin_entries(reader, entries, entry_id, from_inbox);
+    let pager = model.pager.borrow().clone();
+    if let Some(pager) = pager {
+        let weak = reader.downgrade();
+        let source = list.downgrade();
+        reader
+            .controller
+            .entries_for_view(pager.view.clone(), move |result| {
+                let Some(reader) = weak.upgrade() else {
+                    return;
+                };
+                if reader.active_id.get() != Some(entry_id)
+                    || reader
+                        .source_list
+                        .borrow()
+                        .as_ref()
+                        .and_then(|s| s.upgrade())
+                        != source.upgrade()
+                {
+                    return;
+                }
+                if let Ok(mut entries) = result {
+                    // Opening an Inbox article can mark it read before this query completes.
+                    if !entries.iter().any(|e| e.id == entry_id)
+                        && let Some(active) =
+                            reader.origin_set.borrow().iter().find(|e| e.id == entry_id)
+                    {
+                        entries.push((**active).clone());
+                    }
+                    entries.sort_by_key(|e| std::cmp::Reverse((e.published_at_ms, e.id)));
+                    set_reader_origin_entries(
+                        &reader,
+                        entries.into_iter().map(Arc::new).collect(),
+                        entry_id,
+                        from_inbox,
+                    );
+                    for (name, enabled) in [
+                        ("previous-article", reader.origin_index.get() > 0),
+                        (
+                            "next-article",
+                            reader.origin_index.get() + 1 < reader.origin_set.borrow().len(),
+                        ),
+                    ] {
+                        if let Some(action) = reader
+                            .actions
+                            .lookup_action(name)
+                            .and_downcast::<gio::SimpleAction>()
+                        {
+                            action.set_enabled(enabled);
+                        }
+                    }
+                }
+            });
+    }
 }
 
 fn set_reader_origin_entries(
@@ -2829,6 +2954,89 @@ fn set_reader_origin_entries(
             .unwrap_or(0),
     );
     *reader.origin_set.borrow_mut() = entries;
+}
+
+fn install_inbox_paging(
+    inbox: &InboxUi,
+    controller: Arc<AppController>,
+    toast: &adw::ToastOverlay,
+) {
+    let mut weak = inbox.downgrade();
+    // The apply callback must not keep its own pager alive through the weak UI bundle.
+    weak.model.pager = Rc::default();
+    let reload_controller = controller.clone();
+    let toast = toast.downgrade();
+    ui::paging::PagedList::install(
+        &inbox.model,
+        &inbox.scroller,
+        controller,
+        "inbox".into(),
+        move |entries, append| {
+            if let Some(inbox) = weak.upgrade() {
+                if append {
+                    inbox.rebuilding.set(true);
+                    ui::inbox::append_page(&inbox.model, entries);
+                    inbox.rebuilding.set(false);
+                    update_inbox_visibility(&inbox);
+                } else {
+                    refresh_inbox(&reload_controller, &inbox, entries);
+                }
+            }
+        },
+        move |error| {
+            if let Some(toast) = toast.upgrade() {
+                toast.add_toast(adw::Toast::new(&error.sync_message()));
+            }
+        },
+    );
+}
+
+pub(crate) fn install_view_paging(
+    model: &ui::inbox::InboxModel,
+    status: &adw::StatusPage,
+    scroller: &gtk::ScrolledWindow,
+    controller: Arc<AppController>,
+    view: String,
+    toast: &adw::ToastOverlay,
+) {
+    let store = model.store.downgrade();
+    let selection = model.selection.downgrade();
+    let weak_status = status.downgrade();
+    let weak_scroller = scroller.downgrade();
+    let toast = toast.downgrade();
+    ui::paging::PagedList::install(
+        model,
+        scroller,
+        controller,
+        view,
+        move |entries, append| {
+            if let (Some(store), Some(selection), Some(status), Some(scroller)) = (
+                store.upgrade(),
+                selection.upgrade(),
+                weak_status.upgrade(),
+                weak_scroller.upgrade(),
+            ) {
+                let model = ui::inbox::InboxModel {
+                    store,
+                    selection,
+                    pager: Rc::default(),
+                };
+                if append {
+                    ui::inbox::append_page(&model, entries);
+                    let empty = model.store.n_items() == 0;
+                    status.set_visible(empty);
+                    scroller.set_visible(!empty);
+                } else {
+                    replace_view_entries(&model, &status, &scroller, entries);
+                }
+            }
+        },
+        move |error| {
+            if let Some(toast) = toast.upgrade() {
+                toast.add_toast(adw::Toast::new(&error.sync_message()));
+            }
+        },
+    );
 }
 
 fn load_other_views(controller: Arc<AppController>, views: OtherViews, toast: adw::ToastOverlay) {
@@ -2863,6 +3071,11 @@ fn load_other_views(controller: Arc<AppController>, views: OtherViews, toast: ad
     ] {
         // Empty-state scrollers are hidden; their parent still identifies the visible page.
         if !scroller.parent().is_some_and(|parent| parent.is_mapped()) {
+            continue;
+        }
+        let pager = model.pager.borrow().clone();
+        if let Some(pager) = pager {
+            pager.reload();
             continue;
         }
         let toast = toast.clone();
@@ -5638,6 +5851,11 @@ fn smoke_test_reader_pipeline(
     result
 }
 
+pub fn paging_test() -> Result<(), adw::glib::BoolError> {
+    adw::init()?;
+    ui::paging::smoke_test()
+}
+
 pub fn search_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
     register_resources();
@@ -5654,6 +5872,7 @@ pub fn keyboard_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
     register_resources();
     smoke_test_reader_pipeline(true, false)?;
+    ui::paging::smoke_test()?;
     ui::library::smoke_test()
 }
 
@@ -5741,6 +5960,7 @@ pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
     ui::reconnect::smoke_test()?;
     ui::karakeep::smoke_test()?;
     ui::sync_health::smoke_test()?;
+    ui::paging::smoke_test()?;
     ui::library::smoke_test()?;
     smoke_test_reader_pipeline(false, false)
 }
