@@ -31,6 +31,7 @@ struct Page {
     status: adw::StatusPage,
     scroller: gtk::ScrolledWindow,
     generation: Cell<u64>,
+    reload: Rc<brooklet::reload::ReloadQueue>,
 }
 
 pub struct LibraryPages {
@@ -126,6 +127,7 @@ impl LibraryPages {
             status,
             scroller,
             generation: Cell::new(0),
+            reload: Rc::default(),
         });
         page.status.set_title(empty_title);
         self.pages.borrow_mut().push(page.clone());
@@ -189,39 +191,52 @@ impl LibraryPages {
         let weak = Rc::downgrade(page);
         let navigation = self.navigation.clone();
         let error = self.loaders.error.clone();
-        match &page.contents {
-            Contents::Category { id, .. } => (self.loaders.feeds)(
-                *id,
-                Box::new(move |result| {
-                    let Some(page) = current_page(&weak, &navigation, token) else {
-                        return;
-                    };
-                    match result {
-                        Ok(feeds) => replace_feeds(&page, feeds),
-                        Err(failure) => error(failure),
-                    }
-                }),
-            ),
-            Contents::Feed { id, .. } => (self.loaders.entries)(
-                *id,
-                Box::new(move |result| {
-                    let Some(page) = current_page(&weak, &navigation, token) else {
-                        return;
-                    };
-                    if let Contents::Feed { model, .. } = &page.contents {
+        let feeds = self.loaders.feeds.clone();
+        let entries = self.loaders.entries.clone();
+        let id = match &page.contents {
+            Contents::Category { id, .. } | Contents::Feed { id, .. } => *id,
+        };
+        let category = matches!(page.contents, Contents::Category { .. });
+        page.reload.request(move |done| {
+            if category {
+                (feeds)(
+                    id,
+                    Box::new(move |result| {
+                        let Some(page) = current_page(&weak, &navigation, token) else {
+                            done();
+                            return;
+                        };
                         match result {
-                            Ok(entries) => crate::application::replace_view_entries(
-                                model,
-                                &page.status,
-                                &page.scroller,
-                                entries,
-                            ),
+                            Ok(feeds) => replace_feeds(&page, feeds),
                             Err(failure) => error(failure),
                         }
-                    }
-                }),
-            ),
-        }
+                        done();
+                    }),
+                );
+            } else {
+                (entries)(
+                    id,
+                    Box::new(move |result| {
+                        let Some(page) = current_page(&weak, &navigation, token) else {
+                            done();
+                            return;
+                        };
+                        if let Contents::Feed { model, .. } = &page.contents {
+                            match result {
+                                Ok(entries) => crate::application::replace_view_entries(
+                                    model,
+                                    &page.status,
+                                    &page.scroller,
+                                    entries,
+                                ),
+                                Err(failure) => error(failure),
+                            }
+                        }
+                        done();
+                    }),
+                );
+            }
+        });
     }
 }
 fn current_page(

@@ -217,6 +217,7 @@ impl WeakReaderUi {
 
 #[derive(Clone)]
 struct OtherViews {
+    reloads: Rc<RefCell<HashMap<String, Rc<brooklet::reload::ReloadQueue>>>>,
     drill_down: Rc<ui::library::LibraryPages>,
     generation: Rc<Cell<u64>>,
     saved: ui::inbox::InboxModel,
@@ -498,6 +499,7 @@ impl BrookletApplication {
             let saved_list: gtk::ListView = builder.object("saved_list").expect("saved_list");
             let open_id = Rc::new(Cell::new(None));
             let other_views = OtherViews {
+                reloads: Rc::new(RefCell::new(HashMap::new())),
                 drill_down: ui::library::LibraryPages::new(
                     &library_navigation,
                     controller.clone(),
@@ -2865,16 +2867,23 @@ fn load_other_views(controller: Arc<AppController>, views: OtherViews, toast: ad
         }
         let toast = toast.clone();
         let generation = views.generation.clone();
-        controller.entries_for_view(view.into(), move |result| {
-            if generation.get() != token {
-                return;
-            }
-            match result {
-                Ok(entries) => {
-                    replace_view_entries(&model, &status, &scroller, entries);
+        let queue = views
+            .reloads
+            .borrow_mut()
+            .entry(view.into())
+            .or_default()
+            .clone();
+        let controller = controller.clone();
+        queue.request(move |done| {
+            controller.entries_for_view(view.into(), move |result| {
+                if generation.get() == token {
+                    match result {
+                        Ok(entries) => replace_view_entries(&model, &status, &scroller, entries),
+                        Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
+                    }
                 }
-                Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
-            }
+                done();
+            });
         });
     }
     if !views
@@ -2884,39 +2893,49 @@ fn load_other_views(controller: Arc<AppController>, views: OtherViews, toast: ad
     {
         return;
     }
-    controller.categories_cached({
-        let list = views.categories.clone();
-        let status = views.categories_status.clone();
-        let scroller = views.categories_scroller.clone();
-        let toast = toast.clone();
-        let generation = views.generation.clone();
-        move |result| {
-            if generation.get() != token {
-                return;
-            }
-            match result {
-                Ok(categories) => {
-                    let empty = categories.is_empty();
-                    while let Some(row) = list.first_child() {
-                        list.remove(&row);
-                    }
-                    for category in categories {
-                        let row = adw::ActionRow::builder()
-                            .title(&category.title)
-                            .use_markup(false)
-                            .activatable(true)
-                            .build();
-                        row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-                        row.set_action_name(Some("win.library-category"));
-                        row.set_action_target_value(Some(&category.id.to_variant()));
-                        list.append(&row);
-                    }
-                    status.set_visible(empty);
-                    scroller.set_visible(!empty);
+    let queue = views
+        .reloads
+        .borrow_mut()
+        .entry("categories".into())
+        .or_default()
+        .clone();
+    queue.request(move |done| {
+        controller.categories_cached({
+            let list = views.categories.clone();
+            let status = views.categories_status.clone();
+            let scroller = views.categories_scroller.clone();
+            let toast = toast.clone();
+            let generation = views.generation.clone();
+            move |result| {
+                if generation.get() != token {
+                    done();
+                    return;
                 }
-                Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
+                match result {
+                    Ok(categories) => {
+                        let empty = categories.is_empty();
+                        while let Some(row) = list.first_child() {
+                            list.remove(&row);
+                        }
+                        for category in categories {
+                            let row = adw::ActionRow::builder()
+                                .title(&category.title)
+                                .use_markup(false)
+                                .activatable(true)
+                                .build();
+                            row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+                            row.set_action_name(Some("win.library-category"));
+                            row.set_action_target_value(Some(&category.id.to_variant()));
+                            list.append(&row);
+                        }
+                        status.set_visible(empty);
+                        scroller.set_visible(!empty);
+                    }
+                    Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
+                }
+                done();
             }
-        }
+        });
     });
 }
 

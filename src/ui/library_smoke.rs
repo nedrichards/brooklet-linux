@@ -273,11 +273,15 @@ pub fn run() -> Result<(), adw::glib::BoolError> {
     pages.refresh_visible();
     pages.refresh_visible();
     let (_, old) = entries.borrow_mut().pop_front().unwrap();
+    check(
+        entries.borrow().is_empty(),
+        "Duplicate reload started during active query",
+    )?;
+    old(Ok(initial.clone()));
     let (_, latest) = entries.borrow_mut().pop_front().unwrap();
     let mut updated = initial.clone();
     updated[20].title = "Latest response".into();
     latest(Ok(updated));
-    old(Ok(initial.clone()));
     layout();
     check(
         inbox::entry_by_id(&model, 80).unwrap().title == "Latest response",
