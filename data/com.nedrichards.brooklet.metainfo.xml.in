@@ -51,6 +51,11 @@
     <display_length compare="ge">360</display_length>
   </requires>
   <releases>
+    <release version="0.1.1" date="2026-10-12">
+      <description>
+        <p>A new GNOME-style icon combines an open book, a winding brook, and a bright bookmark, with a matching symbolic icon.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-09-20">
       <description>
         <p>Read and search cached Miniflux articles, browse feeds, and keep read and starred changes in sync.</p>
