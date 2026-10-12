@@ -41,6 +41,8 @@ jobs:
           flatpak install --user --noninteractive flathub org.gnome.Platform//51 org.gnome.Sdk//51 org.freedesktop.Sdk.Extension.rust-stable//26.08
       - name: Configure, build, test, and validate
         run: flatpak-builder --user --disable-rofiles-fuse --repo=repo --keep-build-dirs --force-clean build-dir flatpak/com.nedrichards.brooklet.Devel.json
+      - name: Required pull-to-refresh regression
+        run: xvfb-run -a flatpak-builder --run --env=GDK_BACKEND=x11 build-dir flatpak/com.nedrichards.brooklet.Devel.json brooklet --pull-refresh-test
       - name: Required physical keyboard regression
         run: xvfb-run -a flatpak-builder --run --env=GDK_BACKEND=x11 --env=BROOKLET_KEYBOARD_DRIVER=${{ github.workspace }}/build-aux/keyboard-event.py build-dir flatpak/com.nedrichards.brooklet.Devel.json brooklet --keyboard-test
       - name: Desktop smoke observations (advisory)

@@ -61,3 +61,11 @@ listview.article-list > row:focus-visible {
 .article-title.unread {
   font-weight: bold;
 }
+
+.pull-refresh-hint {
+  background-color: @window_bg_color;
+  color: @window_fg_color;
+  border-radius: 18px;
+  padding: 8px 16px;
+  box-shadow: 0 2px 6px alpha(black, 0.15);
+}

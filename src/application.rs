@@ -1106,6 +1106,7 @@ impl BrookletApplication {
                 }
             });
             application.add_action(&sync_action);
+            ui::pull_refresh::install(&builder, &sync_action);
             let auto_refresh = AutoRefreshUi::install(
                 &window,
                 controller.clone(),
@@ -5849,6 +5850,29 @@ fn smoke_test_reader_pipeline(
     let result = ui::reader_images::smoke_test(image_controller);
     let _ = std::fs::remove_dir_all(cache_directory);
     result
+}
+
+pub fn pull_refresh_test() -> Result<(), adw::glib::BoolError> {
+    adw::init()?;
+    register_resources();
+    let builder = gtk::Builder::from_resource("/com/nedrichards/brooklet/ui/window.ui");
+    let window: adw::ApplicationWindow = builder.object("window").unwrap();
+    builder
+        .object::<adw::StatusPage>("inbox_status")
+        .unwrap()
+        .set_visible(false);
+    builder
+        .object::<gtk::ScrolledWindow>("inbox_scroller")
+        .unwrap()
+        .set_visible(true);
+    window.present();
+    let context = adw::glib::MainContext::default();
+    while context.pending() {
+        context.iteration(false);
+    }
+    let result = ui::pull_refresh::smoke_test(&builder);
+    window.close();
+    result.map_err(|error| adw::glib::bool_error!("{error}"))
 }
 
 pub fn paging_test() -> Result<(), adw::glib::BoolError> {

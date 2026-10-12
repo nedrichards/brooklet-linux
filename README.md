@@ -20,7 +20,9 @@ release gate is live-server use and visual/accessibility refinement.
 While the window is active, Brooklet automatically syncs about every five
 minutes and catches up after a long suspend or time away. Automatic sync pauses
 on connections reported as metered or unavailable, and slows down after failures.
-You can still refresh manually at any time.
+You can still refresh manually at any time. On a touchscreen, pull down at the
+top of the Inbox until “Release to refresh” appears, then release to sync.
+Mouse and touchpad users can use the Sync button or keyboard shortcut.
 
 Read/unread, star, and Karakeep actions are saved locally immediately and sent
 after two quiet seconds, with a ten-second limit during continuous activity.

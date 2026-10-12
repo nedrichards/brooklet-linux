@@ -38,6 +38,8 @@ cargo_target = custom_target(
     'src/error.rs',
     'src/lib.rs',
     'src/reload.rs',
+    'src/pull_refresh.rs',
+    'src/ui/pull_refresh.rs',
     'src/logging.rs',
     'src/model/mod.rs',
     'src/api/mod.rs',

@@ -6,6 +6,7 @@ pub mod controller;
 pub mod error;
 pub mod model;
 pub mod outgoing;
+pub mod pull_refresh;
 pub mod reader;
 pub mod reload;
 pub mod services;

@@ -93,14 +93,28 @@ Adw.ApplicationWindow window {
                     };
                   }
 
-                  Gtk.ScrolledWindow inbox_scroller {
-                    visible: false;
+                  Gtk.Overlay inbox_pull_overlay {
+                    visible: bind inbox_scroller.visible;
                     vexpand: true;
-                    hscrollbar-policy: never;
-                    child: Gtk.ListView inbox_list {
-                      show-separators: true;
-                      accessible-role: list;
+                    child: Gtk.ScrolledWindow inbox_scroller {
+                      visible: false;
+                      vexpand: true;
+                      hscrollbar-policy: never;
+                      child: Gtk.ListView inbox_list {
+                        show-separators: true;
+                        accessible-role: list;
+                      };
                     };
+                    [overlay]
+                    Gtk.Label inbox_pull_hint {
+                      visible: false;
+                      can-target: false;
+                      halign: center;
+                      valign: start;
+                      margin-top: 12;
+                      label: _("Pull to refresh");
+                      styles ["pull-refresh-hint"]
+                    }
                   }
                 };
               };

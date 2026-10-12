@@ -5,6 +5,15 @@ mod ui;
 
 fn main() -> adw::glib::ExitCode {
     logging::init();
+    if std::env::args_os().any(|argument| argument == "--pull-refresh-test") {
+        return match application::pull_refresh_test() {
+            Ok(()) => adw::glib::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("Brooklet pull-to-refresh regression failed: {error}");
+                adw::glib::ExitCode::FAILURE
+            }
+        };
+    }
     if std::env::args_os().any(|argument| argument == "--paging-test") {
         return match application::paging_test() {
             Ok(()) => adw::glib::ExitCode::SUCCESS,
