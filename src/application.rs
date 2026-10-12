@@ -5349,11 +5349,41 @@ fn smoke_test_automatic_inbox(
     reader.placeholder.set_visible(false);
     reader.scroller.set_visible(true);
     reader.split.set_show_content(true);
+    // Mapping the reader and allocating its newly rendered content can take
+    // longer than the layout delay, especially during split-view transitions.
+    // Establish a real scroll range before GTK can clamp the fixture to zero.
     layout()?;
+    wait(|| {
+        let adjustment = reader.scroller.vadjustment();
+        reader.scroller.is_mapped()
+            && adjustment.page_size() > 0.0
+            && adjustment.upper() - adjustment.page_size() >= 120.0
+    })
+    .map_err(|_| {
+        let adjustment = reader.scroller.vadjustment();
+        adw::glib::bool_error!(
+            "Reader scroll range fixture missing: upper={}, page={}, mapped={}, content_height={}",
+            adjustment.upper(),
+            adjustment.page_size(),
+            reader.scroller.is_mapped(),
+            reader.content.height(),
+        )
+    })?;
     reader.scroller.vadjustment().set_value(120.0);
     layout()?;
     let reader_offset = reader.scroller.vadjustment().value();
-    check(reader_offset > 0.0, "Reader position fixture missing")?;
+    if reader_offset <= 0.0 {
+        let adjustment = reader.scroller.vadjustment();
+        return Err(adw::glib::bool_error!(
+            "Reader position fixture missing: upper={}, page={}, mapped={}, content_height={}, collapsed={}, shows_content={}",
+            adjustment.upper(),
+            adjustment.page_size(),
+            reader.scroller.is_mapped(),
+            reader.content.height(),
+            reader.split.is_collapsed(),
+            reader.split.shows_content(),
+        ));
+    }
     let read = Entry {
         read: true,
         ..selected.clone()

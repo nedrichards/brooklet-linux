@@ -268,6 +268,10 @@ pub(super) fn run(
     for collapsed in [false, true] {
         window.set_default_size(if collapsed { 550 } else { 1080 }, 720);
         settle();
+        // A desktop window manager may retain the mapped window's size.
+        // Exercise both split-view modes independently of its resize policy.
+        reader.split.set_collapsed(collapsed);
+        settle();
         for mode in ["button", "menu", "key", "already-unread", "pending-read"] {
             entry.read = mode != "already-unread";
             reader
