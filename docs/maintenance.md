@@ -4,6 +4,52 @@ Dependency updates are proposed weekly by Dependabot for GitHub Actions and appl
 
 The required source and Flatpak jobs retain the repository's application-specific tests. Development artifacts have a separate .Devel identity, a checkout SHA, a 14-day lifetime, and an installation command in the summary. SDK/build success does not establish hardware, live-service, portal, compositor, or multi-monitor behaviour; keep the existing manual and installed-app gates in the release process.
 
+## Local Flatpak installation
+
+From the repository root, build and test the production manifest into the local
+Flatpak repository:
+
+```sh
+flatpak-builder --user --disable-rofiles-fuse --install-deps-from=flathub --force-clean \
+  --default-branch=master \
+  --repo="$PWD/.flatpak-builder/brooklet-release-repo" \
+  build/release flatpak/com.nedrichards.brooklet.json
+```
+
+This runs the manifest's tests and lets Flatpak Builder handle installation into
+the build directory, cleanup, finishing and export. `--force-clean` replaces
+only the build directory; Builder still reuses its build cache. Disabling
+rofiles-fuse uses Flatpak Builder's copy based build mode, needed on hosts where
+FUSE mounts are unavailable. The manifest selects the production application
+ID automatically.
+
+After the build and tests pass, register the local repository and install or
+update its package:
+
+```sh
+flatpak remote-add --user --if-not-exists --no-gpg-verify \
+  brooklet-local "$PWD/.flatpak-builder/brooklet-release-repo"
+flatpak install --user --or-update brooklet-local com.nedrichards.brooklet//master
+```
+
+The existing `brooklet-local` remote points to this repository. Subsequent
+deployments use the same commands. Quit and reopen Brooklet from GNOME Shell
+after installation to use the new build; its account and cached data are kept.
+
+For a separate development installation:
+
+```sh
+flatpak-builder --user --install --install-deps-from=flathub --force-clean \
+  build-dir flatpak/com.nedrichards.brooklet.Devel.json
+```
+
+Its `.Devel` application ID has a separate profile and does not update the
+production installation.
+
+Never reuse an installed `export/` directory for `flatpak build-export`: its
+desktop entry already contains the Flatpak wrapper. Exporting it again nests
+`flatpak run` and makes GNOME Shell try to run Flatpak inside the app sandbox.
+
 ## Releases
 
 The production profile is `flatpak/com.nedrichards.brooklet.json`. Dispatch `Publish Release Flatpaks` from the default branch with an existing `vX.Y.Z` tag. Its tagged production manifest is converted to an exact Git commit in a temporary build manifest. Both x86_64 and aarch64 builds, SDK tests and the physical-keyboard regression must pass before publication, with SHA256SUMS. Existing releases are never overwritten. The first release still requires the documented live-server and visual/accessibility checks.
