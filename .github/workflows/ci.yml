@@ -42,9 +42,9 @@ jobs:
       - name: Configure, build, test, and validate
         run: flatpak-builder --user --disable-rofiles-fuse --repo=repo --keep-build-dirs --force-clean build-dir flatpak/com.nedrichards.brooklet.Devel.json
       - name: Required pull-to-refresh regression
-        run: dbus-run-session -- xvfb-run -a flatpak-builder --disable-rofiles-fuse --run --env=GDK_BACKEND=x11 build-dir flatpak/com.nedrichards.brooklet.Devel.json brooklet --pull-refresh-test
+        run: dbus-run-session -- xvfb-run -a flatpak build --share=network --share=ipc --socket=x11 --env=GDK_BACKEND=x11 build-dir brooklet --pull-refresh-test
       - name: Required physical keyboard regression
-        run: dbus-run-session -- xvfb-run -a flatpak-builder --disable-rofiles-fuse --run --env=GDK_BACKEND=x11 --env=BROOKLET_KEYBOARD_DRIVER=${{ github.workspace }}/build-aux/keyboard-event.py build-dir flatpak/com.nedrichards.brooklet.Devel.json brooklet --keyboard-test
+        run: dbus-run-session -- xvfb-run -a flatpak build --share=network --share=ipc --socket=x11 --env=GDK_BACKEND=x11 --bind-mount=/run/brooklet-keyboard-event.py="$PWD/build-aux/keyboard-event.py" --env=BROOKLET_KEYBOARD_DRIVER=/run/brooklet-keyboard-event.py build-dir brooklet --keyboard-test
       - name: Desktop smoke observations (advisory)
         id: desktop_smoke
         continue-on-error: true
@@ -52,10 +52,9 @@ jobs:
         shell: bash
         env:
           BUILD_DIR: build-dir
-          MANIFEST: flatpak/com.nedrichards.brooklet.Devel.json
         run: |
           set -o pipefail
-          dbus-run-session -- xvfb-run -a flatpak-builder --disable-rofiles-fuse --run --env=GDK_BACKEND=x11 "$BUILD_DIR" "$MANIFEST" brooklet --smoke-test 2>&1 | tee desktop-smoke.log
+          dbus-run-session -- xvfb-run -a flatpak build --share=network --share=ipc --socket=x11 --env=GDK_BACKEND=x11 "$BUILD_DIR" brooklet --smoke-test 2>&1 | tee desktop-smoke.log
       - name: Preserve desktop smoke report
         if: always()
         uses: actions/upload-artifact@v7

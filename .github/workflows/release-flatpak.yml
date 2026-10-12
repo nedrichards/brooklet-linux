@@ -75,10 +75,8 @@ jobs:
           run-tests: true
           upload-artifact: false
       - name: Required physical keyboard regression
-        env:
-          MANIFEST: ${{ needs.verify.outputs.manifest }}
         run: |
-          dbus-run-session -- xvfb-run -a flatpak-builder --disable-rofiles-fuse --run --env=GDK_BACKEND=x11 --env=BROOKLET_KEYBOARD_DRIVER=${{ github.workspace }}/build-aux/keyboard-event.py flatpak_app "$MANIFEST" brooklet --keyboard-test
+          dbus-run-session -- xvfb-run -a flatpak build --share=network --share=ipc --socket=x11 --env=GDK_BACKEND=x11 --bind-mount=/run/brooklet-keyboard-event.py="$PWD/build-aux/keyboard-event.py" --env=BROOKLET_KEYBOARD_DRIVER=/run/brooklet-keyboard-event.py flatpak_app brooklet --keyboard-test
       - name: Desktop smoke observations (advisory)
         id: desktop_smoke
         continue-on-error: true
@@ -86,10 +84,9 @@ jobs:
         shell: bash
         env:
           BUILD_DIR: flatpak_app
-          MANIFEST: ${{ needs.verify.outputs.manifest }}
         run: |
           set -o pipefail
-          dbus-run-session -- xvfb-run -a flatpak-builder --disable-rofiles-fuse --run --env=GDK_BACKEND=x11 "$BUILD_DIR" "$MANIFEST" brooklet --smoke-test 2>&1 | tee desktop-smoke.log
+          dbus-run-session -- xvfb-run -a flatpak build --share=network --share=ipc --socket=x11 --env=GDK_BACKEND=x11 "$BUILD_DIR" brooklet --smoke-test 2>&1 | tee desktop-smoke.log
       - name: Preserve desktop smoke report
         if: always()
         uses: actions/upload-artifact@v7
