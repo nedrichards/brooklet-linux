@@ -78,7 +78,7 @@ jobs:
         env:
           MANIFEST: ${{ needs.verify.outputs.manifest }}
         run: |
-          xvfb-run -a flatpak-builder --run --env=GDK_BACKEND=x11 --env=BROOKLET_KEYBOARD_DRIVER=${{ github.workspace }}/build-aux/keyboard-event.py flatpak_app "$MANIFEST" brooklet --keyboard-test
+          dbus-run-session -- xvfb-run -a flatpak-builder --disable-rofiles-fuse --run --env=GDK_BACKEND=x11 --env=BROOKLET_KEYBOARD_DRIVER=${{ github.workspace }}/build-aux/keyboard-event.py flatpak_app "$MANIFEST" brooklet --keyboard-test
       - name: Desktop smoke observations (advisory)
         id: desktop_smoke
         continue-on-error: true
@@ -89,7 +89,7 @@ jobs:
           MANIFEST: ${{ needs.verify.outputs.manifest }}
         run: |
           set -o pipefail
-          xvfb-run -a flatpak-builder --run --env=GDK_BACKEND=x11 "$BUILD_DIR" "$MANIFEST" brooklet --smoke-test 2>&1 | tee desktop-smoke.log
+          dbus-run-session -- xvfb-run -a flatpak-builder --disable-rofiles-fuse --run --env=GDK_BACKEND=x11 "$BUILD_DIR" "$MANIFEST" brooklet --smoke-test 2>&1 | tee desktop-smoke.log
       - name: Preserve desktop smoke report
         if: always()
         uses: actions/upload-artifact@v7
