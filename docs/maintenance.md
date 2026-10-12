@@ -54,6 +54,21 @@ desktop entry already contains the Flatpak wrapper. Exporting it again nests
 
 The production profile is `flatpak/com.nedrichards.brooklet.json`. Dispatch `Publish Release Flatpaks` from the default branch with an existing `vX.Y.Z` tag. Its tagged production manifest is converted to an exact Git commit in a temporary build manifest. Both x86_64 and aarch64 builds, SDK tests and the physical-keyboard regression must pass before publication, with SHA256SUMS. Existing releases are never overwritten. The first release still requires the documented live-server and visual/accessibility checks.
 
+Update `Cargo.toml`, the Brooklet package entry in `Cargo.lock`, `meson.build`,
+and the AppStream release history together before tagging. Commit the release,
+then push `main` and its annotated tag. Start the release workflow with:
+
+```sh
+gh workflow run release-flatpak.yml --repo nedrichards/brooklet-linux \
+  --ref main -f tag=vX.Y.Z
+```
+
+The workflow builds the tagged source, attaches both bundles and `SHA256SUMS`
+to a draft GitHub release, and publishes it only after the required checks pass.
+Workflow-only fixes can be committed to `main` and dispatched for the same tag
+without moving the tag or changing its application source. A failed run creates
+no published release; inspect its logs before dispatching again.
+
 GitHub bundles are sideloadable packages. Flathub updates continue through the Flathub repository review process. This workflow does not submit to or publish on Flathub.
 
 Flatpak Meson tests run serially with a timeout multiplier of three. Cargo's shared target lock otherwise makes concurrent format, Clippy and test jobs time out while a release build warms the cache.

@@ -48,6 +48,20 @@ where GNOME Builder discovers it from a fresh checkout.
 For the complete keyboard system and regression checks, see
 [Keyboard shortcuts](docs/keyboard-shortcuts.md).
 
+## Install a release
+
+Download the Flatpak bundle for your architecture from
+[GitHub Releases](https://github.com/nedrichards/brooklet-linux/releases).
+Releases include `x86_64` and `aarch64` bundles and a `SHA256SUMS` file.
+
+```sh
+flatpak install --user ./Brooklet-v0.1.1-x86_64.flatpak
+```
+
+Use the `aarch64` bundle for ARM64 systems. GitHub bundles are release snapshots;
+install a newer bundle to update. For the updateable local `brooklet-local`
+repository, see [Local Flatpak installation](docs/maintenance.md#local-flatpak-installation).
+
 ## Native build
 
 ```sh
