@@ -13,8 +13,8 @@ marks an article read.
 | Article list | Enter | Open selected article |
 | Reader | Space / Shift+Space | Scroll a page down/up |
 | Reader | N / P | Open next/previous article in the source collection |
-| Article list | R | Toggle the selected article’s read state |
-| Reader | R | Mark as Unread and Return to the source list |
+| Article list | R / M | Toggle the selected article’s read state |
+| Reader | R / M | Mark as Unread and Return to the source list |
 | List or reader | S / Ctrl+D | Save or unsave selected/open article |
 | List or reader | B | Open selected/open article in browser |
 | List or reader | Ctrl+Shift+C | Copy selected/open article's link |
@@ -80,6 +80,6 @@ The menu groups primary actions, saving/link actions, then navigation, with
 shortcut hints drawn from the same definitions as hover descriptions and help.
 Save changes to Unsave for a starred article. Reader controls are disabled
 until an article is open; previous/next are disabled at collection boundaries.
-Mark as Unread and Return and R both restore source-list focus and selection,
+Mark as Unread and Return, R and M all restore source-list focus and selection,
 including when the article is already unread. List shortcuts continue to act
 on the selected article independently of the reader.

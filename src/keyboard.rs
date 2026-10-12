@@ -211,7 +211,7 @@ pub const BINDINGS: &[Binding] = &[
         message("Article lists and reader"),
         message("Toggle read state or mark unread"),
         message("Toggle in lists; mark unread and return to the source list in the reader"),
-        ["r"],
+        ["r", "m"],
         Command::Read,
         Context::Articles
     ),
