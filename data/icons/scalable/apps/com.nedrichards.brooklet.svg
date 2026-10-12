@@ -1,10 +1,20 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
-  <defs>
-    <linearGradient id="water" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#62a0ea"/>
-      <stop offset="1" stop-color="#1a5fb4"/>
-    </linearGradient>
-  </defs>
-  <rect x="8" y="8" width="112" height="112" rx="24" fill="url(#water)"/>
-  <path d="M26 42c20 0 20 12 40 12s20-12 40-12v13c-20 0-20 12-40 12S46 55 26 55zm0 31c20 0 20 12 40 12s20-12 40-12v13c-20 0-20 12-40 12S46 86 26 86z" fill="#fff"/>
+  <title>Brooklet</title>
+  <desc>An open book with a blue brook winding through its cream pages and an orange bookmark.</desc>
+  <!-- Blue binding and four-pixel front profile. -->
+  <path d="M16 29Q40 23 64 34Q88 23 112 29Q116 30 116 34V102Q116 106 112 105Q88 101 64 116Q40 101 16 105Q12 106 12 102V34Q12 30 16 29Z" fill="#1a5fb4"/>
+  <path d="M16 25Q40 19 64 30Q88 19 112 25Q116 26 116 30V98Q116 102 112 101Q88 97 64 112Q40 97 16 101Q12 102 12 98V30Q12 26 16 25Z" fill="#3584e4"/>
+  <!-- Page block and broad paper surfaces. -->
+  <path d="M18 26Q40 20 64 32Q88 20 110 26V98Q86 94 64 108Q42 94 18 98Z" fill="#c0bfbc"/>
+  <path d="M18 22Q40 16 64 28Q88 16 110 22V94Q86 90 64 104Q42 90 18 94Z" fill="#f6f5f4"/>
+  <path d="M18 22Q40 16 64 28V104Q42 90 18 94Z" fill="#deddda"/>
+  <!-- The flowing brook also forms the book's gutter. -->
+  <path d="M58 26C78 38 78 48 64 58C48 70 50 80 74 98L64 104C36 84 34 68 54 54C68 44 66 36 58 26Z" fill="#1a5fb4"/>
+  <path d="M58 26C74 36 74 46 60 56C42 70 46 82 68 100L64 102C38 84 36 68 56 54C70 44 66 36 58 26Z" fill="#62a0ea"/>
+  <!-- Generous article lines survive reduction to launcher sizes. -->
+  <path d="M28 38Q36 38 44 40M28 48Q34 48 40 50M86 62Q92 60 100 60M82 74Q92 70 100 70M88 82Q94 80 100 80" fill="none" stroke="#9a9996" stroke-width="4" stroke-linecap="round"/>
+  <!-- Bookmark with a darker front lip. -->
+  <path d="M88 22Q94 21 100 21V49L94 45L88 49Z" fill="#c64600"/>
+  <path d="M88 20Q94 19 100 19V45L94 41L88 45Z" fill="#ff7800"/>
+  <path d="M88 20Q91 19.5 94 19.25V41L88 45Z" fill="#ffa348"/>
 </svg>
