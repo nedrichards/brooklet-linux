@@ -1,0 +1,65 @@
+name: Update Dependabot Flatpak sources
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    paths:
+      - Cargo.lock
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: dependabot-flatpak-sources-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  regenerate:
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      # Use the generator from the trusted base, never code from the PR.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          sparse-checkout: build-aux/generate-cargo-sources.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Preserve trusted generator
+        run: cp build-aux/generate-cargo-sources.py "$RUNNER_TEMP/generate-cargo-sources.py"
+      # Only TOML/JSON data is checked out from the dependency branch.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          sparse-checkout: |
+            Cargo.lock
+            flatpak/cargo-sources.json
+          sparse-checkout-cone-mode: false
+      - name: Regenerate and commit Flatpak sources
+        id: sources
+        env:
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          python3 "$RUNNER_TEMP/generate-cargo-sources.py" Cargo.lock --output flatpak/cargo-sources.json
+          if git diff --quiet -- flatpak/cargo-sources.json; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- flatpak/cargo-sources.json
+          git commit -m 'build(flatpak): regenerate sources for dependency update'
+          # An ordinary push refuses to overwrite a newer Dependabot update.
+          git push origin "HEAD:refs/heads/$HEAD_BRANCH"
+          echo 'changed=true' >> "$GITHUB_OUTPUT"
+      - name: Validate the generated commit
+        if: steps.sources.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+        # GITHUB_TOKEN pushes do not trigger CI automatically. Explicit workflow
+        # dispatch is supported and runs CI with its existing read-only token.
+        run: gh workflow run ci.yml --ref "$HEAD_BRANCH"

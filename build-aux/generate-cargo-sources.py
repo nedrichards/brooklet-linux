@@ -10,6 +10,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("lockfile", nargs="?", type=pathlib.Path, default=ROOT / "Cargo.lock")
 parser.add_argument("--output", type=pathlib.Path, default=ROOT / "flatpak/cargo-sources.json")
+parser.add_argument("--check", action="store_true", help="Fail if the generated sources are stale")
 args = parser.parse_args()
 packages = tomllib.loads(args.lockfile.read_text())["package"]
 sources = []
@@ -42,4 +43,9 @@ sources.append({
     "dest-filename": "config",
 })
 
-args.output.write_text(json.dumps(sources, indent=4) + "\n")
+generated = json.dumps(sources, indent=4) + "\n"
+if args.check:
+    if not args.output.exists() or args.output.read_text() != generated:
+        parser.exit(1, "Flatpak Cargo sources are stale; run build-aux/generate-cargo-sources.py\n")
+else:
+    args.output.write_text(generated)
