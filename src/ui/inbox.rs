@@ -82,6 +82,7 @@ pub fn configure_with_action(
 
     let factory = gtk::SignalListItemFactory::new();
     let list_weak = list.downgrade();
+    let marker = open_id.clone();
     factory.connect_setup(move |_, item| {
         let item = item
             .downcast_ref::<gtk::ListItem>()
@@ -175,62 +176,29 @@ pub fn configure_with_action(
             row.append(&read_toggle);
         }
         item.set_child(Some(&row));
-    });
-    factory.connect_bind(move |_, item| {
-        let item = item
-            .downcast_ref::<gtk::ListItem>()
-            .expect("factory item must be a GtkListItem");
-        let entry = item
-            .item()
-            .and_downcast::<EntryObject>()
-            .expect("inbox model must contain EntryObject values");
-        let row = item
-            .child()
-            .and_downcast::<gtk::Box>()
-            .expect("factory child must be a GtkBox");
-        row.set_widget_name(&format!("article-{}", entry.entry().id));
-        let content = row
-            .first_child()
-            .and_downcast::<gtk::Box>()
-            .expect("first row child must be the content box");
-        let title = content
-            .first_child()
-            .and_downcast::<gtk::Label>()
-            .expect("first row child must be the title label");
-        title.set_label(&entry.entry().title);
-        // Apply the weight to the text itself so the read-state distinction
-        // survives theme rules in both light and dark mode. Always replace the
-        // attributes: recycled rows may previously have held the other state.
-        let attributes = gtk::pango::AttrList::new();
-        attributes.insert(gtk::pango::AttrInt::new_weight(if entry.entry().read {
-            gtk::pango::Weight::Normal
-        } else {
-            gtk::pango::Weight::Bold
-        }));
-        title.set_attributes(Some(&attributes));
-        if entry.entry().read {
-            title.remove_css_class("unread");
-        } else {
-            title.add_css_class("unread");
-        }
-        set_open_marker(&row, entry.entry(), open_id.get());
-        if let Some(read_toggle) = content.next_sibling().and_downcast::<gtk::Button>() {
-            let is_read = entry.entry().read;
-            let label = if is_read { "Mark Unread" } else { "Mark Read" };
-            read_toggle.set_icon_name(if is_read {
-                "mail-unread-symbolic"
-            } else {
-                "mail-read-symbolic"
+        let bound = Rc::new(RefCell::new(
+            None::<(EntryObject, adw::glib::SignalHandlerId)>,
+        ));
+        let marker = marker.clone();
+        item.connect_item_notify(move |item| {
+            if let Some((entry, signal)) = bound.borrow_mut().take() {
+                entry.disconnect(signal);
+            }
+            let Some(entry) = item.item().and_downcast::<EntryObject>() else {
+                return;
+            };
+            render_row(item, &entry, marker.get());
+            let weak_item = item.downgrade();
+            let marker = marker.clone();
+            let signal = entry.connect_local("changed", false, move |values| {
+                if let Some(item) = weak_item.upgrade() {
+                    let entry = values[0].get::<EntryObject>().expect("changed row object");
+                    render_row(&item, &entry, marker.get());
+                }
+                None
             });
-            read_toggle.set_tooltip_text(Some(label));
-            read_toggle.update_property(&[gtk::accessible::Property::Label(label)]);
-            read_toggle.set_action_name(Some(if is_read {
-                "win.mark-unread"
-            } else {
-                "win.mark-read"
-            }));
-            read_toggle.set_action_target_value(Some(&entry.entry().id.to_variant()));
-        }
+            *bound.borrow_mut() = Some((entry, signal));
+        });
     });
     list.set_factory(Some(&factory));
 
@@ -241,14 +209,64 @@ pub fn configure_with_action(
     }
 }
 
+fn render_row(item: &gtk::ListItem, entry: &EntryObject, open_id: Option<i64>) {
+    let row = item
+        .child()
+        .and_downcast::<gtk::Box>()
+        .expect("factory child must be a GtkBox");
+    row.set_widget_name(&format!("article-{}", entry.entry().id));
+    let content = row
+        .first_child()
+        .and_downcast::<gtk::Box>()
+        .expect("first row child must be the content box");
+    let title = content
+        .first_child()
+        .and_downcast::<gtk::Label>()
+        .expect("first row child must be the title label");
+    title.set_label(&entry.entry().title);
+    // Apply the weight to the text itself so the read-state distinction
+    // survives theme rules in both light and dark mode. Always replace the
+    // attributes: recycled rows may previously have held the other state.
+    let attributes = gtk::pango::AttrList::new();
+    attributes.insert(gtk::pango::AttrInt::new_weight(if entry.entry().read {
+        gtk::pango::Weight::Normal
+    } else {
+        gtk::pango::Weight::Bold
+    }));
+    title.set_attributes(Some(&attributes));
+    if entry.entry().read {
+        title.remove_css_class("unread");
+    } else {
+        title.add_css_class("unread");
+    }
+    set_open_marker(&row, &entry.entry(), open_id);
+    if let Some(read_toggle) = content.next_sibling().and_downcast::<gtk::Button>() {
+        let is_read = entry.entry().read;
+        let label = if is_read { "Mark Unread" } else { "Mark Read" };
+        read_toggle.set_icon_name(if is_read {
+            "mail-unread-symbolic"
+        } else {
+            "mail-read-symbolic"
+        });
+        read_toggle.set_tooltip_text(Some(label));
+        read_toggle.update_property(&[gtk::accessible::Property::Label(label)]);
+        read_toggle.set_action_name(Some(if is_read {
+            "win.mark-unread"
+        } else {
+            "win.mark-read"
+        }));
+        read_toggle.set_action_target_value(Some(&entry.entry().id.to_variant()));
+    }
+}
+
 pub fn replace(model: &InboxModel, entries: Vec<Entry>) {
     let selected_id = model
         .selection
         .selected_item()
         .and_downcast::<EntryObject>()
         .map(|item| item.entry().id);
-    // Compare borrowed bodies and retain existing objects. A single changed
-    // interval avoids repeated scans, body clones, and items-changed emissions.
+    // Update content in place; only changes to article order/membership should
+    // invalidate GTK rows and its keyboard cursor.
     let previous = (0..model.store.n_items())
         .map(|index| {
             model
@@ -258,35 +276,39 @@ pub fn replace(model: &InboxModel, entries: Vec<Entry>) {
                 .unwrap()
         })
         .collect::<Vec<_>>();
+    let existing = previous
+        .iter()
+        .map(|item| (item.entry().id, item))
+        .collect::<HashMap<_, _>>();
+    for entry in &entries {
+        if let Some(item) = existing.get(&entry.id)
+            && *item.entry() != *entry
+        {
+            item.update(entry.clone());
+        }
+    }
     let prefix = previous
         .iter()
         .zip(&entries)
-        .take_while(|(old, new)| old.entry() == *new)
+        .take_while(|(old, new)| old.entry().id == new.id)
         .count();
     let suffix = previous[prefix..]
         .iter()
         .rev()
         .zip(entries[prefix..].iter().rev())
-        .take_while(|(old, new)| old.entry() == *new)
+        .take_while(|(old, new)| old.entry().id == new.id)
         .count();
     let old_end = previous.len() - suffix;
     let new_end = entries.len() - suffix;
     let selected_position =
         selected_id.and_then(|id| entries.iter().position(|entry| entry.id == id));
     if prefix != old_end || prefix != new_end {
-        let existing = previous[prefix..old_end]
-            .iter()
-            .map(|item| (item.entry().id, item))
-            .collect::<HashMap<_, _>>();
         let replacements = entries
             .into_iter()
             .skip(prefix)
             .take(new_end - prefix)
             .map(|entry| {
-                if let Some(item) = existing
-                    .get(&entry.id)
-                    .filter(|item| item.entry() == &entry)
-                {
+                if let Some(item) = existing.get(&entry.id) {
                     (*item).clone()
                 } else {
                     EntryObject::new(entry)
@@ -349,7 +371,12 @@ pub fn update_entry(model: &InboxModel, entry: Entry) -> bool {
     else {
         return false;
     };
-    model.store.splice(position, 1, &[EntryObject::new(entry)]);
+    model
+        .store
+        .item(position)
+        .and_downcast::<EntryObject>()
+        .unwrap()
+        .update(entry);
     true
 }
 
@@ -404,7 +431,7 @@ pub fn refresh_open_marker(list: &gtk::ListView, open_id: Option<i64>) {
                 && let Some(entry) = selection.item(position).and_downcast::<EntryObject>()
                 && let Ok(row) = widget.clone().downcast::<gtk::Box>()
             {
-                set_open_marker(&row, entry.entry(), open_id);
+                set_open_marker(&row, &entry.entry(), open_id);
             }
             return;
         }
@@ -696,6 +723,108 @@ mod tests {
 
         assert_eq!(selected_id(&list), Some(3));
         assert!(!entry_at(&model, 0).expect("first row remains").read);
+
+        // A content update must leave a deeply scrolled GTK row, its focus,
+        // and the viewport intact, while updating the bound labels/actions.
+        let window = gtk::Window::builder()
+            .default_width(480)
+            .default_height(400)
+            .build();
+        let scroller = gtk::ScrolledWindow::new();
+        scroller.set_child(Some(&list));
+        window.set_child(Some(&scroller));
+        let mut entries = (0..200).map(example_entry).collect::<Vec<_>>();
+        replace(&model, entries.clone());
+        window.present();
+        let settle = || {
+            let context = adw::glib::MainContext::default();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(150);
+            while std::time::Instant::now() < deadline {
+                while context.pending() {
+                    context.iteration(false);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        };
+        settle();
+        select_id(&list, 100);
+        list.scroll_to(100, gtk::ListScrollFlags::FOCUS, None);
+        settle();
+        let focus = gtk::prelude::GtkWindowExt::focus(&window).expect("deep row has focus");
+        let offset = scroller.vadjustment().value();
+        assert!(
+            offset > 400.0,
+            "fixture is well below the top: offset={offset}, upper={}, page={}, height={}, mapped={}, selection={}",
+            scroller.vadjustment().upper(),
+            scroller.vadjustment().page_size(),
+            window.height(),
+            list.is_mapped(),
+            model.selection.selected()
+        );
+        let object = model.store.item(100).and_downcast::<EntryObject>().unwrap();
+        let snapshot = object.shared_entry();
+        let changes = Rc::new(Cell::new(0));
+        model.store.connect_items_changed({
+            let changes = changes.clone();
+            move |_, _, _, _| changes.set(changes.get() + 1)
+        });
+        entries[100].read = true;
+        assert!(update_entry(&model, entries[100].clone()));
+        entries[4].starred = true;
+        replace(&model, entries.clone());
+        settle();
+        assert_eq!(changes.get(), 0, "content updates do not replace GTK rows");
+        assert_eq!(model.store.item(100).unwrap(), object);
+        assert_eq!(selected_id(&list), Some(100));
+        assert_eq!(gtk::prelude::GtkWindowExt::focus(&window), Some(focus));
+        assert!((scroller.vadjustment().value() - offset).abs() < 1.0);
+        assert!(
+            !snapshot.read,
+            "previous navigation snapshots stay immutable"
+        );
+        assert!(object.entry().read);
+        fn row_named(widget: &gtk::Widget, name: &str) -> Option<gtk::Widget> {
+            if widget.widget_name() == name {
+                return Some(widget.clone());
+            }
+            let mut child = widget.first_child();
+            while let Some(widget) = child {
+                if let Some(row) = row_named(&widget, name) {
+                    return Some(row);
+                }
+                child = widget.next_sibling();
+            }
+            None
+        }
+        let row = row_named(list.upcast_ref(), "article-100").expect("updated row remains mapped");
+        let content = row.first_child().unwrap();
+        let title = content.first_child().and_downcast::<gtk::Label>().unwrap();
+        assert!(
+            !title.has_css_class("unread"),
+            "bound row reflects the read update"
+        );
+        let button = content
+            .next_sibling()
+            .and_downcast::<gtk::Button>()
+            .unwrap();
+        assert_eq!(button.action_name().as_deref(), Some("win.mark-unread"));
+        // Further updates to a formerly bound object must not repaint a recycled row.
+        list.scroll_to(180, gtk::ListScrollFlags::FOCUS, None);
+        settle();
+        entries[100].title = "Updated offscreen".into();
+        update_entry(&model, entries[100].clone());
+        list.scroll_to(100, gtk::ListScrollFlags::FOCUS, None);
+        settle();
+        let row = row_named(list.upcast_ref(), "article-100").unwrap();
+        let title = row
+            .first_child()
+            .unwrap()
+            .first_child()
+            .and_downcast::<gtk::Label>()
+            .unwrap();
+        assert_eq!(title.label(), "Updated offscreen");
+        window.close();
+        settle();
     }
 
     #[test]

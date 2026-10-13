@@ -1490,10 +1490,13 @@ fn return_to_article_list(
             })
             .or_else(|| inbox.upgrade().filter(|list| list.is_mapped()));
         if let Some(list) = list {
-            if ui::inbox::position_of_id(&list, entry_id).is_some() {
+            if let Some(position) = ui::inbox::position_of_id(&list, entry_id) {
+                list.grab_focus();
                 ui::inbox::select_id(&list, entry_id);
+                list.scroll_to(position, gtk::ListScrollFlags::FOCUS, None);
+            } else {
+                list.grab_focus();
             }
-            list.grab_focus();
         } else if let Some(destinations) = destinations {
             destinations.child_focus(gtk::DirectionType::TabForward);
         }
@@ -5214,6 +5217,44 @@ fn smoke_test_article_keyboard(
         layout(window);
         println!("Physical keyboard event regression passed (wide and narrow)");
     }
+    // Return to a deep article even when GTK's last focused row was at the top.
+    let template = ui::inbox::entry_at(&inbox.model, 0).expect("keyboard article fixture");
+    show_entries(
+        inbox,
+        (0..160)
+            .map(|id| Entry {
+                id: 10_000 + id,
+                title: format!("Focus story {id}"),
+                ..template.clone()
+            })
+            .collect(),
+    );
+    reader.split.set_show_content(false);
+    layout(window);
+    inbox.list.scroll_to(0, gtk::ListScrollFlags::FOCUS, None);
+    layout(window);
+    reader.active_id.set(Some(10_100));
+    *reader.source_list.borrow_mut() = Some(inbox.list.downgrade());
+    ui::inbox::select_id(&inbox.list, 10_100);
+    reader.split.set_show_content(true);
+    reader.scroller.grab_focus();
+    layout(window);
+    return_to_article_list(reader, &destinations, &inbox.list, 10_100);
+    layout(window);
+    let selected = ui::inbox::selected_id(&inbox.list);
+    let offset = inbox.scroller.vadjustment().value();
+    let handled = press(Key::Down, Modifiers::empty());
+    if selected != Some(10_100)
+        || offset < 400.0
+        || !handled
+        || ui::inbox::selected_id(&inbox.list) != Some(10_101)
+    {
+        return Err(adw::glib::bool_error!(
+            "Reader return lost the deep article cursor: selected={selected:?}, offset={offset}, handled={handled}, next={:?}",
+            ui::inbox::selected_id(&inbox.list)
+        ));
+    }
+    reader.active_id.set(None);
     reader.content.remove(&reader_focus);
     window.remove_action("undo");
     window.remove_action("keep-unread");
