@@ -111,6 +111,11 @@ lock modifiers, action targeting and mutation repeat suppression. See
 [Keyboard shortcuts](keyboard-shortcuts.md) for the full contract and driver
 requirements. Any failed keyboard assertion fails the Flatpak CI job.
 
+The required `--click-test` gate uses the same X11 driver to double-click an
+article below a retained read row. It processes input and idle callbacks
+between clicks and checks that the intended article activates, then that the
+old read row disappears after the double-click interval without moving selection.
+
 ## Reader toolbar regression
 
 `brooklet --reader-test` runs the isolated reader pipeline and interaction

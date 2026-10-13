@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deliver real X11 key events only to the isolated Brooklet regression window."""
+"""Deliver real X11 input only to the isolated Brooklet regression window."""
 import ctypes as C
 import ctypes.util
 import sys
@@ -16,6 +16,7 @@ x11.XQueryTree.argtypes = [Display, Window, C.POINTER(Window), C.POINTER(Window)
 x11.XFetchName.argtypes = [Display, Window, C.POINTER(C.c_char_p)]
 x11.XFree.argtypes = [C.c_void_p]
 x11.XSetInputFocus.argtypes = [Display, Window, C.c_int, C.c_ulong]
+x11.XRaiseWindow.argtypes = [Display, Window]
 x11.XStringToKeysym.argtypes = [C.c_char_p]
 x11.XStringToKeysym.restype = C.c_ulong
 x11.XKeysymToKeycode.argtypes = [Display, C.c_ulong]
@@ -23,6 +24,8 @@ x11.XKeysymToKeycode.restype = C.c_uint
 x11.XSync.argtypes = [Display, C.c_int]
 x11.XCloseDisplay.argtypes = [Display]
 xtst.XTestFakeKeyEvent.argtypes = [Display, C.c_uint, C.c_int, C.c_ulong]
+x11.XWarpPointer.argtypes = [Display, Window, Window, C.c_int, C.c_int, C.c_uint, C.c_uint, C.c_int, C.c_int]
+xtst.XTestFakeButtonEvent.argtypes = [Display, C.c_uint, C.c_int, C.c_ulong]
 
 window_title, key, mode, *modifiers = sys.argv[1:]
 if not window_title.startswith("Brooklet Keyboard Regression "):
@@ -55,6 +58,15 @@ window = find(x11.XDefaultRootWindow(display))
 if not window:
     raise SystemExit("The isolated keyboard regression window is unavailable")
 x11.XSetInputFocus(display, window, 2, 0)
+if mode == "click":
+    x, y = map(int, key.split(","))
+    x11.XRaiseWindow(display, window)
+    x11.XWarpPointer(display, 0, window, 0, 0, 0, 0, x, y)
+    if not xtst.XTestFakeButtonEvent(display, 1, True, 0) or not xtst.XTestFakeButtonEvent(display, 1, False, 0):
+        raise SystemExit("Could not deliver mouse click")
+    x11.XSync(display, False)
+    x11.XCloseDisplay(display)
+    raise SystemExit(0)
 if mode == "focus":
     # Let the app process FocusIn before the first physical key is injected.
     x11.XSync(display, False)

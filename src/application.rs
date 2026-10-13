@@ -2278,6 +2278,7 @@ fn apply_inbox_entries(inbox_ui: &InboxUi, mut entries: Vec<Entry>) {
 }
 
 fn install_read_pin_tracking(inbox: &InboxUi) -> adw::glib::SignalHandlerId {
+    let generation = Rc::new(Cell::new(0_u64));
     inbox.model.selection.connect_selected_item_notify({
         let weak = inbox.downgrade();
         move |_| {
@@ -2285,15 +2286,29 @@ fn install_read_pin_tracking(inbox: &InboxUi) -> adw::glib::SignalHandlerId {
                 return;
             };
             if !inbox.rebuilding.get() {
+                // The first click only selects. Removing the previous read row
+                // before the second click shifts the target under the pointer.
+                // Allow GTK's configured double-click interval to finish, and
+                // invalidate older callbacks when selection changes again.
+                let delay = inbox
+                    .list
+                    .settings()
+                    .property::<i32>("gtk-double-click-time");
+                let expected = generation.get().wrapping_add(1);
+                generation.set(expected);
+                let generation = generation.clone();
                 let weak = weak.clone();
-                adw::glib::idle_add_local_once(move || {
-                    let Some(inbox) = weak.upgrade() else {
-                        return;
-                    };
-                    if !inbox.rebuilding.get() {
-                        release_read_pin_unless(&inbox, ui::inbox::selected_id(&inbox.list));
-                    }
-                });
+                adw::glib::timeout_add_local_once(
+                    Duration::from_millis(delay.max(0) as u64 + 50),
+                    move || {
+                        let Some(inbox) = weak.upgrade() else {
+                            return;
+                        };
+                        if generation.get() == expected && !inbox.rebuilding.get() {
+                            release_read_pin_unless(&inbox, ui::inbox::selected_id(&inbox.list));
+                        }
+                    },
+                );
             }
         }
     })
@@ -4619,6 +4634,125 @@ fn smoke_test_inbox_top_shortcut(builder: &gtk::Builder) -> Result<(), adw::glib
     Ok(())
 }
 
+/// Exercise real pointer input while a previously read article remains pinned.
+fn smoke_test_article_double_click(
+    window: &adw::ApplicationWindow,
+    inbox: &InboxUi,
+    template: &Entry,
+) -> Result<(), adw::glib::BoolError> {
+    fn pump(duration: Duration) {
+        let main_loop = adw::glib::MainLoop::new(None, false);
+        adw::glib::timeout_add_local_once(duration, {
+            let main_loop = main_loop.clone();
+            move || main_loop.quit()
+        });
+        main_loop.run();
+    }
+    let driver = std::env::var_os("BROOKLET_KEYBOARD_DRIVER")
+        .ok_or_else(|| adw::glib::bool_error!("Mouse regression requires the X11 input driver"))?;
+    let title = format!(
+        "Brooklet Keyboard Regression {}",
+        adw::glib::uuid_string_random()
+    );
+    window.set_title(Some(&title));
+    window.set_default_size(1080, 720);
+    show_entries(
+        inbox,
+        (0..3)
+            .map(|id| Entry {
+                id: 20_000 + id,
+                title: format!("Double click story {id}"),
+                read: false,
+                ..template.clone()
+            })
+            .collect(),
+    );
+    ui::inbox::select_id(&inbox.list, 20_000);
+    pin_read(inbox, ui::inbox::entry_at(&inbox.model, 0).unwrap());
+    let tracking = install_read_pin_tracking(inbox);
+    let activated = Rc::new(Cell::new(None));
+    let activation = inbox.list.connect_activate({
+        let activated = activated.clone();
+        let model = inbox.model.clone();
+        move |_, position| {
+            activated.set(ui::inbox::entry_at(&model, position).map(|entry| entry.id))
+        }
+    });
+    window.present();
+    pump(Duration::from_millis(500));
+    let focused = std::process::Command::new("python3")
+        .arg(&driver)
+        .arg(&title)
+        .arg("Down")
+        .arg("focus")
+        .status()
+        .map_err(|error| adw::glib::bool_error!("Mouse focus driver failed: {error}"))?;
+    if !focused.success() {
+        return Err(adw::glib::bool_error!("Mouse focus driver failed"));
+    }
+    pump(Duration::from_millis(80));
+    let row = find_article_row(inbox.list.upcast_ref(), 20_001)
+        .ok_or_else(|| adw::glib::bool_error!("Double click target missing"))?;
+    let bounds = row
+        .compute_bounds(window)
+        .ok_or_else(|| adw::glib::bool_error!("Double click target not allocated"))?;
+    let (surface_x, surface_y) = window.surface_transform();
+    let scale = f64::from(window.scale_factor());
+    let point = format!(
+        "{},{}",
+        ((f64::from(bounds.x()) + 40.0 + surface_x) * scale) as i32,
+        ((f64::from(bounds.center().y()) + surface_y) * scale) as i32
+    );
+    let click = || -> Result<(), adw::glib::BoolError> {
+        let status = std::process::Command::new("python3")
+            .arg(&driver)
+            .arg(&title)
+            .arg(&point)
+            .arg("click")
+            .status()
+            .map_err(|error| adw::glib::bool_error!("Mouse driver failed: {error}"))?;
+        if !status.success() {
+            return Err(adw::glib::bool_error!("Mouse driver failed"));
+        }
+        Ok(())
+    };
+    click()?;
+    pump(Duration::from_millis(80));
+    if ui::inbox::selected_id(&inbox.list) != Some(20_001)
+        || ui::inbox::entry_by_id(&inbox.model, 20_000).is_none()
+        || activated.get().is_some()
+    {
+        return Err(adw::glib::bool_error!(
+            "First click displaced target: selected={:?}, point={point}, bounds={bounds:?}",
+            ui::inbox::selected_id(&inbox.list)
+        ));
+    }
+    click()?;
+    pump(Duration::from_millis(80));
+    if activated.get() != Some(20_001) || ui::inbox::selected_id(&inbox.list) != Some(20_001) {
+        return Err(adw::glib::bool_error!(
+            "Double click opened a different article: {:?}",
+            activated.get()
+        ));
+    }
+    let delay = inbox
+        .list
+        .settings()
+        .property::<i32>("gtk-double-click-time");
+    pump(Duration::from_millis(delay.max(0) as u64 + 100));
+    if ui::inbox::entry_by_id(&inbox.model, 20_000).is_some()
+        || ui::inbox::selected_id(&inbox.list) != Some(20_001)
+    {
+        return Err(adw::glib::bool_error!(
+            "Settled selection did not release read row"
+        ));
+    }
+    inbox.list.disconnect(activation);
+    inbox.model.selection.disconnect(tracking);
+    println!("Physical double-click regression passed");
+    Ok(())
+}
+
 /// Exercise the installed window capture controller, not just cursor arithmetic.
 fn smoke_test_article_keyboard(
     window: &adw::ApplicationWindow,
@@ -5461,7 +5595,7 @@ fn smoke_test_automatic_inbox(
         "Remote read lost selected row, newer star, or reader position",
     )?;
     ui::inbox::move_cursor(&inbox.list, 1);
-    layout()?;
+    wait(|| ui::inbox::entry_by_id(&inbox.model, 1100).is_none())?;
     check(
         ui::inbox::entry_by_id(&inbox.model, 1100).is_none(),
         "Read row stayed pinned after navigation",
@@ -5649,6 +5783,7 @@ fn smoke_test_integrated_search(
 fn smoke_test_reader_pipeline(
     keyboard_only: bool,
     search_only: bool,
+    click_only: bool,
 ) -> Result<(), adw::glib::BoolError> {
     use brooklet::services::traits::Repository;
     let repository = Arc::new(
@@ -5798,6 +5933,16 @@ fn smoke_test_reader_pipeline(
         origin_inbox: Rc::new(Cell::new(false)),
         source_list: Rc::new(RefCell::new(None)),
     };
+    if click_only {
+        let result = smoke_test_article_double_click(&window, &inbox, &replacement);
+        window.destroy();
+        drop(reader);
+        drop(inbox);
+        drop(window);
+        drop(builder);
+        let _ = std::fs::remove_dir_all(cache_directory);
+        return result;
+    }
     if search_only {
         window.present();
         let result = smoke_test_integrated_search(&window, &builder, &reader, &inbox);
@@ -5954,21 +6099,27 @@ pub fn paging_test() -> Result<(), adw::glib::BoolError> {
 pub fn search_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
     register_resources();
-    smoke_test_reader_pipeline(false, true)
+    smoke_test_reader_pipeline(false, true, false)
 }
 
 pub fn reader_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
     register_resources();
-    smoke_test_reader_pipeline(false, false)
+    smoke_test_reader_pipeline(false, false, false)
 }
 
 pub fn keyboard_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
     register_resources();
-    smoke_test_reader_pipeline(true, false)?;
+    smoke_test_reader_pipeline(true, false, false)?;
     ui::paging::smoke_test()?;
     ui::library::smoke_test()
+}
+
+pub fn click_test() -> Result<(), adw::glib::BoolError> {
+    adw::init()?;
+    register_resources();
+    smoke_test_reader_pipeline(false, false, true)
 }
 
 pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
@@ -6057,7 +6208,7 @@ pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
     ui::sync_health::smoke_test()?;
     ui::paging::smoke_test()?;
     ui::library::smoke_test()?;
-    smoke_test_reader_pipeline(false, false)
+    smoke_test_reader_pipeline(false, false, false)
 }
 
 fn register_resources() {

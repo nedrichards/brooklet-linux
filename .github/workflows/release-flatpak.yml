@@ -77,6 +77,8 @@ jobs:
       - name: Required physical keyboard regression
         run: |
           dbus-run-session -- xvfb-run -a flatpak build --share=network --share=ipc --socket=x11 --env=GDK_BACKEND=x11 --bind-mount=/run/brooklet-keyboard-event.py="$PWD/build-aux/keyboard-event.py" --env=BROOKLET_KEYBOARD_DRIVER=/run/brooklet-keyboard-event.py flatpak_app brooklet --keyboard-test
+      - name: Required physical double-click regression
+        run: dbus-run-session -- xvfb-run -a flatpak build --share=ipc --socket=x11 --env=GDK_BACKEND=x11 --bind-mount=/run/brooklet-keyboard-event.py="$PWD/build-aux/keyboard-event.py" --env=BROOKLET_KEYBOARD_DRIVER=/run/brooklet-keyboard-event.py flatpak_app brooklet --click-test
       - name: Desktop smoke observations (advisory)
         id: desktop_smoke
         continue-on-error: true
