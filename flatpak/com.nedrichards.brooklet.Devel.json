@@ -53,7 +53,18 @@
       "sources": [
         {
           "type": "dir",
-          "path": ".."
+          "path": "..",
+          "skip": [
+            ".git",
+            ".flatpak-builder",
+            "_build",
+            "build",
+            "build-dir",
+            "target",
+            ".codex",
+            ".agents",
+            ".aws"
+          ]
         }
       ],
       "test-rule": "",
