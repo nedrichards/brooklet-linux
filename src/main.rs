@@ -5,6 +5,15 @@ mod ui;
 
 fn main() -> adw::glib::ExitCode {
     logging::init();
+    if std::env::args_os().any(|argument| argument == "--sidebar-test") {
+        return match application::sidebar_test() {
+            Ok(()) => adw::glib::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("Brooklet sidebar regression failed: {error}");
+                adw::glib::ExitCode::FAILURE
+            }
+        };
+    }
     if std::env::args_os().any(|argument| argument == "--click-test") {
         return match application::click_test() {
             Ok(()) => adw::glib::ExitCode::SUCCESS,

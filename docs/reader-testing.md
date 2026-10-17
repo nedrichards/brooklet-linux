@@ -144,3 +144,51 @@ are also tested locally in the installed development app. Deterministic Rust and
 SDK checks and `--keyboard-test` remain required for CI and release packaging.
 Gallery failures report timeout, decode counts, viewport scheduling, memory and
 session retention separately to make follow-up investigations actionable.
+
+## Sidebar and collection review
+
+`brooklet --sidebar-test` uses synthetic articles, without loading account data.
+It checks active-destination double activation, ordinary destination switching,
+nested Library navigation and independent reader scroll position. The required
+`--keyboard-test` journey includes this check. Set `BROOKLET_REVIEW_DIR` to an
+ignored directory under `_build/` to save light, dark and narrow GTK snapshots.
+
+For manual review, check Inbox, Saved, Library home, All articles, Unread, Read,
+Categories, a category's feeds, a feed's articles and Search. Headers should
+share a surface with the reader, and Sync, Search and Main Menu should remain
+available. Saved has no subtitle. Library navigation groups stop after their
+last row. Double-click/tap the already active destination to scroll its current
+list to the top without navigating back or moving the reader. Switching
+destinations restores their existing context. Check narrow windows, enlarged
+text, light/dark appearance and reduced motion; header double-click should
+retain the desktop's window-management behaviour.
+
+### Reproducible desktop fixtures
+
+Run native input checks on a fresh Xvfb server, with its `DISPLAY` selected
+**before** Flatpak opens the X11 socket. Setting only `--env=DISPLAY=…` inside
+the sandbox does not select which host socket Flatpak mounts. Do not reuse a
+socket pathname as evidence that an old test server is still running.
+
+After compiling inside the pinned GNOME SDK, with `xvfb-run` installed on the host:
+
+```sh
+xvfb-run -a -s '-screen 0 2560x1600x24' flatpak run --user \
+  --socket=x11 --share=ipc --share=network \
+  --env=GDK_BACKEND=x11 --env=GDK_SCALE=1 \
+  --filesystem="$PWD" \
+  --env=BROOKLET_KEYBOARD_DRIVER="$PWD/build-aux/keyboard-event.py" \
+  --command=sh org.gnome.Sdk//51 -eu -c '
+    for check in sidebar search paging pull-refresh click keyboard; do
+      "$1" --"$check"-test
+    done
+  ' sh "$PWD/_build/brooklet"
+```
+
+Repeat with `--env=GDK_SCALE=2` for native coordinate scaling. The GTK fixtures
+use a scoped, explicit font/DPI configuration and disable incidental transitions;
+responsive layouts and reduced motion are exercised explicitly. These settings
+are restored when the fixture exits and do not change the application's normal
+preferences. Animation checks wait for mapped frames, visible displacement,
+and animation completion with a bounded deadline instead of assuming a fixed
+wall-clock delay is sufficient on a software renderer.

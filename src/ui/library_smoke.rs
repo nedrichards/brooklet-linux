@@ -255,7 +255,7 @@ pub fn run() -> Result<(), adw::glib::BoolError> {
     let after = article_anchor(&feed.scroller).unwrap();
     check(
         before.0 == after.0 && (before.1 - after.1).abs() < 2.0,
-        "Feed refresh lost viewport anchor",
+        &format!("Feed refresh lost viewport anchor: before={before:?}, after={after:?}"),
     )?;
     check(
         inbox::selected_id(&list) == Some(80)

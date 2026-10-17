@@ -178,7 +178,9 @@ pub const BINDINGS: &[Binding] = &[
     binding!(
         message("Article lists and reader"),
         message("Go to beginning"),
-        message("First article in lists; top of the reader"),
+        message(
+            "First article in lists; top of the reader. Double-tap the active destination to scroll its list to the top"
+        ),
         ["Home"],
         Command::First,
         Context::Articles

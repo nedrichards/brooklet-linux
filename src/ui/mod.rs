@@ -1,5 +1,6 @@
 pub mod entry_object;
 pub mod inbox;
+pub mod inbox_feedback;
 pub mod reader;
 pub mod reader_images;
 pub mod reconnect;
@@ -15,3 +16,7 @@ pub mod sync_health;
 
 pub mod paging;
 pub mod pull_refresh;
+
+pub mod sidebar;
+
+pub mod test_support;

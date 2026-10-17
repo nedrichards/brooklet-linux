@@ -22,6 +22,7 @@ Adw.ApplicationWindow window {
         orientation: vertical;
       }
       Adw.NavigationSplitView inbox_split {
+      styles ["brooklet-split"]
       vexpand: true;
       min-sidebar-width: 300;
       max-sidebar-width: 420;
@@ -126,18 +127,8 @@ Adw.ApplicationWindow window {
               icon-name: "starred-symbolic";
               child: Adw.ToolbarView {
                 [top]
-                Adw.HeaderBar {
-                  title-widget: Adw.WindowTitle {
-                    title: _("Saved");
-                    subtitle: _("Starred in Miniflux");
-                  };
-                  [end]
-                  Gtk.Button {
-                      icon-name: "system-search-symbolic";
-                      action-name: "app.search";
-                      tooltip-text: _("Search Articles");
-                      accessibility { label: _("Search Articles"); }
-                    }
+                Adw.HeaderBar saved_header {
+                  title-widget: Adw.WindowTitle { title: _("Saved"); };
                 }
                 content: Gtk.Box {
                   orientation: vertical;
@@ -167,18 +158,11 @@ Adw.ApplicationWindow window {
                   tag: "library-root";
                   child: Adw.ToolbarView {
                     [top]
-                    Adw.HeaderBar {
-                      [end]
-                      Gtk.Button {
-                        icon-name: "system-search-symbolic";
-                        action-name: "app.search";
-                        tooltip-text: _("Search Articles");
-                        accessibility { label: _("Search Articles"); }
-                      }
-                    }
+                    Adw.HeaderBar library_header {}
                     content: Gtk.ScrolledWindow {
                       hscrollbar-policy: never;
                       child: Gtk.ListBox {
+                        valign: start;
                         selection-mode: none;
                         margin-top: 12;
                         margin-bottom: 12;
@@ -188,7 +172,8 @@ Adw.ApplicationWindow window {
 
                         Adw.ActionRow {
                           title: _("All articles");
-                          subtitle: _("Everything retained locally");
+                          [prefix]
+                          Gtk.Image { icon-name: "folder-documents-symbolic"; }
                           activatable: true;
                           action-name: "win.library-all";
                           [suffix]
@@ -197,7 +182,8 @@ Adw.ApplicationWindow window {
 
                         Adw.ActionRow {
                           title: _("Unread");
-                          subtitle: _("Still waiting for you");
+                          [prefix]
+                          Gtk.Image { icon-name: "mail-unread-symbolic"; }
                           activatable: true;
                           action-name: "win.library-unread";
                           [suffix]
@@ -206,7 +192,8 @@ Adw.ApplicationWindow window {
 
                         Adw.ActionRow {
                           title: _("Read");
-                          subtitle: _("Already opened");
+                          [prefix]
+                          Gtk.Image { icon-name: "mail-read-symbolic"; }
                           activatable: true;
                           action-name: "win.library-read";
                           [suffix]
@@ -215,7 +202,8 @@ Adw.ApplicationWindow window {
 
                         Adw.ActionRow {
                           title: _("Categories");
-                          subtitle: _("Browse categories and feeds");
+                          [prefix]
+                          Gtk.Image { icon-name: "folder-symbolic"; }
                           activatable: true;
                           action-name: "win.library-categories";
                           [suffix]
@@ -231,7 +219,7 @@ Adw.ApplicationWindow window {
                   tag: "library-all";
                   child: Adw.ToolbarView {
                     [top]
-                    Adw.HeaderBar {}
+                    Adw.HeaderBar library_all_header {}
                     content: Gtk.Box {
                       orientation: vertical;
                       Adw.StatusPage library_all_status {
@@ -255,7 +243,7 @@ Adw.ApplicationWindow window {
                   tag: "library-unread";
                   child: Adw.ToolbarView {
                     [top]
-                    Adw.HeaderBar {}
+                    Adw.HeaderBar library_unread_header {}
                     content: Gtk.Box {
                       orientation: vertical;
                       Adw.StatusPage library_unread_status {
@@ -279,7 +267,7 @@ Adw.ApplicationWindow window {
                   tag: "library-read";
                   child: Adw.ToolbarView {
                     [top]
-                    Adw.HeaderBar {}
+                    Adw.HeaderBar library_read_header {}
                     content: Gtk.Box {
                       orientation: vertical;
                       Adw.StatusPage library_read_status {
@@ -303,7 +291,7 @@ Adw.ApplicationWindow window {
                   tag: "library-categories";
                   child: Adw.ToolbarView {
                     [top]
-                    Adw.HeaderBar {}
+                    Adw.HeaderBar library_categories_header {}
                     content: Gtk.Box {
                       orientation: vertical;
                       Adw.StatusPage library_categories_status {
@@ -404,7 +392,7 @@ Adw.ApplicationWindow window {
                 styles ["reader-placeholder"]
                 icon-name: "x-office-document-symbolic";
                 title: _("Choose an article");
-                description: _("Selection moves through the list; activation opens an article.");
+                description: _("Open an article to start reading.");
               }
 
               Gtk.ScrolledWindow reader_scroller {

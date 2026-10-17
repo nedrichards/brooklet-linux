@@ -4,6 +4,10 @@ Brooklet is an opinionated, offline-first Miniflux client for GNOME. It helps
 you get through what is new, keep what matters, and read comfortably in a
 native GTK interface.
 
+Inbox, Saved and Library share the same controls. Double-click or double-tap
+the active destination to return its current list to the top without moving
+the reader.
+
 There is also a separately developed Android application with the same vibe,
 but a totally different implementation. I hope you enjoy either, neither or
 both.

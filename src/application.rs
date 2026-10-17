@@ -884,10 +884,8 @@ impl BrookletApplication {
             install_window_tools(&window, application, &builder, tools);
             let destinations: adw::ViewStack =
                 builder.object("destinations").expect("destinations");
-            let switcher: adw::ViewSwitcherBar = builder
-                .object("destination_switcher")
-                .expect("destination_switcher");
-            install_inbox_top_shortcut(&switcher, &inbox_ui.scroller);
+            ui::inbox_feedback::install(&builder);
+            install_destination_navigation(&builder);
             for navigation in [
                 destinations.clone().upcast::<adw::glib::Object>(),
                 library_navigation.clone().upcast::<adw::glib::Object>(),
@@ -1848,15 +1846,17 @@ fn install_article_cursor_keys(
 }
 
 fn show_main_menu(window: &adw::ApplicationWindow) {
-    let Some(menu) = find_menu_button(window.upcast_ref(), "app_menu") else {
+    let Some(menu) = find_mapped_menu(window.upcast_ref())
+        .or_else(|| find_menu_button(window.upcast_ref(), "app_menu"))
+    else {
         return;
     };
     if menu.is_mapped() {
         menu.popup();
         return;
     }
-    // The Inbox menu button is hidden on other destinations and in a narrow
-    // reader. Present the same menu against the visible window content there.
+    // A narrow reader has no mapped collection header. Present the same menu
+    // against the visible window content there.
     let (Some(model), Some(content)) = (menu.menu_model(), window.content()) else {
         return;
     };
@@ -1870,6 +1870,20 @@ fn show_main_menu(window: &adw::ApplicationWindow) {
     )));
     popup.connect_closed(|popup| popup.unparent());
     popup.popup();
+}
+
+fn find_mapped_menu(widget: &gtk::Widget) -> Option<gtk::MenuButton> {
+    if widget.widget_name() == "app_menu" && widget.is_mapped() {
+        return widget.clone().downcast().ok();
+    }
+    let mut child = widget.first_child();
+    while let Some(widget) = child {
+        if let Some(menu) = find_mapped_menu(&widget) {
+            return Some(menu);
+        }
+        child = widget.next_sibling();
+    }
+    None
 }
 
 fn find_menu_button(widget: &gtk::Widget, name: &str) -> Option<gtk::MenuButton> {
@@ -3628,7 +3642,7 @@ fn install_article_search(
                 return;
             }
             let toolbar = adw::ToolbarView::new();
-            toolbar.add_top_bar(&adw::HeaderBar::new());
+            toolbar.add_top_bar(&ui::sidebar::header());
             let page = adw::NavigationPage::new(&toolbar, "Search Articles");
             page.set_tag(Some("article-search"));
             let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -3883,20 +3897,9 @@ fn install_window_tools(
     window.add_action(&close);
     update_shortcut_tooltips(window.upcast_ref());
     let menu_button: gtk::MenuButton = builder.object("app_menu").expect("app_menu");
-    let menu = gio::Menu::new();
-    menu.append(Some("Mark All Read"), Some("win.mark-all-read"));
-    for (label, action) in [
-        ("Search Articles", "app.search"),
-        ("Refresh Feeds", "win.refresh-feeds"),
-        ("Subscribe…", "win.subscribe"),
-        ("Preferences", "win.preferences"),
-        ("Keyboard Shortcuts", "app.show-shortcuts"),
-        ("About Brooklet", "win.about"),
-    ] {
-        menu.append(Some(label), Some(action));
-    }
     menu_button.set_widget_name("app_menu");
-    menu_button.set_menu_model(Some(&menu));
+    menu_button.set_menu_model(Some(&ui::sidebar::main_menu()));
+    ui::sidebar::install(builder);
 
     install_article_search(
         window,
@@ -4437,53 +4440,123 @@ fn install_window_tools(
     window.add_action(&about);
 }
 
-// Capture the second press before the switcher's button handles it. Picking
-// the actual button keeps the shortcut correct across resizing and RTL layouts.
-fn install_inbox_top_shortcut(switcher: &adw::ViewSwitcherBar, scroller: &gtk::ScrolledWindow) {
-    fn has_inbox_icon(widget: &gtk::Widget) -> bool {
-        if let Some(image) = widget.downcast_ref::<gtk::Image>()
-            && image.icon_name().as_deref() == Some("mail-unread-symbolic")
-        {
-            return true;
+fn install_destination_navigation(builder: &gtk::Builder) {
+    let switcher: adw::ViewSwitcherBar = builder.object("destination_switcher").unwrap();
+    let destinations: adw::ViewStack = builder.object("destinations").unwrap();
+    let library_navigation: adw::NavigationView = builder.object("library_navigation").unwrap();
+    install_destination_top_shortcut(&switcher, &destinations, {
+        let destinations = destinations.downgrade();
+        let navigation = library_navigation.downgrade();
+        move || {
+            let (Some(destinations), Some(navigation)) =
+                (destinations.upgrade(), navigation.upgrade())
+            else {
+                return;
+            };
+            let page = if destinations.visible_child_name().as_deref() == Some("library") {
+                navigation
+                    .visible_page()
+                    .map(|page| page.upcast::<gtk::Widget>())
+            } else {
+                destinations.visible_child()
+            };
+            if let Some(scroller) = page.as_ref().and_then(visible_scroller) {
+                let adjustment = scroller.vadjustment();
+                adjustment.set_value(adjustment.lower());
+                ui::inbox_feedback::feedback_at_top(&scroller);
+            }
+        }
+    });
+}
+
+// Resolve within the current page, including dynamic Library and Search pages.
+// Hidden empty-state scrollers must not intercept the gesture.
+fn visible_scroller(widget: &gtk::Widget) -> Option<gtk::ScrolledWindow> {
+    if !widget.is_visible() {
+        return None;
+    }
+    if let Some(scroller) = widget.downcast_ref::<gtk::ScrolledWindow>() {
+        return Some(scroller.clone());
+    }
+    let mut child = widget.first_child();
+    while let Some(widget) = child {
+        if let Some(scroller) = visible_scroller(&widget) {
+            return Some(scroller);
+        }
+        child = widget.next_sibling();
+    }
+    None
+}
+
+// Capture both presses: the destination must already be active on the first.
+// Claim only the second press so ordinary switching retains its GTK behaviour.
+fn install_destination_top_shortcut(
+    switcher: &adw::ViewSwitcherBar,
+    destinations: &adw::ViewStack,
+    jump: impl Fn() + 'static,
+) -> gtk::GestureClick {
+    fn destination(widget: &gtk::Widget) -> Option<&'static str> {
+        if let Some(image) = widget.downcast_ref::<gtk::Image>() {
+            match image.icon_name().as_deref() {
+                Some("mail-unread-symbolic") => return Some("inbox"),
+                Some("starred-symbolic") => return Some("saved"),
+                Some("folder-documents-symbolic") => return Some("library"),
+                _ => {}
+            }
         }
         let mut child = widget.first_child();
         while let Some(widget) = child {
-            if has_inbox_icon(&widget) {
-                return true;
+            if let Some(name) = destination(&widget) {
+                return Some(name);
             }
             child = widget.next_sibling();
         }
-        false
+        None
     }
 
+    switcher.set_tooltip_text(Some(
+        "Double-click or double-tap the active destination to return its current list to the top",
+    ));
     let gesture = gtk::GestureClick::builder()
         .button(1)
         .propagation_phase(gtk::PropagationPhase::Capture)
         .build();
     let weak_switcher = switcher.downgrade();
-    let weak_scroller = scroller.downgrade();
+    let weak_destinations = destinations.downgrade();
+    let armed = Cell::new(None);
     gesture.connect_pressed(move |gesture, presses, x, y| {
-        if presses != 2 {
-            return;
-        }
-        let (Some(switcher), Some(scroller)) = (weak_switcher.upgrade(), weak_scroller.upgrade())
+        let (Some(switcher), Some(destinations)) =
+            (weak_switcher.upgrade(), weak_destinations.upgrade())
         else {
             return;
         };
         let mut picked = switcher.pick(x, y, gtk::PickFlags::DEFAULT);
+        let mut target = None;
         while let Some(widget) = picked {
             if widget.is::<gtk::ToggleButton>() {
-                if has_inbox_icon(&widget) {
-                    gesture.set_state(gtk::EventSequenceState::Claimed);
-                    let adjustment = scroller.vadjustment();
-                    adjustment.set_value(adjustment.lower());
-                }
+                target = destination(&widget);
                 break;
             }
             picked = widget.parent();
         }
+        if presses == 1 {
+            armed.set(
+                target.filter(|name| destinations.visible_child_name().as_deref() == Some(*name)),
+            );
+        } else if presses == 2 {
+            if let Some(name) = armed.take()
+                && target == Some(name)
+                && destinations.visible_child_name().as_deref() == Some(name)
+            {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                jump();
+            }
+        } else {
+            armed.set(None);
+        }
     });
-    switcher.add_controller(gesture);
+    switcher.add_controller(gesture.clone());
+    gesture
 }
 
 fn show_account(inbox_status: &adw::StatusPage, setup_button: &gtk::Button) {
@@ -4581,7 +4654,7 @@ fn smoke_test_image_anchor() -> Result<(), adw::glib::BoolError> {
     }
 }
 
-fn smoke_test_inbox_top_shortcut(builder: &gtk::Builder) -> Result<(), adw::glib::BoolError> {
+fn smoke_test_destination_top_shortcut(builder: &gtk::Builder) -> Result<(), adw::glib::BoolError> {
     fn buttons(widget: &gtk::Widget, result: &mut Vec<gtk::ToggleButton>) {
         if let Some(button) = widget.downcast_ref::<gtk::ToggleButton>() {
             result.push(button.clone());
@@ -4597,12 +4670,16 @@ fn smoke_test_inbox_top_shortcut(builder: &gtk::Builder) -> Result<(), adw::glib
     // Use an isolated adjustment to verify the real switcher hit targets without
     // disturbing the article-keyboard fixture's scroll state.
     let scroller = gtk::ScrolledWindow::new();
-    install_inbox_top_shortcut(&switcher, &scroller);
-    let controllers = switcher.observe_controllers();
-    let gesture = (0..controllers.n_items())
-        .filter_map(|index| controllers.item(index).and_downcast::<gtk::GestureClick>())
-        .find(|gesture| gesture.propagation_phase() == gtk::PropagationPhase::Capture)
-        .ok_or_else(|| adw::glib::bool_error!("Inbox shortcut gesture missing"))?;
+    let destinations: adw::ViewStack = builder.object("destinations").unwrap();
+    let original = destinations.visible_child_name();
+    let gesture = install_destination_top_shortcut(&switcher, &destinations, {
+        let scroller = scroller.clone();
+        move || {
+            scroller
+                .vadjustment()
+                .set_value(scroller.vadjustment().lower())
+        }
+    });
     let mut targets = Vec::new();
     buttons(switcher.upcast_ref(), &mut targets);
     if targets.len() != 3 {
@@ -4610,6 +4687,8 @@ fn smoke_test_inbox_top_shortcut(builder: &gtk::Builder) -> Result<(), adw::glib
     }
     let adjustment = scroller.vadjustment();
     for (index, button) in targets.iter().enumerate() {
+        let name = ["inbox", "saved", "library"][index];
+        destinations.set_visible_child_name(name);
         let bounds = button
             .compute_bounds(&switcher)
             .ok_or_else(|| adw::glib::bool_error!("Destination button has no bounds"))?;
@@ -4623,12 +4702,28 @@ fn smoke_test_inbox_top_shortcut(builder: &gtk::Builder) -> Result<(), adw::glib
             ));
         }
         gesture.emit_by_name::<()>("pressed", &[&2_i32, &x, &y]);
-        let expected = if index == 0 { 0.0 } else { 500.0 };
-        if adjustment.value() != expected {
+        if adjustment.value() != 0.0 {
             return Err(adw::glib::bool_error!(
-                "Inbox double press targeted wrong destination"
+                "Active destination double press did not return to top"
             ));
         }
+    }
+    // Switching on the first press must preserve the destination's saved place.
+    destinations.set_visible_child_name("saved");
+    let bounds = targets[0].compute_bounds(&switcher).unwrap();
+    let x = f64::from(bounds.x() + bounds.width() / 2.0);
+    let y = f64::from(bounds.y() + bounds.height() / 2.0);
+    adjustment.configure(500.0, 0.0, 1000.0, 1.0, 100.0, 100.0);
+    gesture.emit_by_name::<()>("pressed", &[&1_i32, &x, &y]);
+    destinations.set_visible_child_name("inbox");
+    gesture.emit_by_name::<()>("pressed", &[&2_i32, &x, &y]);
+    if adjustment.value() != 500.0 {
+        return Err(adw::glib::bool_error!(
+            "Switching destinations lost scroll position"
+        ));
+    }
+    if let Some(original) = original {
+        destinations.set_visible_child_name(&original);
     }
     switcher.remove_controller(&gesture);
     Ok(())
@@ -4848,7 +4943,6 @@ fn smoke_test_article_keyboard(
     header.set_sensitive(true);
     window.present();
     layout(window);
-    smoke_test_inbox_top_shortcut(builder)?;
     if !setup.grab_focus() {
         return Err(adw::glib::bool_error!(
             "Setup focus fixture was unavailable"
@@ -5498,7 +5592,10 @@ fn smoke_test_automatic_inbox(
     )?;
     check(
         before.entry_id == after.entry_id && (before.row_y - after.row_y).abs() < 2.0,
-        "Automatic additions lost viewport anchor",
+        &format!(
+            "Automatic additions lost viewport anchor: before={:?}/{}, after={:?}/{}",
+            before.entry_id, before.row_y, after.entry_id, after.row_y
+        ),
     )?;
     check(
         gtk::prelude::GtkWindowExt::focus(window).is_some_and(|focus| {
@@ -6070,6 +6167,7 @@ fn smoke_test_reader_pipeline(
 
 pub fn pull_refresh_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
+    let _desktop = ui::test_support::Desktop::install();
     register_resources();
     let builder = gtk::Builder::from_resource("/com/nedrichards/brooklet/ui/window.ui");
     let window: adw::ApplicationWindow = builder.object("window").unwrap();
@@ -6081,43 +6179,59 @@ pub fn pull_refresh_test() -> Result<(), adw::glib::BoolError> {
         .object::<gtk::ScrolledWindow>("inbox_scroller")
         .unwrap()
         .set_visible(true);
+    ui::inbox_feedback::install(&builder);
     window.present();
     let context = adw::glib::MainContext::default();
     while context.pending() {
         context.iteration(false);
     }
-    let result = ui::pull_refresh::smoke_test(&builder);
+    ui::test_support::frames(&window, 3)?;
+    let result = ui::inbox_feedback::smoke_test(&builder)
+        .and_then(|()| ui::pull_refresh::smoke_test(&builder));
     window.close();
     result.map_err(|error| adw::glib::bool_error!("{error}"))
 }
 
 pub fn paging_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
+    let _desktop = ui::test_support::Desktop::install();
     ui::paging::smoke_test()
 }
 
 pub fn search_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
+    let _desktop = ui::test_support::Desktop::install();
     register_resources();
     smoke_test_reader_pipeline(false, true, false)
 }
 
 pub fn reader_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
+    let _desktop = ui::test_support::Desktop::install();
     register_resources();
     smoke_test_reader_pipeline(false, false, false)
 }
 
+#[path = "sidebar_smoke.rs"]
+mod sidebar_smoke;
+
+pub fn sidebar_test() -> Result<(), adw::glib::BoolError> {
+    sidebar_smoke::run()
+}
+
 pub fn keyboard_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
+    let _desktop = ui::test_support::Desktop::install();
     register_resources();
     smoke_test_reader_pipeline(true, false, false)?;
     ui::paging::smoke_test()?;
-    ui::library::smoke_test()
+    ui::library::smoke_test()?;
+    sidebar_test()
 }
 
 pub fn click_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
+    let _desktop = ui::test_support::Desktop::install();
     register_resources();
     smoke_test_reader_pipeline(false, false, true)
 }
@@ -6125,6 +6239,7 @@ pub fn click_test() -> Result<(), adw::glib::BoolError> {
 pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
     ui::startup::smoke_test()?;
     adw::init()?;
+    let _desktop = ui::test_support::Desktop::install();
     let texture = gtk::gdk::MemoryTexture::new(
         320,
         160,

@@ -121,7 +121,7 @@ impl LibraryPages {
         body.append(&status);
         body.append(&scroller);
         let toolbar = adw::ToolbarView::new();
-        toolbar.add_top_bar(&adw::HeaderBar::new());
+        toolbar.add_top_bar(&super::sidebar::header());
         toolbar.set_content(Some(&body));
         let page = Rc::new(Page {
             page: adw::NavigationPage::new(&toolbar, title),
@@ -152,6 +152,11 @@ impl LibraryPages {
     pub fn open_category(&self, id: i64) {
         let list = gtk::ListBox::new();
         list.add_css_class("boxed-list");
+        list.set_valign(gtk::Align::Start);
+        list.set_margin_top(12);
+        list.set_margin_bottom(12);
+        list.set_margin_start(12);
+        list.set_margin_end(12);
         list.set_selection_mode(gtk::SelectionMode::None);
         self.push(
             Contents::Category {
