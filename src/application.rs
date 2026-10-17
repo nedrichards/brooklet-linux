@@ -2689,14 +2689,30 @@ fn mark_read_from(
                     let selected_position = (ui::inbox::selected_id(&inbox.list) == Some(entry_id))
                         .then(|| ui::inbox::position_of_id(&inbox.list, entry_id))
                         .flatten();
+                    let focus_in_list = inbox
+                        .list
+                        .root()
+                        .and_downcast::<gtk::Window>()
+                        .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window))
+                        .is_some_and(|focus| {
+                            focus == inbox.list.clone().upcast::<gtk::Widget>()
+                                || focus.is_ancestor(&inbox.list)
+                        });
                     let removed = ui::inbox::remove_entry(&inbox.model, entry_id);
                     if removed.is_some() {
                         if inbox.model.store.n_items() > 0 {
                             if let Some(position) = selected_position {
-                                inbox
-                                    .model
-                                    .selection
-                                    .set_selected(position.min(inbox.model.store.n_items() - 1));
+                                let position = position.min(inbox.model.store.n_items() - 1);
+                                inbox.model.selection.set_selected(position);
+                                if focus_in_list {
+                                    // The removed button may own focus. Give GTK a
+                                    // surviving cursor instead of its top-row fallback.
+                                    inbox.list.scroll_to(
+                                        position,
+                                        gtk::ListScrollFlags::FOCUS,
+                                        None,
+                                    );
+                                }
                             }
                             restore_list_place(&inbox.list, &inbox.scroller, place);
                         } else {
@@ -4729,6 +4745,185 @@ fn smoke_test_destination_top_shortcut(builder: &gtk::Builder) -> Result<(), adw
     Ok(())
 }
 
+/// Remove focused row buttons both within and beyond the first database page.
+fn smoke_test_inbox_read_button(
+    window: &adw::ApplicationWindow,
+    builder: &gtk::Builder,
+    inbox: &InboxUi,
+    reader: &ReaderUi,
+    repository: &SqliteRepository,
+    template: &Entry,
+) -> Result<(), adw::glib::BoolError> {
+    use brooklet::services::traits::Repository;
+    use ui::test_support::{pump, wait_for};
+    window.set_title(Some(&format!(
+        "Brooklet Keyboard Regression {}",
+        adw::glib::uuid_string_random()
+    )));
+    window.set_default_size(1080, 720);
+    reader.split.set_show_content(false);
+    window.present();
+    let entries = (0..384)
+        .map(|index| Entry {
+            id: 30_000 + index,
+            published_at_ms: 384 - index,
+            title: format!("Read button story {index}"),
+            read: false,
+            ..template.clone()
+        })
+        .collect::<Vec<_>>();
+    reader
+        .controller
+        .backend_handle()
+        .block_on(repository.replace_unread_snapshot(1, &entries))
+        .map_err(|error| adw::glib::bool_error!("{error}"))?;
+    let toast: adw::ToastOverlay = builder.object("toast_overlay").unwrap();
+    let action = gio::SimpleAction::new("mark-read", Some(&i64::static_variant_type()));
+    action.connect_activate({
+        let inbox = inbox.clone();
+        let context = ReadContext {
+            controller: reader.controller.clone(),
+            inbox: inbox.clone(),
+            toast: toast.clone(),
+            undo: Rc::default(),
+            reader: reader.clone(),
+            current: Rc::default(),
+        };
+        move |_, parameter| {
+            let id = parameter.unwrap().get::<i64>().unwrap();
+            let entry = ui::inbox::entry_by_id(&inbox.model, id).unwrap();
+            mark_read(context.clone(), entry, false, true);
+        }
+    });
+    window.add_action(&action);
+    install_inbox_paging(inbox, reader.controller.clone(), &toast);
+    let tracking = install_read_pin_tracking(inbox);
+    let pager = inbox.model.pager.borrow().clone().unwrap();
+    pager.reload();
+    wait_for("initial inbox page", || inbox.model.store.n_items() == 128)?;
+    pump(Duration::from_millis(200));
+    let driver = std::env::var_os("BROOKLET_KEYBOARD_DRIVER").unwrap();
+    let title = window.title().unwrap();
+    for index in [60, 180, 383] {
+        while ui::inbox::position_of_id(&inbox.list, 30_000 + index).is_none() {
+            let count = inbox.model.store.n_items();
+            inbox
+                .list
+                .scroll_to(count - 1, gtk::ListScrollFlags::NONE, None);
+            wait_for("next inbox page", || inbox.model.store.n_items() > count)?;
+        }
+        // Leave GTK's keyboard cursor at the top, then scroll with the adjustment,
+        // as a mouse or touchpad user does before clicking a row action.
+        inbox.list.scroll_to(0, gtk::ListScrollFlags::FOCUS, None);
+        pump(Duration::from_millis(100));
+        let id = 30_000 + index;
+        let position = ui::inbox::position_of_id(&inbox.list, id).unwrap();
+        inbox
+            .list
+            .scroll_to(position, gtk::ListScrollFlags::NONE, None);
+        pump(Duration::from_millis(200));
+        if index != 383 {
+            let row = find_article_row(inbox.list.upcast_ref(), id).unwrap();
+            let bounds = row.compute_bounds(&inbox.scroller).unwrap();
+            let adjustment = inbox.scroller.vadjustment();
+            adjustment.set_value(
+                adjustment.value() + f64::from(bounds.center().y())
+                    - f64::from(inbox.scroller.height()) * 0.75,
+            );
+            pump(Duration::from_millis(200));
+        }
+        let row = find_article_row(inbox.list.upcast_ref(), id).unwrap();
+        let button = row.last_child().and_downcast::<gtk::Button>().unwrap();
+        let bounds = button.compute_bounds(window).unwrap();
+        let (surface_x, surface_y) = window.surface_transform();
+        let scale = f64::from(window.scale_factor());
+        let point = format!(
+            "{},{}",
+            ((f64::from(bounds.center().x()) + surface_x) * scale) as i32,
+            ((f64::from(bounds.center().y()) + surface_y) * scale) as i32
+        );
+        let before = capture_list_place(&inbox.list, &inbox.scroller);
+        let count = inbox.model.store.n_items();
+        let status = std::process::Command::new("python3")
+            .arg(&driver)
+            .arg(&title)
+            .arg(&point)
+            .arg("click")
+            .status()
+            .map_err(|error| adw::glib::bool_error!("Mouse driver failed: {error}"))?;
+        if !status.success() {
+            return Err(adw::glib::bool_error!("Mouse driver failed"));
+        }
+        wait_for("read button dismissal", || {
+            ui::inbox::position_of_id(&inbox.list, id).is_none()
+        })
+        .map_err(|error| {
+            adw::glib::bool_error!(
+                "{error}: id={id}, selected={:?}, bounds={bounds:?}, point={point}, offset={}",
+                ui::inbox::selected_id(&inbox.list),
+                inbox.scroller.vadjustment().value()
+            )
+        })?;
+        pump(Duration::from_millis(800));
+        let after = capture_list_place(&inbox.list, &inbox.scroller);
+        let next_id = if index == 383 { id - 1 } else { id + 1 };
+        let anchor_preserved = index == 383
+            || (before.entry_id == after.entry_id && (before.row_y - after.row_y).abs() < 1.0);
+        if before.value < 400.0
+            || (after.value - before.value).abs() > 100.0
+            || !anchor_preserved
+            || ui::inbox::selected_id(&inbox.list) != Some(next_id)
+        {
+            return Err(adw::glib::bool_error!(
+                "Read button jumped at index {index}: before={}, after={}, count={count}, anchor={:?}/{:?}",
+                before.value,
+                after.value,
+                before.entry_id,
+                after.entry_id
+            ));
+        }
+        dismiss_undo_toast(inbox);
+        pump(Duration::from_millis(200));
+    }
+    // Automatic marking while reading must leave focus in the reader.
+    let reader_focus = gtk::Button::with_label("Reader focus fixture");
+    reader.content.append(&reader_focus);
+    reader.placeholder.set_visible(false);
+    reader.scroller.set_visible(true);
+    reader.split.set_show_content(true);
+    pump(Duration::from_millis(200));
+    reader_focus.grab_focus();
+    if !reader_focus.has_focus() {
+        return Err(adw::glib::bool_error!(
+            "Reader focus fixture is not focused: mapped={}, visible={}, scroller={}, focus={:?}",
+            reader_focus.is_mapped(),
+            reader_focus.is_visible(),
+            reader.scroller.is_mapped(),
+            gtk::prelude::GtkWindowExt::focus(window)
+        ));
+    }
+    let id = ui::inbox::selected_id(&inbox.list).unwrap();
+    action.activate(Some(&id.to_variant()));
+    wait_for("reader read dismissal", || {
+        ui::inbox::position_of_id(&inbox.list, id).is_none()
+    })?;
+    pump(Duration::from_millis(200));
+    if !reader_focus.has_focus() {
+        return Err(adw::glib::bool_error!(
+            "Marking read stole reader focus: {:?}",
+            gtk::prelude::GtkWindowExt::focus(window)
+        ));
+    }
+    reader.content.remove(&reader_focus);
+    reader.split.set_show_content(false);
+    dismiss_undo_toast(inbox);
+    window.remove_action("mark-read");
+    inbox.model.selection.disconnect(tracking);
+    inbox.model.pager.borrow_mut().take();
+    println!("Physical paged inbox read-button regression passed");
+    Ok(())
+}
+
 /// Exercise real pointer input while a previously read article remains pinned.
 fn smoke_test_article_double_click(
     window: &adw::ApplicationWindow,
@@ -6031,7 +6226,15 @@ fn smoke_test_reader_pipeline(
         source_list: Rc::new(RefCell::new(None)),
     };
     if click_only {
-        let result = smoke_test_article_double_click(&window, &inbox, &replacement);
+        let result = smoke_test_inbox_read_button(
+            &window,
+            &builder,
+            &inbox,
+            &reader,
+            &repository,
+            &replacement,
+        )
+        .and_then(|()| smoke_test_article_double_click(&window, &inbox, &replacement));
         window.destroy();
         drop(reader);
         drop(inbox);
