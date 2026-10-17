@@ -20,7 +20,7 @@ Download the Flatpak bundle for your architecture from
 [GitHub Releases](https://github.com/nedrichards/brooklet-linux/releases).
 
 ```sh
-flatpak install --user ./Brooklet-v0.1.1-x86_64.flatpak
+flatpak install --user ./Brooklet-v0.1.2-x86_64.flatpak
 ```
 
 Use the `aarch64` bundle for ARM64 systems. GitHub bundles are release snapshots;

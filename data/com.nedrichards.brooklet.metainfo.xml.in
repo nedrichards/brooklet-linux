@@ -51,6 +51,13 @@
     <display_length compare="ge">360</display_length>
   </requires>
   <releases>
+    <release version="0.1.2" date="2026-10-17">
+      <description>
+        <p>Inbox, Saved, Library and the reader share a more consistent appearance, with global controls available throughout collection navigation.</p>
+        <p>Saved has a simpler header, and Library navigation is more compact.</p>
+        <p>Double-click or double-tap the active destination to return its current list to the top while keeping your reader position and Library context.</p>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-10-12">
       <description>
         <p>A new GNOME-style icon combines an open book, a winding brook, and a bright bookmark, with a matching symbolic icon.</p>
