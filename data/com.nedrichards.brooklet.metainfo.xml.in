@@ -55,6 +55,7 @@
       <description>
         <p>Inbox, Saved, Library and the reader share a more consistent appearance, with global controls available throughout collection navigation.</p>
         <p>Saved has a simpler header, and Library navigation is more compact.</p>
+        <p>The TLS dependency includes upstream security fixes.</p>
         <p>Double-click or double-tap the active destination to return its current list to the top while keeping your reader position and Library context.</p>
       </description>
     </release>
