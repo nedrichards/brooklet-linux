@@ -181,6 +181,11 @@ pub fn configure_with_action(
         ));
         let marker = marker.clone();
         item.connect_item_notify(move |item| {
+            // A recycled row must not inherit an outgoing article's fade.
+            if let Some(row) = item.child() {
+                row.set_opacity(1.0);
+                row.remove_css_class("restored-article");
+            }
             if let Some((entry, signal)) = bound.borrow_mut().take() {
                 entry.disconnect(signal);
             }
@@ -188,6 +193,11 @@ pub fn configure_with_action(
                 return;
             };
             render_row(item, &entry, marker.get());
+            if entry.reveal_pending()
+                && let Some(row) = item.child()
+            {
+                row.add_css_class("restored-article");
+            }
             let weak_item = item.downgrade();
             let marker = marker.clone();
             let signal = entry.connect_local("changed", false, move |values| {
@@ -207,6 +217,40 @@ pub fn configure_with_action(
         selection,
         pager: Rc::default(),
     }
+}
+
+/// Fade only the outgoing content, keeping its allocation and text layout still.
+/// Adwaita completes immediately for reduced motion and unmapped widgets.
+pub fn fade_read_row(row: Option<gtk::Widget>, done: impl FnOnce() + 'static) {
+    let Some(row) = row.filter(|row| row.is_mapped()) else {
+        done();
+        return;
+    };
+    let name = row.widget_name();
+    let weak = row.downgrade();
+    let target_name = name.clone();
+    let target = adw::CallbackAnimationTarget::new(move |opacity| {
+        if let Some(row) = weak.upgrade()
+            && row.widget_name() == target_name
+        {
+            row.set_opacity(opacity);
+        }
+    });
+    let animation = adw::TimedAnimation::new(&row, 1.0, 0.0, 160, target);
+    animation.set_easing(adw::Easing::EaseOutCubic);
+    let weak = row.downgrade();
+    let done = RefCell::new(Some(done));
+    animation.connect_done(move |_| {
+        if let Some(row) = weak.upgrade()
+            && row.widget_name() == name
+        {
+            row.set_opacity(1.0);
+        }
+        if let Some(done) = done.borrow_mut().take() {
+            done();
+        }
+    });
+    animation.play();
 }
 
 fn render_row(item: &gtk::ListItem, entry: &EntryObject, open_id: Option<i64>) {
@@ -523,7 +567,7 @@ pub fn remove_entry(model: &InboxModel, entry_id: i64) -> Option<Entry> {
     Some(entry)
 }
 
-pub fn insert_entry(model: &InboxModel, entry: Entry) {
+pub fn insert_entry(model: &InboxModel, entry: Entry, reveal: bool) -> EntryObject {
     let position = (0..model.store.n_items())
         .find(|position| {
             entry_at(model, *position).is_some_and(|existing| {
@@ -531,7 +575,35 @@ pub fn insert_entry(model: &InboxModel, entry: Entry) {
             })
         })
         .unwrap_or_else(|| model.store.n_items());
-    model.store.insert(position, &EntryObject::new(entry));
+    let object = EntryObject::new(entry);
+    object.set_reveal_pending(reveal);
+    model.store.insert(position, &object);
+    object
+}
+
+/// Undo may restore many offscreen articles. Only the first allocation may
+/// start a reveal; ordinary scrolling must never animate those articles later.
+pub fn finish_undo_reveals(list: &gtk::ListView, entries: Vec<EntryObject>) {
+    if entries.is_empty() {
+        return;
+    }
+    let clear = move || {
+        for entry in &entries {
+            entry.set_reveal_pending(false);
+        }
+    };
+    if !list.is_mapped() {
+        clear();
+        return;
+    }
+    let allocated = Cell::new(false);
+    list.add_tick_callback(move |_, _| {
+        if !allocated.replace(true) {
+            return adw::glib::ControlFlow::Continue;
+        }
+        clear();
+        adw::glib::ControlFlow::Break
+    });
 }
 
 fn adjacent_position(selected: u32, count: u32, direction: i32) -> Option<u32> {

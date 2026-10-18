@@ -117,6 +117,14 @@ The required `--click-test` gate uses the same X11 driver to double-click an
 article below a retained read row. It processes input and idle callbacks
 between clicks and checks that the intended article activates, then that the
 old read row disappears after the double-click interval without moving selection.
+It also clicks Inbox read buttons across database pages and at the end of the
+list, with animations enabled and disabled. Per-frame checks require a one-way
+opacity fade with fixed row dimensions and a stable, partly clipped viewport
+anchor. Dismissal fades for 160 ms without animating row height or text layout;
+reduced motion removes the row immediately after the local write succeeds.
+Undo mirrors this with an opacity-only reveal, preserving the current selection
+and viewport anchor. The fixture also checks bulk restoration, offscreen reveal
+expiry and restoring the final article into an empty Inbox.
 
 ## Reader toolbar regression
 

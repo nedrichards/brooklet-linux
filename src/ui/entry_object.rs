@@ -1,4 +1,4 @@
-use std::cell::{Ref, RefCell};
+use std::cell::{Cell, Ref, RefCell};
 use std::sync::Arc;
 
 use adw::glib::subclass::prelude::*;
@@ -11,6 +11,7 @@ mod imp {
     #[derive(Default)]
     pub struct EntryObject {
         pub entry: RefCell<Option<Arc<Entry>>>,
+        pub reveal_pending: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -33,6 +34,14 @@ glib::wrapper! {
 }
 
 impl EntryObject {
+    pub fn set_reveal_pending(&self, pending: bool) {
+        self.imp().reveal_pending.set(pending);
+    }
+
+    pub fn reveal_pending(&self) -> bool {
+        self.imp().reveal_pending.get()
+    }
+
     pub fn new(entry: Entry) -> Self {
         let object: Self = glib::Object::builder().build();
         *object.imp().entry.borrow_mut() = Some(Arc::new(entry));

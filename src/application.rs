@@ -1975,6 +1975,12 @@ fn restore_list_place(list: &gtk::ListView, scroller: &gtk::ScrolledWindow, plac
         .entry_id
         .and_then(|id| ui::inbox::position_of_id(list, id))
         && list.is_mapped()
+        // An already realised anchor can be restored directly after allocation.
+        // Scrolling it into view first starts a competing GTK scroll animation,
+        // especially when the top row is only partly visible.
+        && place
+            .entry_id
+            .is_none_or(|id| find_article_row(list.upcast_ref(), id).is_none())
     {
         list.scroll_to(position, gtk::ListScrollFlags::NONE, None);
     }
@@ -2509,11 +2515,15 @@ fn restore_unread_row(inbox: &InboxUi, entry: Entry) {
         None
     }
     .unwrap_or_else(|| capture_list_place(&inbox.list, &inbox.scroller));
-    restore_unread_row_data(inbox, entry);
+    restore_unread_row_data(inbox, entry, false);
     restore_list_place(&inbox.list, &inbox.scroller, place);
 }
 
-fn restore_unread_row_data(inbox: &InboxUi, entry: Entry) {
+fn restore_unread_row_data(
+    inbox: &InboxUi,
+    entry: Entry,
+    reveal: bool,
+) -> Option<ui::entry_object::EntryObject> {
     let entry = Entry {
         read: false,
         ..entry
@@ -2528,14 +2538,14 @@ fn restore_unread_row_data(inbox: &InboxUi, entry: Entry) {
     }
     let selected_id = ui::inbox::selected_id(&inbox.list);
     inbox.rebuilding.set(true);
-    if !ui::inbox::update_entry(&inbox.model, entry.clone()) {
-        ui::inbox::insert_entry(&inbox.model, entry);
-    }
+    let restored = (!ui::inbox::update_entry(&inbox.model, entry.clone()))
+        .then(|| ui::inbox::insert_entry(&inbox.model, entry, reveal));
     if let Some(id) = selected_id {
         ui::inbox::select_id(&inbox.list, id);
     }
     inbox.rebuilding.set(false);
     update_inbox_visibility(inbox);
+    restored
 }
 
 fn mark_unread(
@@ -2660,82 +2670,101 @@ fn mark_read_from(
     let entry_id = entry.id;
     let restore_controller = controller.clone();
     controller.set_read_local(entry_id, true, move |result| {
-        inbox.read_in_flight.borrow_mut().remove(&entry_id);
-        if inbox.suppress_read.borrow_mut().remove(&entry_id) {
-            if result.is_ok() {
-                let toast = toast.clone();
-                restore_controller.set_read_local(entry_id, false, move |result| {
-                    if let Err(error) = result {
-                        toast.add_toast(adw::Toast::new(&error.sync_message()));
-                    }
-                });
-            } else if let Err(error) = result {
-                toast.add_toast(adw::Toast::new(&error.sync_message()));
+        let outgoing = (result.is_ok()
+            && !retain_current
+            && !inbox.suppress_read.borrow().contains(&entry_id))
+        .then(|| find_article_row(inbox.list.upcast_ref(), entry_id))
+        .flatten();
+        ui::inbox::fade_read_row(outgoing, move || {
+            inbox.read_in_flight.borrow_mut().remove(&entry_id);
+            if inbox.suppress_read.borrow_mut().remove(&entry_id) {
+                if result.is_ok() {
+                    let toast = toast.clone();
+                    restore_controller.set_read_local(entry_id, false, move |result| {
+                        if let Err(error) = result {
+                            toast.add_toast(adw::Toast::new(&error.sync_message()));
+                        }
+                    });
+                } else if let Err(error) = result {
+                    toast.add_toast(adw::Toast::new(&error.sync_message()));
+                }
+                return;
             }
-            return;
-        }
-        match result {
-            Ok(()) => {
-                update_reader_read_state(&reader, &current, entry_id, true);
-                update_source_read_state(source.as_ref(), &entry, true);
-                dismiss_undo_toast(&inbox);
-                if retain_current
-                    && ui::inbox::selected_id(&inbox.list) == Some(entry_id)
-                    && pin_read(&inbox, entry.clone())
-                {
-                    *undo.borrow_mut() = vec![entry];
-                } else if let Some(removed) = {
-                    let place = capture_list_place(&inbox.list, &inbox.scroller);
-                    let selected_position = (ui::inbox::selected_id(&inbox.list) == Some(entry_id))
+            match result {
+                Ok(()) => {
+                    update_reader_read_state(&reader, &current, entry_id, true);
+                    update_source_read_state(source.as_ref(), &entry, true);
+                    dismiss_undo_toast(&inbox);
+                    if retain_current
+                        && ui::inbox::selected_id(&inbox.list) == Some(entry_id)
+                        && pin_read(&inbox, entry.clone())
+                    {
+                        *undo.borrow_mut() = vec![entry];
+                    } else if let Some(removed) = {
+                        let place = capture_list_place(&inbox.list, &inbox.scroller);
+                        let selected_position = (ui::inbox::selected_id(&inbox.list)
+                            == Some(entry_id))
                         .then(|| ui::inbox::position_of_id(&inbox.list, entry_id))
                         .flatten();
-                    let focus_in_list = inbox
-                        .list
-                        .root()
-                        .and_downcast::<gtk::Window>()
-                        .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window))
-                        .is_some_and(|focus| {
-                            focus == inbox.list.clone().upcast::<gtk::Widget>()
-                                || focus.is_ancestor(&inbox.list)
-                        });
-                    let removed = ui::inbox::remove_entry(&inbox.model, entry_id);
-                    if removed.is_some() {
-                        if inbox.model.store.n_items() > 0 {
-                            if let Some(position) = selected_position {
-                                let position = position.min(inbox.model.store.n_items() - 1);
-                                inbox.model.selection.set_selected(position);
-                                if focus_in_list {
-                                    // The removed button may own focus. Give GTK a
-                                    // surviving cursor instead of its top-row fallback.
-                                    inbox.list.scroll_to(
-                                        position,
-                                        gtk::ListScrollFlags::FOCUS,
-                                        None,
-                                    );
+                        let focus_in_list = inbox
+                            .list
+                            .root()
+                            .and_downcast::<gtk::Window>()
+                            .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window))
+                            .is_some_and(|focus| {
+                                focus == inbox.list.clone().upcast::<gtk::Widget>()
+                                    || focus.is_ancestor(&inbox.list)
+                            });
+                        let removed = ui::inbox::remove_entry(&inbox.model, entry_id);
+                        if removed.is_some() {
+                            if inbox.model.store.n_items() > 0 {
+                                if let Some(position) = selected_position {
+                                    let position = position.min(inbox.model.store.n_items() - 1);
+                                    inbox.model.selection.set_selected(position);
+                                    if focus_in_list {
+                                        // The removed button may own focus. Give GTK a
+                                        // surviving cursor instead of its top-row fallback.
+                                        // Focus the realised row directly: scroll_to
+                                        // would also animate the viewport before its
+                                        // anchor is restored below.
+                                        let focused = ui::inbox::entry_at(&inbox.model, position)
+                                            .and_then(|entry| {
+                                                find_article_row(inbox.list.upcast_ref(), entry.id)
+                                            })
+                                            .and_then(|row| row.parent())
+                                            .is_some_and(|row| row.grab_focus());
+                                        if !focused {
+                                            inbox.list.scroll_to(
+                                                position,
+                                                gtk::ListScrollFlags::FOCUS,
+                                                None,
+                                            );
+                                        }
+                                    }
                                 }
+                                restore_list_place(&inbox.list, &inbox.scroller, place);
+                            } else {
+                                *inbox.emptied_place.borrow_mut() = Some(place);
                             }
-                            restore_list_place(&inbox.list, &inbox.scroller, place);
-                        } else {
-                            *inbox.emptied_place.borrow_mut() = Some(place);
                         }
+                        removed
+                    } {
+                        *undo.borrow_mut() = vec![removed];
+                    } else {
+                        *undo.borrow_mut() = vec![entry];
                     }
-                    removed
-                } {
-                    *undo.borrow_mut() = vec![removed];
-                } else {
-                    *undo.borrow_mut() = vec![entry];
+                    update_inbox_visibility(&inbox);
+                    if show_toast {
+                        let notification = adw::Toast::new("Marked as read");
+                        notification.set_button_label(Some("Undo"));
+                        notification.set_action_name(Some("win.undo"));
+                        *inbox.undo_toast.borrow_mut() = Some(notification.clone());
+                        toast.add_toast(notification);
+                    }
                 }
-                update_inbox_visibility(&inbox);
-                if show_toast {
-                    let notification = adw::Toast::new("Marked as read");
-                    notification.set_button_label(Some("Undo"));
-                    notification.set_action_name(Some("win.undo"));
-                    *inbox.undo_toast.borrow_mut() = Some(notification.clone());
-                    toast.add_toast(notification);
-                }
+                Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
             }
-            Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
-        }
+        });
     });
 }
 
@@ -2761,9 +2790,12 @@ fn undo_mark_read(
                 None
             }
             .unwrap_or_else(|| capture_list_place(&inbox_ui.list, &inbox_ui.scroller));
+            let mut restored = Vec::new();
             for entry in entries {
                 let entry_id = entry.id;
-                restore_unread_row_data(&inbox_ui, entry);
+                if let Some(object) = restore_unread_row_data(&inbox_ui, entry, true) {
+                    restored.push(object);
+                }
                 update_reader_read_state(&reader, &current, entry_id, false);
             }
             if ui::inbox::selected_id(&inbox_ui.list).is_none()
@@ -2773,6 +2805,7 @@ fn undo_mark_read(
                 ui::inbox::select_id(&inbox_ui.list, active_id);
             }
             restore_list_place(&inbox_ui.list, &inbox_ui.scroller, place);
+            ui::inbox::finish_undo_reveals(&inbox_ui.list, restored);
             toast_overlay.add_toast(adw::Toast::new("Restored to Inbox"));
         }
         Err(error) => {
@@ -4745,6 +4778,100 @@ fn smoke_test_destination_top_shortcut(builder: &gtk::Builder) -> Result<(), adw
     Ok(())
 }
 
+/// Check the rendered Undo transition through the production action handler.
+fn smoke_test_inbox_undo(
+    window: &adw::ApplicationWindow,
+    context: &ReadContext,
+    id: i64,
+    animate: bool,
+) -> Result<(), adw::glib::BoolError> {
+    use ui::test_support::{pump, wait_for};
+    fn opacity(node: &gtk::gsk::RenderNode) -> f32 {
+        let children = node.children();
+        let inner = children.iter().map(opacity).reduce(f32::max).unwrap_or(1.0);
+        node.downcast_ref::<gtk::gsk::OpacityNode>()
+            .map_or(inner, |node| node.opacity() * inner)
+    }
+    let inbox = &context.inbox;
+    let before = capture_list_place(&inbox.list, &inbox.scroller);
+    let selected = ui::inbox::selected_id(&inbox.list);
+    let samples = Rc::new(RefCell::new(Vec::new()));
+    window.settings().set_gtk_enable_animations(animate);
+    let tick = inbox.list.add_tick_callback({
+        let samples = samples.clone();
+        let list = inbox.list.downgrade();
+        let scroller = inbox.scroller.downgrade();
+        let anchor = before.entry_id;
+        move |_, _| {
+            let (Some(list), Some(scroller)) = (list.upgrade(), scroller.upgrade()) else {
+                return adw::glib::ControlFlow::Break;
+            };
+            if let Some(row) = find_article_row(list.upcast_ref(), id)
+                && row.is_mapped()
+                && row.width() > 0
+                && row.height() > 0
+            {
+                let snapshot = gtk::Snapshot::new();
+                gtk::WidgetPaintable::new(Some(&row)).snapshot(
+                    &snapshot,
+                    f64::from(row.width()),
+                    f64::from(row.height()),
+                );
+                let alpha = snapshot.to_node().as_ref().map_or(0.0, opacity);
+                let anchor_y = anchor
+                    .and_then(|id| find_article_row(list.upcast_ref(), id))
+                    .and_then(|row| {
+                        row.compute_point(&scroller, &gtk::graphene::Point::new(0.0, 0.0))
+                    })
+                    .map(|point| point.y());
+                samples
+                    .borrow_mut()
+                    .push((alpha, row.width(), row.height(), anchor_y));
+            }
+            adw::glib::ControlFlow::Continue
+        }
+    });
+    gtk::prelude::WidgetExt::activate_action(window, "win.undo", None)?;
+    wait_for("Undo to restore unread article", || {
+        ui::inbox::entry_by_id(&inbox.model, id).is_some_and(|entry| !entry.read)
+    })?;
+    pump(Duration::from_millis(400));
+    tick.remove();
+    window.settings().set_gtk_enable_animations(false);
+    let samples = samples.borrow();
+    let faded = samples
+        .iter()
+        .any(|(alpha, _, _, _)| *alpha > 0.0 && *alpha < 0.99);
+    if faded != animate
+        || samples.last().is_none_or(|sample| sample.0 < 0.99)
+        || samples.windows(2).any(|pair| {
+            pair[1].0 + 0.01 < pair[0].0 || pair[1].1 != pair[0].1 || pair[1].2 != pair[0].2
+        })
+        || samples.iter().any(|sample| {
+            sample
+                .3
+                .is_some_and(|y| (f64::from(y) - before.row_y).abs() > 1.0)
+        })
+        || selected != ui::inbox::selected_id(&inbox.list)
+    {
+        return Err(adw::glib::bool_error!(
+            "Undo reveal changed geometry, viewport, selection or motion policy: {samples:?}"
+        ));
+    }
+    if inbox
+        .model
+        .store
+        .iter::<ui::entry_object::EntryObject>()
+        .filter_map(Result::ok)
+        .any(|entry| entry.reveal_pending())
+    {
+        return Err(adw::glib::bool_error!(
+            "Undo left a delayed offscreen reveal"
+        ));
+    }
+    Ok(())
+}
+
 /// Remove focused row buttons both within and beyond the first database page.
 fn smoke_test_inbox_read_button(
     window: &adw::ApplicationWindow,
@@ -4778,17 +4905,18 @@ fn smoke_test_inbox_read_button(
         .block_on(repository.replace_unread_snapshot(1, &entries))
         .map_err(|error| adw::glib::bool_error!("{error}"))?;
     let toast: adw::ToastOverlay = builder.object("toast_overlay").unwrap();
+    let context = ReadContext {
+        controller: reader.controller.clone(),
+        inbox: inbox.clone(),
+        toast: toast.clone(),
+        undo: Rc::default(),
+        reader: reader.clone(),
+        current: Rc::default(),
+    };
     let action = gio::SimpleAction::new("mark-read", Some(&i64::static_variant_type()));
     action.connect_activate({
         let inbox = inbox.clone();
-        let context = ReadContext {
-            controller: reader.controller.clone(),
-            inbox: inbox.clone(),
-            toast: toast.clone(),
-            undo: Rc::default(),
-            reader: reader.clone(),
-            current: Rc::default(),
-        };
+        let context = context.clone();
         move |_, parameter| {
             let id = parameter.unwrap().get::<i64>().unwrap();
             let entry = ui::inbox::entry_by_id(&inbox.model, id).unwrap();
@@ -4796,6 +4924,21 @@ fn smoke_test_inbox_read_button(
         }
     });
     window.add_action(&action);
+    let undo = gio::SimpleAction::new("undo", None);
+    undo.connect_activate({
+        let context = context.clone();
+        move |_, _| {
+            undo_mark_read(
+                context.controller.clone(),
+                context.inbox.clone(),
+                context.toast.clone(),
+                context.undo.clone(),
+                context.reader.clone(),
+                context.current.clone(),
+            )
+        }
+    });
+    window.add_action(&undo);
     install_inbox_paging(inbox, reader.controller.clone(), &toast);
     let tracking = install_read_pin_tracking(inbox);
     let pager = inbox.model.pager.borrow().clone().unwrap();
@@ -4804,7 +4947,7 @@ fn smoke_test_inbox_read_button(
     pump(Duration::from_millis(200));
     let driver = std::env::var_os("BROOKLET_KEYBOARD_DRIVER").unwrap();
     let title = window.title().unwrap();
-    for index in [60, 180, 383] {
+    for (index, animate) in [(60, true), (180, false), (260, true), (383, true)] {
         while ui::inbox::position_of_id(&inbox.list, 30_000 + index).is_none() {
             let count = inbox.model.store.n_items();
             inbox
@@ -4828,7 +4971,8 @@ fn smoke_test_inbox_read_button(
             let adjustment = inbox.scroller.vadjustment();
             adjustment.set_value(
                 adjustment.value() + f64::from(bounds.center().y())
-                    - f64::from(inbox.scroller.height()) * 0.75,
+                    - f64::from(inbox.scroller.height()) * 0.75
+                    + 13.0,
             );
             pump(Duration::from_millis(200));
         }
@@ -4844,6 +4988,30 @@ fn smoke_test_inbox_read_button(
         );
         let before = capture_list_place(&inbox.list, &inbox.scroller);
         let count = inbox.model.store.n_items();
+        let settings = window.settings();
+        settings.set_gtk_enable_animations(animate);
+        let samples = Rc::new(RefCell::new(Vec::new()));
+        let tick = inbox.list.add_tick_callback({
+            let samples = samples.clone();
+            let list = inbox.list.downgrade();
+            let scroller = inbox.scroller.downgrade();
+            let anchor = before.entry_id;
+            move |_, _| {
+                let (Some(list), Some(scroller)) = (list.upgrade(), scroller.upgrade()) else {
+                    return adw::glib::ControlFlow::Break;
+                };
+                let anchor_y = anchor
+                    .and_then(|id| find_article_row(list.upcast_ref(), id))
+                    .and_then(|row| {
+                        row.compute_point(&scroller, &gtk::graphene::Point::new(0.0, 0.0))
+                    })
+                    .map(|point| point.y());
+                let outgoing = find_article_row(list.upcast_ref(), id)
+                    .map(|row| (row.opacity(), row.width(), row.height()));
+                samples.borrow_mut().push((anchor_y, outgoing));
+                adw::glib::ControlFlow::Continue
+            }
+        });
         let status = std::process::Command::new("python3")
             .arg(&driver)
             .arg(&title)
@@ -4865,6 +5033,41 @@ fn smoke_test_inbox_read_button(
             )
         })?;
         pump(Duration::from_millis(800));
+        tick.remove();
+        settings.set_gtk_enable_animations(false);
+        let samples = samples.borrow();
+        let fading = samples
+            .iter()
+            .filter_map(|(_, outgoing)| *outgoing)
+            .filter(|(opacity, _, _)| *opacity > 0.0 && *opacity < 1.0)
+            .collect::<Vec<_>>();
+        if animate && fading.is_empty() {
+            return Err(adw::glib::bool_error!(
+                "Read dismissal did not visibly fade"
+            ));
+        }
+        if !animate && !fading.is_empty() {
+            return Err(adw::glib::bool_error!(
+                "Read dismissal ignored reduced motion"
+            ));
+        }
+        if fading
+            .windows(2)
+            .any(|pair| pair[1].0 > pair[0].0 || pair[1].1 != pair[0].1 || pair[1].2 != pair[0].2)
+        {
+            return Err(adw::glib::bool_error!(
+                "Read dismissal resized or restarted the outgoing row"
+            ));
+        }
+        if index != 383
+            && samples
+                .iter()
+                .any(|(y, _)| y.is_some_and(|y| (f64::from(y) - before.row_y).abs() > 1.0))
+        {
+            return Err(adw::glib::bool_error!(
+                "Read dismissal moved the viewport during the transition: {samples:?}"
+            ));
+        }
         let after = capture_list_place(&inbox.list, &inbox.scroller);
         let next_id = if index == 383 { id - 1 } else { id + 1 };
         let anchor_preserved = index == 383
@@ -4882,7 +5085,14 @@ fn smoke_test_inbox_read_button(
                 after.entry_id
             ));
         }
-        dismiss_undo_toast(inbox);
+        if index == 60 {
+            // Bulk Undo also restores an article outside the viewport. Its
+            // reveal hint must expire before ordinary scrolling reaches it.
+            let offscreen = ui::inbox::remove_entry(&inbox.model, 30_100).unwrap();
+            context.undo.borrow_mut().push(offscreen);
+            pump(Duration::from_millis(100));
+        }
+        smoke_test_inbox_undo(window, &context, id, animate)?;
         pump(Duration::from_millis(200));
     }
     // Automatic marking while reading must leave focus in the reader.
@@ -4917,10 +5127,26 @@ fn smoke_test_inbox_read_button(
     reader.content.remove(&reader_focus);
     reader.split.set_show_content(false);
     dismiss_undo_toast(inbox);
+    // Restoring the final article must map and reveal the Inbox again.
+    inbox.model.pager.borrow_mut().take();
+    drop(pager);
+    show_entries(inbox, vec![entries[0].clone()]);
+    action.activate(Some(&entries[0].id.to_variant()));
+    wait_for("last unread article dismissal", || {
+        inbox.model.store.n_items() == 0
+    })?;
+    pump(Duration::from_millis(200));
+    smoke_test_inbox_undo(window, &context, entries[0].id, true)?;
+    if inbox.status.is_visible() || !inbox.scroller.is_mapped() {
+        return Err(adw::glib::bool_error!(
+            "Undo did not reopen the empty Inbox"
+        ));
+    }
     window.remove_action("mark-read");
+    window.remove_action("undo");
     inbox.model.selection.disconnect(tracking);
     inbox.model.pager.borrow_mut().take();
-    println!("Physical paged inbox read-button regression passed");
+    println!("Physical paged inbox read-button and Undo regression passed");
     Ok(())
 }
 
@@ -6436,6 +6662,14 @@ pub fn click_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
     let _desktop = ui::test_support::Desktop::install();
     register_resources();
+    let style = gtk::CssProvider::new();
+    style.load_from_resource("/com/nedrichards/brooklet/style.css");
+    let display = gtk::gdk::Display::default().unwrap();
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &style,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
     smoke_test_reader_pipeline(false, false, true)
 }
 
