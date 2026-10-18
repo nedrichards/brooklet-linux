@@ -20,6 +20,11 @@ subdir('po')
 cargo = find_program('cargo', '/usr/lib/sdk/rust-stable/bin/cargo')
 cargo_build = find_program('build-aux/cargo-build.sh')
 
+# Build and checks must share Cargo artifacts, including the application profile.
+cargo_env = environment()
+cargo_env.set('CARGO_TARGET_DIR', meson.project_build_root() / 'target')
+cargo_env.set('BROOKLET_APP_ID', app_id)
+
 cargo_target = custom_target(
   'brooklet-binary',
   input: files(
@@ -100,6 +105,8 @@ test(
   cargo,
   args: ['test', '--all-targets', '--locked'],
   workdir: meson.project_source_root(),
+  env: cargo_env,
+  is_parallel: false,
   timeout: 180,
 )
 
@@ -108,6 +115,8 @@ test(
   cargo,
   args: ['test', '--bin', 'brooklet', '--features', 'gui', '--locked', 'ui::reader_images::tests'],
   workdir: meson.project_source_root(),
+  env: cargo_env,
+  is_parallel: false,
   timeout: 180,
 )
 
@@ -116,6 +125,8 @@ test(
   cargo,
   args: ['fmt', '--all', '--check'],
   workdir: meson.project_source_root(),
+  env: cargo_env,
+  is_parallel: false,
 )
 
 test(
@@ -123,6 +134,8 @@ test(
   cargo,
   args: ['clippy', '--all-targets', '--locked', '--features', 'gui', '--', '-D', 'warnings'],
   workdir: meson.project_source_root(),
+  env: cargo_env,
+  is_parallel: false,
   timeout: 300,
 )
 

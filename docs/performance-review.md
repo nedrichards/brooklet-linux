@@ -180,10 +180,12 @@ service or private article material is used. Glycin disables its additional
 sandbox in the Flatpak development environment; this does not validate decoder
 isolation in the installed app. Hosted CI passed for the published checkpoint.
 
-With the SDK environment and vendored Cargo configuration set up as described
-in the development workflow:
+For these specialised benchmarks, use the pinned SDK and the same cache
+locations as the Meson development workflow:
 
 ```sh
+export CARGO_HOME="$PWD/_build/cargo-home"
+export CARGO_TARGET_DIR="$PWD/_build/target"
 cargo test --features gui --bin brooklet large_list_refresh_performance \
   --locked --offline -- --ignored --nocapture --test-threads=1
 cargo run --example parse_performance --locked --offline -- CORPUS.json

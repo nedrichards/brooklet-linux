@@ -27,36 +27,34 @@ Use the `aarch64` bundle for ARM64 systems. GitHub bundles are release snapshots
 install a newer bundle to update. For the updateable local `brooklet-local`
 repository, see [Local Flatpak installation](docs/maintenance.md#local-flatpak-installation).
 
-## Native build
+## Development and testing
+
+Use Meson inside the pinned GNOME SDK. The helper configures `_build/` on
+first use and retains its Rust compilation cache for subsequent builds:
 
 ```sh
-meson setup build
-meson compile -C build
-meson test -C build
+./scripts/meson.sh compile
+./scripts/meson.sh test
 ```
 
-Native development requires GTK 4.24, libadwaita 1.10, Blueprint Compiler,
-Meson, Cargo, and Rust 1.93 or later but Flatpak is the only supported or
-encouraged environment.
-
-## Core tests without GTK
-
-The non-UI domain and service code deliberately builds without GTK:
+Run a particular check with, for example:
 
 ```sh
-cargo test --all-targets
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
+./scripts/meson.sh test rust-unit-tests
 ```
+
+Meson runs core tests, reader lifecycle tests, formatting, Clippy and metadata
+validation. Compilation and checks share `_build/target/`; avoid standalone
+Cargo commands that create a second root `target/` tree. See
+[maintenance](docs/maintenance.md#development-builds-and-tests) for details.
 
 Setup logic is tested without credentials or a live service through injected
 validator, repository, and secret-store implementations. The Flatpak smoke
 test also constructs the main window, setup dialog, and shortcuts dialog:
 
 ```sh
-flatpak-builder --run build-dir \
-  flatpak/com.nedrichards.brooklet.Devel.json \
-  brooklet --smoke-test
+./scripts/local-flatpak.sh development
+flatpak run --user com.nedrichards.brooklet.Devel --smoke-test
 ```
 
 ## Licence

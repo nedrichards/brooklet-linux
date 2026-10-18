@@ -53,7 +53,28 @@
       "sources": [
         {
           "type": "dir",
-          "path": ".."
+          "path": "..",
+          "skip": [
+            ".git",
+            ".flatpak-builder*",
+            "_build",
+            "build",
+            "build-dir",
+            "build-flatpak*",
+            "target",
+            ".codex",
+            ".agents",
+            ".aws",
+            ".vscode",
+            ".idea",
+            "__pycache__",
+            "*.pyc",
+            ".env",
+            ".env.*",
+            "*.flatpak",
+            "*.log",
+            "flatpak-repo"
+          ]
         }
       ],
       "test-rule": "",

@@ -4,51 +4,76 @@ Dependency updates are proposed weekly by Dependabot for GitHub Actions and appl
 
 The required source and Flatpak jobs retain the repository's application-specific tests. Development artifacts have a separate .Devel identity, a checkout SHA, a 14-day lifetime, and an installation command in the summary. SDK/build success does not establish hardware, live-service, portal, compositor, or multi-monitor behaviour; keep the existing manual and installed-app gates in the release process.
 
+## Development builds and tests
+
+Use `./scripts/meson.sh compile` and `./scripts/meson.sh test` for local
+source validation. The helper runs Meson inside the SDK named in the development
+manifest, with its Rust extension on PATH. Install that SDK and extension first.
+It enables network access for missing Cargo dependencies and keeps downloaded
+crates in `_build/cargo-home/`.
+
+The sole local Meson build directory is `_build/`. Build and test commands use
+`_build/target/` for Cargo output and the same application identity, so checks
+reuse compiled dependencies. Keep this directory between development sessions.
+Meson serializes Cargo checks to avoid competing for the shared target lock.
+Use `./scripts/meson.sh test rust-unit-tests` for a focused core check, or
+`./scripts/meson.sh test --list` to list all checks.
+
+Do not run standalone Cargo builds/tests into root `target/`, or create extra
+SDK/validation target directories. For a specialised Cargo example that Meson
+does not expose, run it inside the pinned SDK with
+`CARGO_TARGET_DIR="$PWD/_build/target"`; reuse `_build/cargo-home/` for downloads.
+Do not run this helper while GNOME Builder is building the same checkout.
+
+This development cache is separate from production Flatpak packaging. The
+canonical Flatpak script below still builds and tests the normal manifest in
+its disposable module directory. Removing root `target/` does not affect the
+installed apps. Removing `_build/target/` forces the next development compile
+and check to rebuild dependencies; it is not routine cleanup. Keep logs and
+review artifacts under `_build/` until their purpose has been reviewed.
+
 ## Local Flatpak installation
 
-From the repository root, build and test the production manifest into the local
-Flatpak repository:
+Run the canonical build from the repository root:
 
 ```sh
-flatpak-builder --user --disable-rofiles-fuse --install-deps-from=flathub --force-clean \
-  --default-branch=master \
-  --repo="$PWD/.flatpak-builder/brooklet-release-repo" \
-  build/release flatpak/com.nedrichards.brooklet.json
+./scripts/local-flatpak.sh
 ```
 
-This runs the manifest's tests and lets Flatpak Builder handle installation into
-the build directory, cleanup, finishing and export. `--force-clean` replaces
-only the build directory; Builder still reuses its build cache. Disabling
-rofiles-fuse uses Flatpak Builder's copy based build mode, needed on hosts where
-FUSE mounts are unavailable. The manifest selects the production application
-ID automatically.
+This builds and tests the production manifest, exports to `flatpak-repo/`,
+then installs or updates the user application. Quit and reopen the app after
+updating. Account settings and application data are preserved.
 
-After the build and tests pass, register the local repository and install or
-update its package:
+For the separate development application, use:
 
 ```sh
-flatpak remote-add --user --if-not-exists --no-gpg-verify \
-  brooklet-local "$PWD/.flatpak-builder/brooklet-release-repo"
-flatpak install --user --or-update brooklet-local com.nedrichards.brooklet//master
+./scripts/local-flatpak.sh development
 ```
 
-The existing `brooklet-local` remote points to this repository. Subsequent
-deployments use the same commands. Quit and reopen Brooklet from GNOME Shell
-after installation to use the new build; its account and cached data are kept.
+Both profiles share one staging directory, `.flatpak-builder/staging`, and
+one Builder state directory, `.flatpak-builder/`. The script takes a checkout
+lock, uses `--force-clean --delete-build-dirs`, and removes module working
+directories and staging on success, failure, or an ordinary interrupt. SIGKILL
+or power loss can leave working files; the next run reuses the same paths and
+cleans them on exit. Do not run GNOME Builder or another build in this checkout
+at the same time. Downloads and Builder's reusable cache remain available;
+this is not a storage quota or a limit on cache growth.
 
-For a separate development installation:
+The build log is `.flatpak-builder/local-build.log` and is replaced on each
+run. Run diagnostic commands and installed-app checks against `flatpak run`
+after installation; staging is deliberately disposable. GNOME Builder can
+still use the `.Devel` manifest for interactive development. Prefer the script
+for automated builds and validation; do not create extra validation trees.
 
-```sh
-flatpak-builder --user --install --install-deps-from=flathub --force-clean \
-  build-dir flatpak/com.nedrichards.brooklet.Devel.json
-```
+`flatpak-repo/` is the durable local update repository, outside disposable
+build state. Keep it when cleaning `.flatpak-builder/`. The production remote
+is `brooklet-local`; development uses `brooklet-devel-local`. The script registers or repoints
+these remotes only after the build, tests and export succeed. Source manifests
+exclude the repository and generated build directories from directory copies.
 
-Its `.Devel` application ID has a separate profile and does not update the
-production installation.
-
-Never reuse an installed `export/` directory for `flatpak build-export`: its
-desktop entry already contains the Flatpak wrapper. Exporting it again nests
-`flatpak run` and makes GNOME Shell try to run Flatpak inside the app sandbox.
+Never export an installed `export/` directory with `flatpak build-export`:
+its desktop entry already includes the host Flatpak wrapper. Let the normal
+manifest-driven build finish and export the staging tree.
 
 ## Releases
 

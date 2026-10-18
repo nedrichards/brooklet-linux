@@ -19,10 +19,12 @@ The export contains article records only. Article text and URLs can still be
 personal; keep exports, parsed documents, and screenshots under ignored
 `_build/`. Only small synthetic HTML examples belong in the checked-in tests.
 
-Build the preview with the GNOME SDK:
+For this specialised preview, run the following inside the pinned GNOME SDK,
+using the same caches as the Meson workflow:
 
 ```sh
-cargo build --features gui --example reader_review
+CARGO_HOME="$PWD/_build/cargo-home" CARGO_TARGET_DIR="$PWD/_build/target" \
+  cargo build --locked --features gui --example reader_review
 ```
 
 Run it in the app sandbox (using the SDK target path for local SDK builds):
@@ -31,7 +33,7 @@ Run it in the app sandbox (using the SDK target path for local SDK builds):
 flatpak build --socket=wayland --socket=x11 --env=GSK_RENDERER=cairo \
   --talk-name=org.freedesktop.portal.Flatpak \
   --filesystem="$PWD" build-dir \
-  "$PWD/_build/sdk-target/debug/examples/reader_review" \
+  "$PWD/_build/target/debug/examples/reader_review" \
   "$PWD/_build/render-audit/articles.json" \
   "$PWD/_build/render-audit/review" 37963
 ```
@@ -56,7 +58,7 @@ Interactive media has external links instead.
 
 ## Interactive development app
 
-After building and updating `_build/brooklet`, run:
+After `./scripts/meson.sh compile` updates `_build/brooklet`, run:
 
 ```sh
 build-aux/run-dev.sh

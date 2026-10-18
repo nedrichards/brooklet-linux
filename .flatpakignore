@@ -15,3 +15,4 @@ __pycache__
 .env.*
 *.flatpak
 *.log
+flatpak-repo

@@ -30,7 +30,14 @@ not a fixed memory ceiling.
 
 ## Measurement and validation
 
-`cargo run --offline --locked --example sqlite_efficiency` uses synthetic data,
+Inside the pinned SDK, use the shared development caches:
+
+```sh
+CARGO_HOME="$PWD/_build/cargo-home" CARGO_TARGET_DIR="$PWD/_build/target" \
+  cargo run --offline --locked --example sqlite_efficiency
+```
+
+This uses synthetic data,
 warms both paths and alternates 12 passes; setup is outside the measured section.
 GNOME SDK 51 debug-build medians on this machine:
 
