@@ -1185,9 +1185,9 @@ dependencies = [
 
 [[package]]
 name = "glycin"
-version = "4.0.2"
+version = "4.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a2c4f0b15d8ec7347ba0e67d0c5c80533a7994929f3e02e2801d5b22e8946dc"
+checksum = "72739235a1990a8ce4fcf35918b8109b83b17a4fe46ff187b399f6697cb721b1"
 dependencies = [
  "glycin-builtin",
  "glycin-external",
@@ -3552,7 +3552,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
