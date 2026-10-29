@@ -1458,14 +1458,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/glycin/glycin-4.0.3.crate",
-        "sha256": "72739235a1990a8ce4fcf35918b8109b83b17a4fe46ff187b399f6697cb721b1",
-        "dest": "cargo/vendor/glycin-4.0.3"
+        "url": "https://static.crates.io/crates/glycin/glycin-4.0.4.crate",
+        "sha256": "4435b4e3908ef32618d2fdf34cf0991a08420ac89c1a8d2cb2add9b5c8f6037a",
+        "dest": "cargo/vendor/glycin-4.0.4"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"72739235a1990a8ce4fcf35918b8109b83b17a4fe46ff187b399f6697cb721b1\", \"files\": {}}",
-        "dest": "cargo/vendor/glycin-4.0.3",
+        "contents": "{\"package\": \"4435b4e3908ef32618d2fdf34cf0991a08420ac89c1a8d2cb2add9b5c8f6037a\", \"files\": {}}",
+        "dest": "cargo/vendor/glycin-4.0.4",
         "dest-filename": ".cargo-checksum.json"
     },
     {
