@@ -27,7 +27,7 @@ async-trait = "0.1.92"
 ego-tree = "0.11.0"
 jiff = "0.2.38"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "native-tls"] }
-rusqlite = { version = "0.40.2", features = ["bundled", "fallible_uint"] }
+rusqlite = { version = "0.41.0", features = ["bundled", "fallible_uint"] }
 scraper = "0.27.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
