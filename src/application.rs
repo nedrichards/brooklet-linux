@@ -2192,7 +2192,11 @@ fn begin_sync(
                 }
                 load_other_views(reload_controller, views, toast_overlay.clone());
                 if let Some(message) = changes.toast_message() {
-                    toast_overlay.add_toast(adw::Toast::new(&message));
+                    if changes.added > 0 {
+                        show_inbox_arrivals(&inbox_ui, &toast_overlay, &message);
+                    } else {
+                        toast_overlay.add_toast(adw::Toast::new(&message));
+                    }
                 }
             }
             Err(error) => {
@@ -2204,6 +2208,33 @@ fn begin_sync(
             }
         }
     });
+}
+
+// Track only arrival feedback: reaching the top must not dismiss errors or Undo.
+fn show_inbox_arrivals(inbox: &InboxUi, overlay: &adw::ToastOverlay, message: &str) {
+    let adjustment = inbox.scroller.vadjustment();
+    if adjustment.value() <= adjustment.lower() + 0.5 {
+        return;
+    }
+    let toast = adw::Toast::new(message);
+    let weak = toast.downgrade();
+    let signal = adjustment.connect_value_changed(move |adjustment| {
+        if adjustment.value() <= adjustment.lower() + 0.5
+            && let Some(toast) = weak.upgrade()
+        {
+            toast.dismiss();
+        }
+    });
+    let signal = RefCell::new(Some(signal));
+    let weak = adjustment.downgrade();
+    toast.connect_dismissed(move |_| {
+        if let Some(adjustment) = weak.upgrade()
+            && let Some(signal) = signal.borrow_mut().take()
+        {
+            adjustment.disconnect(signal);
+        }
+    });
+    overlay.add_toast(toast);
 }
 
 fn inbox_snapshot(inbox_ui: &InboxUi) -> Vec<Entry> {
@@ -3991,7 +4022,11 @@ fn install_window_tools(
                                 "No new articles yet. Slow feeds may appear on the next sync."
                                     .into()
                             });
-                            toast.add_toast(adw::Toast::new(&message));
+                            if changes.added > 0 {
+                                show_inbox_arrivals(&inbox, &toast, &message);
+                            } else {
+                                toast.add_toast(adw::Toast::new(&message));
+                            }
                         }
                         Err(error) => toast.add_toast(adw::Toast::new(&error.sync_message())),
                     }
