@@ -1458,27 +1458,27 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/glycin/glycin-4.0.4.crate",
-        "sha256": "4435b4e3908ef32618d2fdf34cf0991a08420ac89c1a8d2cb2add9b5c8f6037a",
-        "dest": "cargo/vendor/glycin-4.0.4"
+        "url": "https://static.crates.io/crates/glycin/glycin-4.0.5.crate",
+        "sha256": "7e5b54873fd0e4ea8fe447e4f2b8c670c485862b5d9d0d624dcc886bb3a89ecd",
+        "dest": "cargo/vendor/glycin-4.0.5"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"4435b4e3908ef32618d2fdf34cf0991a08420ac89c1a8d2cb2add9b5c8f6037a\", \"files\": {}}",
-        "dest": "cargo/vendor/glycin-4.0.4",
+        "contents": "{\"package\": \"7e5b54873fd0e4ea8fe447e4f2b8c670c485862b5d9d0d624dcc886bb3a89ecd\", \"files\": {}}",
+        "dest": "cargo/vendor/glycin-4.0.5",
         "dest-filename": ".cargo-checksum.json"
     },
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/glycin-builtin/glycin-builtin-4.0.2.crate",
-        "sha256": "2c9179cb8e55f66d0ae3a3234e1afcac77f4aa95b7e879d283955eb9f6c13ce5",
-        "dest": "cargo/vendor/glycin-builtin-4.0.2"
+        "url": "https://static.crates.io/crates/glycin-builtin/glycin-builtin-4.0.5.crate",
+        "sha256": "c47ae9011448c83bfa8841543c41d3c3dd20759096a1b565e366fd39d54029f3",
+        "dest": "cargo/vendor/glycin-builtin-4.0.5"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"2c9179cb8e55f66d0ae3a3234e1afcac77f4aa95b7e879d283955eb9f6c13ce5\", \"files\": {}}",
-        "dest": "cargo/vendor/glycin-builtin-4.0.2",
+        "contents": "{\"package\": \"c47ae9011448c83bfa8841543c41d3c3dd20759096a1b565e366fd39d54029f3\", \"files\": {}}",
+        "dest": "cargo/vendor/glycin-builtin-4.0.5",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -1497,27 +1497,27 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/glycin-core/glycin-core-4.0.2.crate",
-        "sha256": "6886f3ab6bf3a35879287f875e76dca58df050879854fabfecadcd6add1b0545",
-        "dest": "cargo/vendor/glycin-core-4.0.2"
+        "url": "https://static.crates.io/crates/glycin-core/glycin-core-4.0.5.crate",
+        "sha256": "fdade20eb67ac75b5c306a99c594155e1096ea7aa536741f64158afa1ffdeb36",
+        "dest": "cargo/vendor/glycin-core-4.0.5"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"6886f3ab6bf3a35879287f875e76dca58df050879854fabfecadcd6add1b0545\", \"files\": {}}",
-        "dest": "cargo/vendor/glycin-core-4.0.2",
+        "contents": "{\"package\": \"fdade20eb67ac75b5c306a99c594155e1096ea7aa536741f64158afa1ffdeb36\", \"files\": {}}",
+        "dest": "cargo/vendor/glycin-core-4.0.5",
         "dest-filename": ".cargo-checksum.json"
     },
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/glycin-external/glycin-external-4.0.2.crate",
-        "sha256": "b3b3161e8473d47f45656e8fb32903f8a29e0bd2e97e631443b4f8b15b864ef0",
-        "dest": "cargo/vendor/glycin-external-4.0.2"
+        "url": "https://static.crates.io/crates/glycin-external/glycin-external-4.0.5.crate",
+        "sha256": "2c9b985c8fe1d1c2cdc91566faa52f5d3226506201a4121580ae8cfcb71992e5",
+        "dest": "cargo/vendor/glycin-external-4.0.5"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"b3b3161e8473d47f45656e8fb32903f8a29e0bd2e97e631443b4f8b15b864ef0\", \"files\": {}}",
-        "dest": "cargo/vendor/glycin-external-4.0.2",
+        "contents": "{\"package\": \"2c9b985c8fe1d1c2cdc91566faa52f5d3226506201a4121580ae8cfcb71992e5\", \"files\": {}}",
+        "dest": "cargo/vendor/glycin-external-4.0.5",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -1679,14 +1679,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/gufo-exif/gufo-exif-0.5.3.crate",
-        "sha256": "4183c4b2bf6cfd58823cf02b2e8a4d955da3605f8e1b98adbd3456a97e35ae16",
-        "dest": "cargo/vendor/gufo-exif-0.5.3"
+        "url": "https://static.crates.io/crates/gufo-exif/gufo-exif-0.5.5.crate",
+        "sha256": "b7a91a52ac6ea8d25e0752b1f3552d7a8252dcdf0b0b8154d1118d5e2582129c",
+        "dest": "cargo/vendor/gufo-exif-0.5.5"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"4183c4b2bf6cfd58823cf02b2e8a4d955da3605f8e1b98adbd3456a97e35ae16\", \"files\": {}}",
-        "dest": "cargo/vendor/gufo-exif-0.5.3",
+        "contents": "{\"package\": \"b7a91a52ac6ea8d25e0752b1f3552d7a8252dcdf0b0b8154d1118d5e2582129c\", \"files\": {}}",
+        "dest": "cargo/vendor/gufo-exif-0.5.5",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -3512,14 +3512,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/rusqlite/rusqlite-0.41.0.crate",
-        "sha256": "9c026b4444579e8d754556c6c75d040d69c4a44283cdb648ab8a8d5965c2cfa8",
-        "dest": "cargo/vendor/rusqlite-0.41.0"
+        "url": "https://static.crates.io/crates/rusqlite/rusqlite-0.41.1.crate",
+        "sha256": "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594",
+        "dest": "cargo/vendor/rusqlite-0.41.1"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"9c026b4444579e8d754556c6c75d040d69c4a44283cdb648ab8a8d5965c2cfa8\", \"files\": {}}",
-        "dest": "cargo/vendor/rusqlite-0.41.0",
+        "contents": "{\"package\": \"da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594\", \"files\": {}}",
+        "dest": "cargo/vendor/rusqlite-0.41.1",
         "dest-filename": ".cargo-checksum.json"
     },
     {

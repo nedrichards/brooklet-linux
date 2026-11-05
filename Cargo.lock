@@ -1108,9 +1108,9 @@ dependencies = [
 
 [[package]]
 name = "glycin"
-version = "4.0.4"
+version = "4.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4435b4e3908ef32618d2fdf34cf0991a08420ac89c1a8d2cb2add9b5c8f6037a"
+checksum = "7e5b54873fd0e4ea8fe447e4f2b8c670c485862b5d9d0d624dcc886bb3a89ecd"
 dependencies = [
  "glycin-builtin",
  "glycin-external",
@@ -1118,9 +1118,9 @@ dependencies = [
 
 [[package]]
 name = "glycin-builtin"
-version = "4.0.2"
+version = "4.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c9179cb8e55f66d0ae3a3234e1afcac77f4aa95b7e879d283955eb9f6c13ce5"
+checksum = "c47ae9011448c83bfa8841543c41d3c3dd20759096a1b565e366fd39d54029f3"
 dependencies = [
  "glycin-core",
 ]
@@ -1146,9 +1146,9 @@ dependencies = [
 
 [[package]]
 name = "glycin-core"
-version = "4.0.2"
+version = "4.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6886f3ab6bf3a35879287f875e76dca58df050879854fabfecadcd6add1b0545"
+checksum = "fdade20eb67ac75b5c306a99c594155e1096ea7aa536741f64158afa1ffdeb36"
 dependencies = [
  "bytemuck",
  "futures-channel",
@@ -1179,9 +1179,9 @@ dependencies = [
 
 [[package]]
 name = "glycin-external"
-version = "4.0.2"
+version = "4.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3b3161e8473d47f45656e8fb32903f8a29e0bd2e97e631443b4f8b15b864ef0"
+checksum = "2c9b985c8fe1d1c2cdc91566faa52f5d3226506201a4121580ae8cfcb71992e5"
 dependencies = [
  "glycin-core",
 ]
@@ -1387,9 +1387,9 @@ dependencies = [
 
 [[package]]
 name = "gufo-exif"
-version = "0.5.3"
+version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4183c4b2bf6cfd58823cf02b2e8a4d955da3605f8e1b98adbd3456a97e35ae16"
+checksum = "b7a91a52ac6ea8d25e0752b1f3552d7a8252dcdf0b0b8154d1118d5e2582129c"
 dependencies = [
  "gufo-common",
  "indexmap",
@@ -2837,9 +2837,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.41.0"
+version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c026b4444579e8d754556c6c75d040d69c4a44283cdb648ab8a8d5965c2cfa8"
+checksum = "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
 dependencies = [
  "bitflags 2.13.2",
  "fallible-iterator",
