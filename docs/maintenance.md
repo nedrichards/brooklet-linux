@@ -103,3 +103,5 @@ GitHub repository settings also enable dependency vulnerability alerts, Dependab
 ## Hosted desktop observations
 
 Full `--smoke-test` journeys remain available for installed-app local validation. Hosted Xvfb runs can fail different geometry, viewport or decoder assertions without a stable desktop session. CI and release workflows therefore run this suite as an advisory step with an eight-minute bound, a 14-day report artifact, and an explicit outcome in the summary. No assertion is removed or retried until green. Rust tests, format, Clippy, SDK Meson checks, metadata/build/export and the physical-keyboard gate stay blocking. A hosted green build does not claim a passing full desktop smoke suite; inspect its separate outcome. Before releasing, continue the existing local installed-app validation.
+
+Dependabot Cargo updates use a single trusted-base generator workflow. It explicitly dispatches CI even when sources already match; the older failure-triggered repair is removed.

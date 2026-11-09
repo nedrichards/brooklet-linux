@@ -152,5 +152,30 @@ class ReleaseTests(unittest.TestCase):
             self.prepare()
 
 
+
+class DependabotWorkflowTests(unittest.TestCase):
+    def test_single_generator_and_unconditional_explicit_dispatch(self):
+        root = HERE.parent.parent
+        workflows = root / ".github/workflows"
+        self.assertFalse((workflows / "dependabot-cargo-sources.yml").exists())
+        workflow = (workflows / "dependabot-flatpak-sources.yml").read_text()
+        validation = workflow.split("- name: Validate the Dependabot branch", 1)[1]
+        self.assertNotIn("if:", validation)
+        command = validation.split("run: ", 1)[1].strip()
+        with tempfile.TemporaryDirectory() as tmp:
+            gh = Path(tmp) / "gh"
+            gh.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$DISPATCH_LOG"\n')
+            gh.chmod(0o755)
+            log = Path(tmp) / "dispatch"
+            subprocess.run(
+                ["/bin/sh", "-eu", "-c", command], cwd=tmp, check=True,
+                env={**os.environ, "PATH": f"{tmp}:/usr/bin", "GH_REPO": "owner/brooklet-linux",
+                     "HEAD_BRANCH": "dependabot/cargo/example", "DISPATCH_LOG": str(log)},
+            )
+            self.assertEqual(log.read_text().splitlines(), [
+                "workflow", "run", "ci.yml", "--repo", "owner/brooklet-linux",
+                "--ref", "dependabot/cargo/example",
+            ])
+
 if __name__ == "__main__":
     unittest.main()

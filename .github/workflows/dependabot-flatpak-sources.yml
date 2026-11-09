@@ -39,7 +39,6 @@ jobs:
             flatpak/cargo-sources.json
           sparse-checkout-cone-mode: false
       - name: Regenerate and commit Flatpak sources
-        id: sources
         env:
           HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
@@ -53,13 +52,11 @@ jobs:
           git commit -m 'build(flatpak): regenerate sources for dependency update'
           # An ordinary push refuses to overwrite a newer Dependabot update.
           git push origin "HEAD:refs/heads/$HEAD_BRANCH"
-          echo 'changed=true' >> "$GITHUB_OUTPUT"
-      - name: Validate the generated commit
-        if: steps.sources.outputs.changed == 'true'
+      - name: Validate the Dependabot branch
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
         # GITHUB_TOKEN pushes do not trigger CI automatically. Explicit workflow
         # dispatch is supported and runs CI with its existing read-only token.
-        run: gh workflow run ci.yml --ref "$HEAD_BRANCH"
+        run: gh workflow run ci.yml --repo "$GH_REPO" --ref "$HEAD_BRANCH"
