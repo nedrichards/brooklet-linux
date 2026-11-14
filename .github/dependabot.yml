@@ -1,16 +1,20 @@
 version: 2
 updates:
-  - package-ecosystem: cargo
-    directory: /
-    schedule:
-      interval: weekly
-    groups:
+- package-ecosystem: cargo
+  directory: /
+  schedule:
+    interval: weekly
+  groups:
       # The parser uses ego-tree types exposed by scraper; versions must match.
-      html-parser:
-        patterns:
-          - scraper
-          - ego-tree
-  - package-ecosystem: github-actions
-    directory: /
-    schedule:
-      interval: weekly
+    html-parser:
+      patterns:
+      - scraper
+      - ego-tree
+- package-ecosystem: github-actions
+  directory: /
+  schedule:
+    interval: weekly
+  groups:
+    actions:
+      patterns:
+      - '*'
