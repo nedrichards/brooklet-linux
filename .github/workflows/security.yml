@@ -32,3 +32,7 @@ jobs:
       - uses: rustsec/audit-check@858dc40f52ca2b8570b7a997c1c4e35c6fc9a432 # Node 24
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+    timeout-minutes: 30
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true

@@ -60,3 +60,5 @@ flatpak run --user com.nedrichards.brooklet.Devel --smoke-test
 ## Licence
 
 Brooklet is licensed under GPL-3.0-or-later. See `COPYING`.
+
+For hosted checks and artifacts, see [continuous integration](docs/CI.md).

@@ -65,7 +65,9 @@
             "target",
             ".codex",
             ".agents",
-            ".aws"
+            ".aws",
+            "build-ci",
+            ".ci-results"
           ]
         }
       ],
