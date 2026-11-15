@@ -19,3 +19,7 @@ Workflow syntax and shell snippets are checked locally before publication. Hoste
 execution provides the architecture and installed-artifact evidence; generated
 captures still require human visual review. No release or tag is created by this
 maintenance change.
+
+The trusted Dependabot source-repair job retains checkout credentials only for
+its sparse dependency-data checkout, so its generated source-list commit can
+be pushed. Read-only and trusted-generator checkouts do not retain credentials.
