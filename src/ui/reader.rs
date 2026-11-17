@@ -353,6 +353,7 @@ fn block_widget(block: DocumentBlock) -> gtk::Widget {
             inline,
         } => {
             let widget = rich_label(&text, &inline);
+            widget.add_css_class("reader-heading");
             widget.add_css_class(if level <= 2 { "title-2" } else { "title-3" });
             widget.upcast()
         }

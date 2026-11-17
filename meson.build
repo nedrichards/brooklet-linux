@@ -71,6 +71,7 @@ cargo_target = custom_target(
     'src/ui/reader.rs',
     'src/ui/reader_table.rs',
     'src/ui/reader_images.rs',
+    'src/ui/reader_outline.rs',
     'src/ui/setup.rs',
     'src/ui/startup.rs',
     'src/ui/sync_health.rs',
