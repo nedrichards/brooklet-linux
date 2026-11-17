@@ -464,7 +464,7 @@ async fn deletion_marker_upgrade_preserves_existing_cache_and_pending_work() {
     // Recreate the previous released schema with its existing rows and queue.
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection
-        .execute_batch("DROP INDEX entries_feed_order; ALTER TABLE entries DROP COLUMN remote_removed; ALTER TABLE feeds DROP COLUMN parsing_error_message; ALTER TABLE feeds DROP COLUMN parsing_error_count; ALTER TABLE feeds DROP COLUMN disabled")
+        .execute_batch("DROP INDEX entries_feed_order; DROP INDEX reader_resume_order; ALTER TABLE reader_positions DROP COLUMN resume_at_ms; ALTER TABLE entries DROP COLUMN remote_removed; ALTER TABLE feeds DROP COLUMN parsing_error_message; ALTER TABLE feeds DROP COLUMN parsing_error_count; ALTER TABLE feeds DROP COLUMN disabled")
         .unwrap();
     connection.pragma_update(None, "user_version", 6).unwrap();
     drop(connection);
@@ -545,7 +545,7 @@ async fn feed_health_survives_restart_failed_pull_and_clears_on_recovery() {
     drop(repo);
     // Upgrade the prior feed schema without disturbing articles or intentions.
     let connection = rusqlite::Connection::open(&path).unwrap();
-    connection.execute_batch("DROP INDEX entries_feed_order; ALTER TABLE feeds DROP COLUMN parsing_error_message; ALTER TABLE feeds DROP COLUMN parsing_error_count; ALTER TABLE feeds DROP COLUMN disabled").unwrap();
+    connection.execute_batch("DROP INDEX entries_feed_order; DROP INDEX reader_resume_order; ALTER TABLE reader_positions DROP COLUMN resume_at_ms; ALTER TABLE feeds DROP COLUMN parsing_error_message; ALTER TABLE feeds DROP COLUMN parsing_error_count; ALTER TABLE feeds DROP COLUMN disabled").unwrap();
     connection.pragma_update(None, "user_version", 7).unwrap();
     drop(connection);
     let upgraded = SqliteRepository::open(&path).unwrap();

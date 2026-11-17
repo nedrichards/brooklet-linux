@@ -43,6 +43,7 @@ struct InboxUi {
     emptied_place: Rc<RefCell<Option<ListPlace>>>,
     undo_toast: Rc<RefCell<Option<adw::Toast>>>,
     refresh_policy: Rc<RefCell<AutoRefreshPolicy>>,
+    arrivals: Rc<InboxArrivals>,
 }
 
 #[derive(Clone)]
@@ -67,6 +68,7 @@ struct WeakInboxUi {
     emptied_place: Rc<RefCell<Option<ListPlace>>>,
     undo_toast: Rc<RefCell<Option<adw::Toast>>>,
     refresh_policy: Rc<RefCell<AutoRefreshPolicy>>,
+    arrivals: Rc<InboxArrivals>,
 }
 impl InboxUi {
     fn downgrade(&self) -> WeakInboxUi {
@@ -88,6 +90,7 @@ impl InboxUi {
             emptied_place: self.emptied_place.clone(),
             undo_toast: self.undo_toast.clone(),
             refresh_policy: self.refresh_policy.clone(),
+            arrivals: self.arrivals.clone(),
         }
     }
 }
@@ -111,6 +114,7 @@ impl WeakInboxUi {
             emptied_place: self.emptied_place.clone(),
             undo_toast: self.undo_toast.clone(),
             refresh_policy: self.refresh_policy.clone(),
+            arrivals: self.arrivals.clone(),
         })
     }
 }
@@ -120,6 +124,27 @@ struct ListPlace {
     entry_id: Option<i64>,
     row_y: f64,
     value: f64,
+}
+
+struct InboxArrivals {
+    button: adw::glib::WeakRef<gtk::Button>,
+    pending: RefCell<HashSet<i64>>,
+    return_place: RefCell<Option<ListPlace>>,
+    queued: Cell<bool>,
+}
+
+impl InboxArrivals {
+    fn new(builder: &gtk::Builder) -> Rc<Self> {
+        Rc::new(Self {
+            button: builder
+                .object::<gtk::Button>("inbox_arrivals")
+                .unwrap()
+                .downgrade(),
+            pending: RefCell::default(),
+            return_place: RefCell::default(),
+            queued: Cell::default(),
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -134,6 +159,7 @@ struct ReaderUi {
     controller: Arc<AppController>,
     active_id: Rc<Cell<Option<i64>>>,
     restoring: Rc<Cell<bool>>,
+    document_ready: Rc<Cell<bool>>,
     positions: Rc<RefCell<HashMap<i64, ReaderPosition>>>,
     open_generation: Rc<Cell<u64>>,
     image_requests: Rc<RefCell<Vec<tokio::task::AbortHandle>>>,
@@ -157,6 +183,7 @@ struct WeakReaderUi {
     controller: Arc<AppController>,
     active_id: Rc<Cell<Option<i64>>>,
     restoring: Rc<Cell<bool>>,
+    document_ready: Rc<Cell<bool>>,
     positions: Rc<RefCell<HashMap<i64, ReaderPosition>>>,
     open_generation: Rc<Cell<u64>>,
     image_requests: Rc<RefCell<Vec<tokio::task::AbortHandle>>>,
@@ -180,6 +207,7 @@ impl ReaderUi {
             controller: self.controller.clone(),
             active_id: self.active_id.clone(),
             restoring: self.restoring.clone(),
+            document_ready: self.document_ready.clone(),
             positions: self.positions.clone(),
             open_generation: self.open_generation.clone(),
             image_requests: self.image_requests.clone(),
@@ -205,6 +233,7 @@ impl WeakReaderUi {
             controller: self.controller.clone(),
             active_id: self.active_id.clone(),
             restoring: self.restoring.clone(),
+            document_ready: self.document_ready.clone(),
             positions: self.positions.clone(),
             open_generation: self.open_generation.clone(),
             image_requests: self.image_requests.clone(),
@@ -584,8 +613,10 @@ impl BrookletApplication {
                 emptied_place: Rc::new(RefCell::new(None)),
                 undo_toast: Rc::new(RefCell::new(None)),
                 refresh_policy: Rc::new(RefCell::new(AutoRefreshPolicy::default())),
+                arrivals: InboxArrivals::new(&builder),
             };
             install_read_pin_tracking(&inbox_ui);
+            install_inbox_arrivals(&inbox_ui);
             install_inbox_paging(&inbox_ui, controller.clone(), &toast_overlay);
             for (view, model, status, scroller) in [
                 (
@@ -633,6 +664,7 @@ impl BrookletApplication {
                 controller: controller.clone(),
                 active_id: open_id,
                 restoring: Rc::new(Cell::new(false)),
+                document_ready: Rc::new(Cell::new(false)),
                 positions: Rc::new(RefCell::new(HashMap::new())),
                 open_generation: Rc::new(Cell::new(0)),
                 image_requests: Rc::new(RefCell::new(Vec::new())),
@@ -644,6 +676,7 @@ impl BrookletApplication {
                 source_list: Rc::new(RefCell::new(None)),
             };
             install_reader_position_tracking(&reader_ui);
+            install_continue_reading(&builder, &reader_ui, &inbox_ui, current_entry.clone());
             let undo_entry = Rc::new(RefCell::new(Vec::<Entry>::new()));
 
             inbox_list.connect_activate({
@@ -930,16 +963,7 @@ impl BrookletApplication {
                 let controller = controller.clone();
                 let application = application.downgrade();
                 move |_| {
-                    if let Some(entry_id) = reader.active_id.get()
-                        && !reader.restoring.get()
-                    {
-                        let position = ui::reader::position_from_offset(
-                            &reader.content,
-                            entry_id,
-                            reader.scroller.vadjustment().value() as i32,
-                        );
-                        reader.controller.save_reader_position(position, |_| {});
-                    }
+                    save_reading_progress(&reader);
                     if let Some(application) = application.upgrade() {
                         let hold = application.hold();
                         controller.drain_local_writes(move |_| drop(hold));
@@ -1269,42 +1293,91 @@ impl BrookletApplication {
     }
 }
 
+fn save_reading_progress(reader: &ReaderUi) {
+    if !reader.document_ready.get() || reader.restoring.get() {
+        return;
+    }
+    let Some(id) = reader.active_id.get() else {
+        return;
+    };
+    let adjustment = reader.scroller.vadjustment();
+    let offset = adjustment.value() - adjustment.lower();
+    let unfinished = offset >= (adjustment.page_size() / 2.0).clamp(120.0, 300.0)
+        && adjustment.upper() - adjustment.page_size() - adjustment.value() > 24.0;
+    let position = ui::reader::position_from_offset(&reader.content, id, adjustment.value() as i32);
+    reader.positions.borrow_mut().insert(id, position.clone());
+    reader
+        .controller
+        .save_reading_progress(position, unfinished, |_| {});
+}
+
+fn install_continue_reading(
+    builder: &gtk::Builder,
+    reader: &ReaderUi,
+    inbox: &InboxUi,
+    current: Rc<RefCell<Option<Entry>>>,
+) {
+    let button = builder.object::<gtk::Button>("continue_reading").unwrap();
+    let title = builder
+        .object::<gtk::Label>("continue_reading_title")
+        .unwrap();
+    let entry = Rc::new(RefCell::new(None::<Entry>));
+    button.connect_clicked({
+        let reader = reader.downgrade();
+        let inbox = inbox.downgrade();
+        let entry = entry.clone();
+        move |_| {
+            let (Some(reader), Some(inbox), Some(entry)) =
+                (reader.upgrade(), inbox.upgrade(), entry.borrow().clone())
+            else {
+                return;
+            };
+            if reader.active_id.get().is_none() {
+                *current.borrow_mut() = Some(entry.clone());
+                set_reader_origin_entries(&reader, vec![Arc::new(entry.clone())], entry.id, false);
+                open_article(&reader, &inbox, &entry);
+            }
+        }
+    });
+    reader.controller.resume_entry({
+        let button = button.downgrade();
+        let title = title.downgrade();
+        move |result| {
+            if let (Some(button), Some(title), Ok(Some(candidate))) =
+                (button.upgrade(), title.upgrade(), result)
+            {
+                title.set_text(&candidate.title);
+                *entry.borrow_mut() = Some(candidate);
+                button.set_visible(true);
+            }
+        }
+    });
+}
+
 fn install_reader_position_tracking(reader: &ReaderUi) {
     reader.scroller.vadjustment().connect_value_changed({
         let weak = reader.downgrade();
         let pending_save = Rc::new(RefCell::new(None::<adw::glib::SourceId>));
-        move |adjustment| {
+        move |_| {
             let Some(reader) = weak.upgrade() else {
                 return;
             };
-            if reader.restoring.get() {
+            if reader.restoring.get() || !reader.document_ready.get() {
                 return;
             }
-            let Some(entry_id) = reader.active_id.get() else {
-                return;
-            };
             if let Some(source) = pending_save.borrow_mut().take() {
                 source.remove();
             }
             let pending = pending_save.clone();
-            let controller = reader.controller.clone();
-            let content = reader.content.downgrade();
-            let active_id = reader.active_id.clone();
-            let offset = adjustment.value() as i32;
-            let positions = reader.positions.clone();
-            let generation = reader.open_generation.clone();
-            let expected = generation.get();
+            let weak = weak.clone();
+            let expected = reader.open_generation.get();
             let source = adw::glib::timeout_add_local_once(Duration::from_millis(250), move || {
                 pending.borrow_mut().take();
-                if active_id.get() != Some(entry_id) || generation.get() != expected {
-                    return;
+                if let Some(reader) = weak.upgrade()
+                    && reader.open_generation.get() == expected
+                {
+                    save_reading_progress(&reader);
                 }
-                let Some(content) = content.upgrade() else {
-                    return;
-                };
-                let position = ui::reader::position_from_offset(&content, entry_id, offset);
-                positions.borrow_mut().insert(entry_id, position.clone());
-                controller.save_reader_position(position, |_| {});
             });
             *pending_save.borrow_mut() = Some(source);
         }
@@ -2179,24 +2252,11 @@ fn begin_sync(
         inbox_ui.spinner.set_visible(false);
         match result {
             Ok(result) => {
-                let before = inbox_snapshot(&inbox_ui);
-                let changes = ui::inbox::InboxChanges::between(&before, &result.inbox);
-                let pager = inbox_ui.model.pager.borrow().clone();
-                if let Some(pager) = pager {
-                    pager.snapshot(EntryPage {
-                        entries: result.inbox,
-                        next: result.inbox_next,
-                    });
-                } else {
-                    refresh_inbox(&reload_controller, &inbox_ui, result.inbox);
-                }
+                let changes = apply_sync_inbox(&reload_controller, &inbox_ui, result);
                 load_other_views(reload_controller, views, toast_overlay.clone());
-                if let Some(message) = changes.toast_message() {
-                    if changes.added > 0 {
-                        show_inbox_arrivals(&inbox_ui, &toast_overlay, &message);
-                    } else {
-                        toast_overlay.add_toast(adw::Toast::new(&message));
-                    }
+                if changes.updated > 0 {
+                    toast_overlay
+                        .add_toast(adw::Toast::new(&format!("{} updated", changes.updated)));
                 }
             }
             Err(error) => {
@@ -2210,31 +2270,172 @@ fn begin_sync(
     });
 }
 
-// Track only arrival feedback: reaching the top must not dismiss errors or Undo.
-fn show_inbox_arrivals(inbox: &InboxUi, overlay: &adw::ToastOverlay, message: &str) {
-    let adjustment = inbox.scroller.vadjustment();
-    if adjustment.value() <= adjustment.lower() + 0.5 {
+fn queue_inbox_arrivals(inbox: &InboxUi) {
+    if inbox.arrivals.pending.borrow().is_empty()
+        && inbox.arrivals.return_place.borrow().is_none()
+        && inbox
+            .arrivals
+            .button
+            .upgrade()
+            .is_none_or(|button| !button.is_visible())
+    {
         return;
     }
-    let toast = adw::Toast::new(message);
-    let weak = toast.downgrade();
-    let signal = adjustment.connect_value_changed(move |adjustment| {
-        if adjustment.value() <= adjustment.lower() + 0.5
-            && let Some(toast) = weak.upgrade()
-        {
-            toast.dismiss();
+    if inbox.arrivals.queued.replace(true) {
+        return;
+    }
+    let weak = inbox.downgrade();
+    let waiting_for_layout = Cell::new(true);
+    inbox.scroller.add_tick_callback(move |_, _| {
+        if waiting_for_layout.replace(false) {
+            return adw::glib::ControlFlow::Continue;
+        }
+        if let Some(inbox) = weak.upgrade() {
+            inbox.arrivals.queued.set(false);
+            update_inbox_arrivals(&inbox);
+        }
+        adw::glib::ControlFlow::Break
+    });
+}
+
+fn update_inbox_arrivals(inbox: &InboxUi) {
+    let Some(button) = inbox.arrivals.button.upgrade() else {
+        return;
+    };
+    if inbox.arrivals.return_place.borrow().is_some() {
+        button.set_label("Back to where you were");
+        button.set_visible(true);
+        return;
+    }
+    let adjustment = inbox.scroller.vadjustment();
+    let mut pending = inbox.arrivals.pending.borrow_mut();
+    let mut count = 0;
+    if adjustment.value() <= adjustment.lower() + 0.5 {
+        pending.clear();
+    } else if !pending.is_empty()
+        && let Some(anchor) = capture_list_place(&inbox.list, &inbox.scroller).entry_id
+    {
+        let mut above = true;
+        let mut remaining = pending.len();
+        for position in 0..inbox.model.store.n_items() {
+            let Some(object) = inbox
+                .model
+                .store
+                .item(position)
+                .and_downcast::<ui::entry_object::EntryObject>()
+            else {
+                continue;
+            };
+            let entry = object.entry();
+            if entry.id == anchor {
+                above = false;
+            }
+            if pending.contains(&entry.id) {
+                remaining -= 1;
+                if above && !entry.read {
+                    count += 1;
+                } else {
+                    pending.remove(&entry.id);
+                }
+            }
+            if remaining == 0 {
+                break;
+            }
+        }
+    }
+    if count > 0 {
+        button.set_label(&format!("{count} new above"));
+    }
+    button.set_visible(count > 0);
+}
+
+fn install_inbox_arrivals(inbox: &InboxUi) {
+    let button = inbox
+        .arrivals
+        .button
+        .upgrade()
+        .expect("Inbox arrivals button");
+    button.connect_clicked({
+        let weak = inbox.downgrade();
+        move |_| {
+            let Some(inbox) = weak.upgrade() else {
+                return;
+            };
+            let place = inbox.arrivals.return_place.borrow_mut().take();
+            if let Some(place) = place {
+                restore_list_place(&inbox.list, &inbox.scroller, place);
+            } else {
+                let destination = inbox
+                    .arrivals
+                    .pending
+                    .borrow_mut()
+                    .drain()
+                    .filter_map(|id| {
+                        ui::inbox::position_of_id(&inbox.list, id).map(|position| (position, id))
+                    })
+                    .min();
+                if let Some((position, id)) = destination {
+                    *inbox.arrivals.return_place.borrow_mut() =
+                        Some(capture_list_place(&inbox.list, &inbox.scroller));
+                    let adjustment = inbox.scroller.vadjustment();
+                    if position == 0 {
+                        adjustment.set_value(adjustment.lower());
+                    } else {
+                        restore_list_place(
+                            &inbox.list,
+                            &inbox.scroller,
+                            ListPlace {
+                                entry_id: Some(id),
+                                row_y: 0.0,
+                                value: adjustment.lower(),
+                            },
+                        );
+                    }
+                }
+            }
+            update_inbox_arrivals(&inbox);
         }
     });
-    let signal = RefCell::new(Some(signal));
-    let weak = adjustment.downgrade();
-    toast.connect_dismissed(move |_| {
-        if let Some(adjustment) = weak.upgrade()
-            && let Some(signal) = signal.borrow_mut().take()
-        {
-            adjustment.disconnect(signal);
+    inbox.scroller.vadjustment().connect_value_changed({
+        let weak = inbox.downgrade();
+        move |_| {
+            if let Some(inbox) = weak.upgrade() {
+                queue_inbox_arrivals(&inbox);
+            }
         }
     });
-    overlay.add_toast(toast);
+    inbox.model.store.connect_items_changed({
+        let weak = inbox.downgrade();
+        move |_, _, _, _| {
+            if let Some(inbox) = weak.upgrade() {
+                queue_inbox_arrivals(&inbox);
+            }
+        }
+    });
+}
+
+fn apply_sync_inbox(
+    controller: &AppController,
+    inbox: &InboxUi,
+    result: brooklet::sync::SyncResult,
+) -> ui::inbox::InboxChanges {
+    let before = inbox_snapshot(inbox);
+    let changes = ui::inbox::InboxChanges::between(&before, &result.inbox, &result.arrivals);
+    let adjustment = inbox.scroller.vadjustment();
+    if inbox.scroller.is_mapped() && adjustment.value() > adjustment.lower() + 0.5 {
+        inbox.arrivals.pending.borrow_mut().extend(result.arrivals);
+    }
+    let pager = inbox.model.pager.borrow().clone();
+    if let Some(pager) = pager {
+        pager.snapshot(EntryPage {
+            entries: result.inbox,
+            next: result.inbox_next,
+        });
+    } else {
+        refresh_inbox(controller, inbox, result.inbox);
+    }
+    queue_inbox_arrivals(inbox);
+    changes
 }
 
 fn inbox_snapshot(inbox_ui: &InboxUi) -> Vec<Entry> {
@@ -2300,6 +2501,14 @@ fn refresh_inbox(controller: &AppController, inbox: &InboxUi, entries: Vec<Entry
 
 fn apply_inbox_entries(inbox_ui: &InboxUi, mut entries: Vec<Entry>) {
     let place = capture_list_place(&inbox_ui.list, &inbox_ui.scroller);
+    let mut pending = inbox_ui.arrivals.pending.borrow_mut();
+    if !pending.is_empty() {
+        *pending = entries
+            .iter()
+            .filter_map(|entry| (!entry.read && pending.contains(&entry.id)).then_some(entry.id))
+            .collect();
+    }
+    drop(pending);
     let pin = inbox_ui.pinned_read.borrow().clone();
     if let Some(pinned) = pin {
         if entries.iter().any(|entry| entry.id == pinned.id) {
@@ -2325,6 +2534,9 @@ fn apply_inbox_entries(inbox_ui: &InboxUi, mut entries: Vec<Entry>) {
     if inbox_ui.model.store.n_items() > 0 {
         inbox_ui.emptied_place.borrow_mut().take();
         restore_list_place(&inbox_ui.list, &inbox_ui.scroller, place);
+    } else {
+        inbox_ui.arrivals.return_place.borrow_mut().take();
+        update_inbox_arrivals(inbox_ui);
     }
 }
 
@@ -2857,29 +3069,19 @@ fn open_article(reader_ui: &ReaderUi, inbox_ui: &InboxUi, entry: &Entry) {
     {
         ui::inbox::refresh_open_marker(&list, Some(entry.id));
     }
-    if reader_ui.active_id.get() == Some(entry.id) && reader_ui.scroller.is_visible() {
+    if reader_ui.active_id.get() == Some(entry.id)
+        && (reader_ui.document_ready.get() || reader_ui.restoring.get())
+    {
         reader_ui.split.set_show_content(true);
         reader_ui.scroller.grab_focus();
         return;
     }
-    if let Some(previous_id) = reader_ui.active_id.get()
-        && !reader_ui.restoring.get()
-    {
-        let position = ui::reader::position_from_offset(
-            &reader_ui.content,
-            previous_id,
-            reader_ui.scroller.vadjustment().value() as i32,
-        );
-        reader_ui
-            .positions
-            .borrow_mut()
-            .insert(previous_id, position.clone());
-        reader_ui.controller.save_reader_position(position, |_| {});
-    }
+    save_reading_progress(reader_ui);
     let entry_id = entry.id;
     for request in reader_ui.image_requests.borrow_mut().drain(..) {
         request.abort();
     }
+    reader_ui.document_ready.set(false);
     reader_ui.restoring.set(true);
     let generation = reader_ui.open_generation.get().wrapping_add(1);
     reader_ui.open_generation.set(generation);
@@ -2924,6 +3126,8 @@ fn open_article(reader_ui: &ReaderUi, inbox_ui: &InboxUi, entry: &Entry) {
                 &reader.content,
                 "This article has no cached body.",
             );
+            reader.restoring.set(false);
+            return;
         }
         let images = ui::reader_images::Images::new(
             reader.controller.clone(),
@@ -2953,6 +3157,7 @@ fn open_article(reader_ui: &ReaderUi, inbox_ui: &InboxUi, entry: &Entry) {
                     });
                     reader.scroller.vadjustment().set_value(f64::from(offset));
                 }
+                reader.document_ready.set(true);
                 reader.restoring.set(false);
                 if let Some(images) = reader.images.borrow().as_ref() {
                     images.queue();
@@ -4014,17 +4219,18 @@ fn install_window_tools(
                     action.set_enabled(true);
                     match result {
                         Ok(result) => {
-                            let before = inbox_snapshot(&inbox);
-                            let changes = ui::inbox::InboxChanges::between(&before, &result.inbox);
-                            refresh_inbox(&controller, &inbox, result.inbox);
+                            let changes = apply_sync_inbox(&controller, &inbox, result);
                             load_other_views(controller, views, toast.clone());
-                            let message = changes.toast_message().unwrap_or_else(|| {
-                                "No new articles yet. Slow feeds may appear on the next sync."
-                                    .into()
-                            });
-                            if changes.added > 0 {
-                                show_inbox_arrivals(&inbox, &toast, &message);
-                            } else {
+                            if changes.added == 0 || changes.updated > 0 {
+                                let message = ui::inbox::InboxChanges {
+                                    added: 0,
+                                    ..changes
+                                }
+                                .toast_message()
+                                .unwrap_or_else(|| {
+                                    "No new articles yet. Slow feeds may appear on the next sync."
+                                        .into()
+                                });
                                 toast.add_toast(adw::Toast::new(&message));
                             }
                         }
@@ -6073,6 +6279,7 @@ fn smoke_test_automatic_inbox(
     let mut document = ui::reader::DocumentBuilder::new(blocks);
     while !document.step(&reader.content).1 {}
     reader.active_id.set(Some(selected.id));
+    reader.document_ready.set(true);
     reader.restoring.set(false);
     reader.placeholder.set_visible(false);
     reader.scroller.set_visible(true);
@@ -6333,11 +6540,154 @@ fn smoke_test_integrated_search(
     Ok(())
 }
 
-fn smoke_test_reader_pipeline(
-    keyboard_only: bool,
-    search_only: bool,
-    click_only: bool,
+#[derive(PartialEq, Eq)]
+enum ReaderFixture {
+    Full,
+    Keyboard,
+    Search,
+    Click,
+    Prototypes,
+}
+
+fn check_reading_prototypes(
+    window: &adw::ApplicationWindow,
+    builder: &gtk::Builder,
+    inbox: &InboxUi,
+    reader: &ReaderUi,
+    repository: &SqliteRepository,
+    long: &Entry,
 ) -> Result<(), adw::glib::BoolError> {
+    use brooklet::services::traits::Repository;
+    use ui::test_support::{frames, wait_for};
+    let current = Rc::new(RefCell::new(None));
+    let backend = reader.controller.backend_handle();
+    let keep_position = ReaderPosition {
+        entry_id: long.id,
+        first_visible_block: 50,
+        offset_px: 4,
+    };
+    backend
+        .block_on(repository.save_reading_progress(1, &keep_position, true))
+        .map_err(|error| adw::glib::bool_error!("{error}"))?;
+    install_continue_reading(builder, reader, inbox, current.clone());
+    install_inbox_arrivals(inbox);
+
+    let entries = (100..180)
+        .rev()
+        .map(|id| Entry {
+            id,
+            published_at_ms: id,
+            ..long.clone()
+        })
+        .collect::<Vec<_>>();
+    show_entries(inbox, entries.clone());
+    window.set_default_size(1150, 720);
+    reader.split.set_collapsed(false);
+    window.present();
+    let resume = builder.object::<gtk::Button>("continue_reading").unwrap();
+    wait_for("Continue reading", || resume.is_mapped())?;
+    resume.emit_clicked();
+    wait_for("restored article", || {
+        reader.document_ready.get() && reader.scroller.vadjustment().value() > 300.0
+    })?;
+    assert_eq!(
+        current.borrow().as_ref().map(|entry| entry.id),
+        Some(long.id)
+    );
+
+
+    let selected = 165;
+    ui::inbox::select_id(&inbox.list, selected);
+    let adjustment = inbox.scroller.vadjustment();
+    wait_for("scrollable Inbox", || {
+        adjustment.upper() > adjustment.page_size() + 600.0
+    })?;
+    adjustment.set_value(600.0);
+    frames(&inbox.list, 3)?;
+    let place = capture_list_place(&inbox.list, &inbox.scroller);
+    assert!(place.entry_id.is_some());
+    let reader_offset = reader.scroller.vadjustment().value();
+    let arrived_id = 180;
+    apply_sync_inbox(
+        &reader.controller,
+        inbox,
+        brooklet::sync::SyncResult {
+            inbox: [
+                vec![Entry {
+                    id: arrived_id,
+                    published_at_ms: arrived_id,
+                    ..long.clone()
+                }],
+                entries,
+            ]
+            .concat(),
+            inbox_next: None,
+            fetched: 1,
+            arrivals: [arrived_id].into(),
+        },
+    );
+    let arrivals = builder.object::<gtk::Button>("inbox_arrivals").unwrap();
+    wait_for("New above", || arrivals.is_mapped())?;
+    assert_eq!(arrivals.label().as_deref(), Some("1 new above"));
+    arrivals.emit_clicked();
+    wait_for("revealed arrivals", || adjustment.value() < 2.0)?;
+    assert_eq!(arrivals.label().as_deref(), Some("Back to where you were"));
+    arrivals.emit_clicked();
+    frames(&inbox.list, 4)?;
+    let restored = capture_list_place(&inbox.list, &inbox.scroller);
+    assert_eq!(restored.entry_id, place.entry_id);
+    assert!(
+        (restored.row_y - place.row_y).abs() < 2.0,
+        "Inbox return shifted the anchor from {} to {}",
+        place.row_y,
+        restored.row_y
+    );
+    assert_eq!(ui::inbox::selected_id(&inbox.list), Some(selected));
+    assert!((reader.scroller.vadjustment().value() - reader_offset).abs() < 2.0);
+
+    let empty = Entry {
+        id: 3,
+        html: String::new(),
+        ..long.clone()
+    };
+    let previous = ReaderPosition {
+        entry_id: empty.id,
+        ..keep_position
+    };
+    backend
+        .block_on(async {
+            repository
+                .merge_changed_page(1, std::slice::from_ref(&empty), &[])
+                .await?;
+            repository.save_reader_position(1, &previous).await
+        })
+        .map_err(|error| adw::glib::bool_error!("{error}"))?;
+    open_article(reader, inbox, &empty);
+    wait_for("failed reader load", || !reader.restoring.get())?;
+    assert!(!reader.document_ready.get());
+    save_reading_progress(reader);
+    let position = backend
+        .block_on(repository.reader_position(empty.id))
+        .map_err(|error| adw::glib::bool_error!("{error}"))?;
+    assert_eq!(position, Some(previous));
+    backend
+        .block_on(repository.merge_changed_page(
+            1,
+            &[Entry {
+                html: long.html.clone(),
+                ..empty.clone()
+            }],
+            &[],
+        ))
+        .map_err(|error| adw::glib::bool_error!("{error}"))?;
+    open_article(reader, inbox, &empty);
+    wait_for("reopened reader and saved position", || {
+        reader.document_ready.get() && reader.scroller.vadjustment().value() > 300.0
+    })?;
+    Ok(())
+}
+
+fn smoke_test_reader_pipeline(fixture: ReaderFixture) -> Result<(), adw::glib::BoolError> {
     use brooklet::services::traits::Repository;
     let repository = Arc::new(
         SqliteRepository::open_in_memory().map_err(|error| adw::glib::bool_error!("{error}"))?,
@@ -6464,6 +6814,7 @@ fn smoke_test_reader_pipeline(
         emptied_place: Rc::new(RefCell::new(None)),
         undo_toast: Rc::new(RefCell::new(None)),
         refresh_policy: Rc::new(RefCell::new(AutoRefreshPolicy::default())),
+        arrivals: InboxArrivals::new(&builder),
     };
     let reader = ReaderUi {
         split: builder.object("inbox_split").unwrap(),
@@ -6476,6 +6827,7 @@ fn smoke_test_reader_pipeline(
         controller,
         active_id,
         restoring: Rc::new(Cell::new(false)),
+        document_ready: Rc::new(Cell::new(false)),
         positions: Rc::new(RefCell::new(HashMap::new())),
         open_generation: Rc::new(Cell::new(0)),
         image_requests: Rc::new(RefCell::new(Vec::new())),
@@ -6486,7 +6838,18 @@ fn smoke_test_reader_pipeline(
         origin_inbox: Rc::new(Cell::new(false)),
         source_list: Rc::new(RefCell::new(None)),
     };
-    if click_only {
+    if fixture == ReaderFixture::Prototypes {
+        let result =
+            check_reading_prototypes(&window, &builder, &inbox, &reader, &repository, &long);
+        window.destroy();
+        drop(reader);
+        drop(inbox);
+        drop(window);
+        drop(builder);
+        let _ = std::fs::remove_dir_all(cache_directory);
+        return result;
+    }
+    if fixture == ReaderFixture::Click {
         let result = smoke_test_inbox_read_button(
             &window,
             &builder,
@@ -6504,7 +6867,7 @@ fn smoke_test_reader_pipeline(
         let _ = std::fs::remove_dir_all(cache_directory);
         return result;
     }
-    if search_only {
+    if fixture == ReaderFixture::Search {
         window.present();
         let result = smoke_test_integrated_search(&window, &builder, &reader, &inbox);
         window.destroy();
@@ -6533,7 +6896,7 @@ fn smoke_test_reader_pipeline(
         &replacement,
     )?;
     smoke_test_integrated_search(&window, &builder, &reader, &inbox)?;
-    if keyboard_only {
+    if fixture == ReaderFixture::Keyboard {
         window.destroy();
         drop(reader);
         drop(inbox);
@@ -6666,14 +7029,21 @@ pub fn search_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
     let _desktop = ui::test_support::Desktop::install();
     register_resources();
-    smoke_test_reader_pipeline(false, true, false)
+    smoke_test_reader_pipeline(ReaderFixture::Search)
+}
+
+pub fn reading_prototypes_test() -> Result<(), adw::glib::BoolError> {
+    adw::init()?;
+    let _desktop = ui::test_support::Desktop::install();
+    register_resources();
+    smoke_test_reader_pipeline(ReaderFixture::Prototypes)
 }
 
 pub fn reader_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
     let _desktop = ui::test_support::Desktop::install();
     register_resources();
-    smoke_test_reader_pipeline(false, false, false)
+    smoke_test_reader_pipeline(ReaderFixture::Full)
 }
 
 #[path = "sidebar_smoke.rs"]
@@ -6687,7 +7057,7 @@ pub fn keyboard_test() -> Result<(), adw::glib::BoolError> {
     adw::init()?;
     let _desktop = ui::test_support::Desktop::install();
     register_resources();
-    smoke_test_reader_pipeline(true, false, false)?;
+    smoke_test_reader_pipeline(ReaderFixture::Keyboard)?;
     ui::paging::smoke_test()?;
     ui::library::smoke_test()?;
     sidebar_test()
@@ -6705,7 +7075,7 @@ pub fn click_test() -> Result<(), adw::glib::BoolError> {
         &style,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
-    smoke_test_reader_pipeline(false, false, true)
+    smoke_test_reader_pipeline(ReaderFixture::Click)
 }
 
 pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
@@ -6795,7 +7165,7 @@ pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
     ui::sync_health::smoke_test()?;
     ui::paging::smoke_test()?;
     ui::library::smoke_test()?;
-    smoke_test_reader_pipeline(false, false, false)
+    smoke_test_reader_pipeline(ReaderFixture::Full)
 }
 
 fn register_resources() {

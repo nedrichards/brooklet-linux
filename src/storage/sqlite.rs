@@ -121,6 +121,7 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE entries ADD COLUMN remote_removed INTEGER NOT NULL DEFAULT 0;",
     "ALTER TABLE feeds ADD COLUMN parsing_error_message TEXT NOT NULL DEFAULT ''; ALTER TABLE feeds ADD COLUMN parsing_error_count INTEGER NOT NULL DEFAULT 0; ALTER TABLE feeds ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0;",
     "DROP INDEX entries_inbox; CREATE INDEX entries_inbox ON entries(account_id,read,published_at_ms DESC,id DESC); DROP INDEX entries_saved; CREATE INDEX entries_saved ON entries(account_id,published_at_ms DESC,id DESC) WHERE starred=1; CREATE INDEX entries_feed_order ON entries(account_id,feed_id,published_at_ms DESC,id DESC);",
+    "ALTER TABLE reader_positions ADD COLUMN resume_at_ms INTEGER; CREATE INDEX reader_resume_order ON reader_positions(account_id,resume_at_ms DESC,entry_id DESC) WHERE resume_at_ms IS NOT NULL;",
 ];
 
 pub struct SqliteRepository {
@@ -575,23 +576,29 @@ impl SqliteStore {
             .map_err(Into::into)
     }
 
-    fn acknowledge_mutation(&self, mutation: &PendingMutation) -> Result<(), BrookletError> {
-        let field = match mutation.field {
-            MutationField::Read => "read",
-            MutationField::Starred => "starred",
-        };
-        let connection = self.connection.lock().expect("SQLite mutex poisoned");
-        connection.execute(
-            r#"DELETE FROM pending_mutations
-               WHERE account_id = ?1 AND entry_id = ?2 AND field = ?3 AND desired = ?4 AND updated_at_ms = ?5"#,
-            params![
-                mutation.account_id,
-                mutation.entry_id,
-                field,
-                mutation.desired,
-                mutation.revision
-            ],
-        )?;
+    fn acknowledge_mutations(&self, mutations: &[PendingMutation]) -> Result<(), BrookletError> {
+        let mut connection = self.connection.lock().expect("SQLite mutex poisoned");
+        let transaction = connection.transaction()?;
+        {
+            let mut statement = transaction.prepare_cached(
+                r#"DELETE FROM pending_mutations
+                   WHERE account_id = ?1 AND entry_id = ?2 AND field = ?3 AND desired = ?4 AND updated_at_ms = ?5"#,
+            )?;
+            for mutation in mutations {
+                let field = match mutation.field {
+                    MutationField::Read => "read",
+                    MutationField::Starred => "starred",
+                };
+                statement.execute(params![
+                    mutation.account_id,
+                    mutation.entry_id,
+                    field,
+                    mutation.desired,
+                    mutation.revision
+                ])?;
+            }
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -637,6 +644,13 @@ impl SqliteStore {
 
     fn categories_cached(&self, account_id: i64) -> Result<Vec<Category>, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
+        Self::query_categories(&connection, account_id)
+    }
+
+    fn query_categories(
+        connection: &Connection,
+        account_id: i64,
+    ) -> Result<Vec<Category>, BrookletError> {
         let mut statement = connection
             .prepare_cached("SELECT id,title FROM categories WHERE account_id=?1 ORDER BY title")?;
         statement
@@ -656,6 +670,14 @@ impl SqliteStore {
         category_id: Option<i64>,
     ) -> Result<Vec<Feed>, BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
+        Self::query_feeds(&connection, account_id, category_id)
+    }
+
+    fn query_feeds(
+        connection: &Connection,
+        account_id: i64,
+        category_id: Option<i64>,
+    ) -> Result<Vec<Feed>, BrookletError> {
         let mut statement = connection.prepare_cached("SELECT id,category_id,title,site_url,feed_url,parsing_error_message,parsing_error_count,disabled FROM feeds WHERE account_id=?1 AND (?2 IS NULL OR category_id=?2) ORDER BY title")?;
         statement
             .query_map(params![account_id, category_id], |row| {
@@ -682,6 +704,19 @@ impl SqliteStore {
     ) -> Result<(), BrookletError> {
         let mut connection = self.connection.lock().expect("SQLite mutex poisoned");
         let transaction = connection.transaction()?;
+        let mut cached_categories = Self::query_categories(&transaction, account_id)?;
+        cached_categories.sort_unstable_by_key(|category| category.id);
+        let mut incoming_categories = categories.iter().collect::<Vec<_>>();
+        incoming_categories.sort_unstable_by_key(|category| category.id);
+        if cached_categories.iter().eq(incoming_categories) {
+            let mut cached_feeds = Self::query_feeds(&transaction, account_id, None)?;
+            cached_feeds.sort_unstable_by_key(|feed| feed.id);
+            let mut incoming_feeds = feeds.iter().collect::<Vec<_>>();
+            incoming_feeds.sort_unstable_by_key(|feed| feed.id);
+            if cached_feeds.iter().eq(incoming_feeds) {
+                return Ok(());
+            }
+        }
         transaction.execute("DELETE FROM feeds WHERE account_id=?1", [account_id])?;
         transaction.execute("DELETE FROM categories WHERE account_id=?1", [account_id])?;
         {
@@ -727,9 +762,10 @@ impl SqliteStore {
         account_id: i64,
         entries: &[Entry],
         removed_ids: &[EntryId],
-    ) -> Result<(), BrookletError> {
+    ) -> Result<Vec<EntryId>, BrookletError> {
         let mut connection = self.connection.lock().expect("SQLite mutex poisoned");
         let transaction = connection.transaction()?;
+        let mut arrivals = Vec::new();
         {
             let mut remove = transaction.prepare_cached("DELETE FROM entries WHERE account_id=?1 AND id=?2 AND NOT EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id) AND NOT EXISTS(SELECT 1 FROM karakeep_deliveries k WHERE k.account_id=entries.account_id AND k.entry_id=entries.id AND k.state!='saved')")?;
             for id in removed_ids {
@@ -748,7 +784,19 @@ impl SqliteStore {
                 OR (entries.feed_id,entries.feed_title,entries.category_title,entries.title,entries.url,entries.author,entries.published_at_ms,entries.html,entries.content_revision,entries.reading_minutes) IS NOT (excluded.feed_id,excluded.feed_title,excluded.category_title,excluded.title,excluded.url,excluded.author,excluded.published_at_ms,excluded.html,excluded.content_revision,excluded.reading_minutes)
                 OR (entries.read IS NOT excluded.read AND NOT EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id AND m.field='read'))
                 OR (entries.starred IS NOT excluded.starred AND NOT EXISTS(SELECT 1 FROM pending_mutations m WHERE m.account_id=entries.account_id AND m.entry_id=entries.id AND m.field='starred'))"#)?;
+            let mut will_enter_inbox = transaction.prepare_cached(
+                "SELECT read AND NOT EXISTS (
+                    SELECT 1 FROM pending_mutations WHERE account_id=?1 AND entry_id=?2 AND field='read'
+                 ) FROM entries WHERE account_id=?1 AND id=?2",
+            )?;
             for entry in entries {
+                let entered_inbox = !entry.read
+                    && will_enter_inbox
+                        .query_row(params![entry.account_id, entry.id], |row| {
+                            row.get::<_, bool>(0)
+                        })
+                        .optional()?
+                        .unwrap_or(true);
                 merge.execute(params![
                     entry.account_id,
                     entry.id,
@@ -765,10 +813,13 @@ impl SqliteStore {
                     entry.reading_minutes,
                     content_revision(&entry.html)
                 ])?;
+                if entered_inbox {
+                    arrivals.push(entry.id);
+                }
             }
         }
         transaction.commit()?;
-        Ok(())
+        Ok(arrivals)
     }
 
     fn complete_sync(
@@ -868,10 +919,32 @@ impl SqliteStore {
         &self,
         account_id: i64,
         position: &ReaderPosition,
+        unfinished: Option<bool>,
     ) -> Result<(), BrookletError> {
         let connection = self.connection.lock().expect("SQLite mutex poisoned");
-        connection.execute("INSERT INTO reader_positions(account_id,entry_id,block_index,offset_px) VALUES(?1,?2,?3,?4) ON CONFLICT(account_id,entry_id) DO UPDATE SET block_index=excluded.block_index,offset_px=excluded.offset_px",params![account_id,position.entry_id,position.first_visible_block,position.offset_px])?;
+        connection.prepare_cached(
+            "INSERT INTO reader_positions(account_id,entry_id,block_index,offset_px,resume_at_ms)
+             VALUES(?1,?2,?3,?4,CASE WHEN ?5 THEN CAST(unixepoch('subsec')*1000 AS INTEGER) END)
+             ON CONFLICT(account_id,entry_id) DO UPDATE SET block_index=excluded.block_index,
+             offset_px=excluded.offset_px,resume_at_ms=CASE WHEN ?5 IS NULL
+             THEN reader_positions.resume_at_ms ELSE excluded.resume_at_ms END",
+        )?.execute(params![account_id, position.entry_id, position.first_visible_block, position.offset_px, unfinished])?;
         Ok(())
+    }
+
+    fn resume_entry(&self, account_id: i64) -> Result<Option<Entry>, BrookletError> {
+        let connection = self.connection.lock().expect("SQLite mutex poisoned");
+        let sql = format!(
+            "{} JOIN reader_positions p ON p.account_id=e.account_id AND p.entry_id=e.id
+             WHERE p.account_id=?1 AND p.resume_at_ms IS NOT NULL AND e.remote_removed=0
+             ORDER BY p.resume_at_ms DESC,p.entry_id DESC LIMIT 1",
+            summary_select()
+        );
+        connection
+            .prepare_cached(&sql)?
+            .query_row([account_id], read_entry)
+            .optional()
+            .map_err(Into::into)
     }
 
     fn queue_karakeep(&self, delivery: &KarakeepDelivery) -> Result<(), BrookletError> {
@@ -1158,8 +1231,16 @@ impl Repository for SqliteRepository {
     }
 
     async fn acknowledge_mutation(&self, mutation: &PendingMutation) -> Result<(), BrookletError> {
-        let mutation = mutation.clone();
-        self.run(move |store| store.acknowledge_mutation(&mutation))
+        self.acknowledge_mutations(std::slice::from_ref(mutation))
+            .await
+    }
+
+    async fn acknowledge_mutations(
+        &self,
+        mutations: &[PendingMutation],
+    ) -> Result<(), BrookletError> {
+        let mutations = mutations.to_vec();
+        self.run(move |store| store.acknowledge_mutations(&mutations))
             .await
     }
 
@@ -1219,7 +1300,7 @@ impl Repository for SqliteRepository {
         account_id: i64,
         entries: &[Entry],
         removed_ids: &[EntryId],
-    ) -> Result<(), BrookletError> {
+    ) -> Result<Vec<EntryId>, BrookletError> {
         let entries = entries.to_vec();
         let removed_ids = removed_ids.to_vec();
         self.run(move |store| store.merge_changed_page(account_id, &entries, &removed_ids))
@@ -1274,8 +1355,23 @@ impl Repository for SqliteRepository {
         position: &ReaderPosition,
     ) -> Result<(), BrookletError> {
         let position = position.clone();
-        self.run(move |store| store.save_reader_position(account_id, &position))
+        self.run(move |store| store.save_reader_position(account_id, &position, None))
             .await
+    }
+
+    async fn save_reading_progress(
+        &self,
+        account_id: i64,
+        position: &ReaderPosition,
+        unfinished: bool,
+    ) -> Result<(), BrookletError> {
+        let position = position.clone();
+        self.run(move |store| store.save_reader_position(account_id, &position, Some(unfinished)))
+            .await
+    }
+
+    async fn resume_entry(&self, account_id: i64) -> Result<Option<Entry>, BrookletError> {
+        self.run(move |store| store.resume_entry(account_id)).await
     }
 
     async fn queue_karakeep(&self, delivery: &KarakeepDelivery) -> Result<(), BrookletError> {
@@ -1414,6 +1510,101 @@ mod tests {
                     .get::<_, String>(0))
                 .unwrap(),
             "keep me"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_reports_only_entries_that_enter_the_inbox() {
+        let repository = repository_with_entry().await;
+        let existing = example_entry();
+        let incoming = Entry {
+            id: 43,
+            ..existing.clone()
+        };
+        let page = [existing.clone(), incoming.clone()];
+        assert_eq!(
+            repository.merge_changed_page(1, &page, &[]).await.unwrap(),
+            [43]
+        );
+        assert!(
+            repository
+                .merge_changed_page(1, &page, &[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        repository.set_read_local(1, 43, true).await.unwrap();
+        assert!(
+            repository
+                .merge_changed_page(1, &page, &[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let pending = repository.pending_mutations(1).await.unwrap();
+        repository.acknowledge_mutations(&pending).await.unwrap();
+        assert_eq!(
+            repository.merge_changed_page(1, &page, &[]).await.unwrap(),
+            [43]
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_batch_preserves_a_newer_equal_valued_mutation() {
+        let repository = repository_with_entry().await;
+        repository
+            .merge_changed_page(
+                1,
+                &[Entry {
+                    id: 43,
+                    ..example_entry()
+                }],
+                &[],
+            )
+            .await
+            .unwrap();
+        repository
+            .set_read_many_local(1, &[42, 43], true)
+            .await
+            .unwrap();
+        let accepted = repository.pending_mutations(1).await.unwrap();
+        repository.set_read_local(1, 43, true).await.unwrap();
+        repository.acknowledge_mutations(&accepted).await.unwrap();
+        let remaining = repository.pending_mutations(1).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].entry_id, 43);
+        assert!(remaining[0].desired);
+    }
+
+    #[tokio::test]
+    async fn resume_candidate_uses_tracked_progress_and_ignores_finished_articles() {
+        let repository = repository_with_entry().await;
+        let position = ReaderPosition {
+            entry_id: 42,
+            first_visible_block: 8,
+            offset_px: 37,
+        };
+        repository.save_reader_position(1, &position).await.unwrap();
+        assert!(repository.resume_entry(1).await.unwrap().is_none());
+        repository
+            .save_reading_progress(1, &position, true)
+            .await
+            .unwrap();
+        let resume = repository.resume_entry(1).await.unwrap().unwrap();
+        assert_eq!(resume.id, 42);
+        assert!(resume.html.is_empty());
+        assert_eq!(
+            repository.reader_position(42).await.unwrap(),
+            Some(position.clone())
+        );
+        repository
+            .save_reading_progress(1, &position, false)
+            .await
+            .unwrap();
+        assert!(repository.resume_entry(1).await.unwrap().is_none());
+        assert_eq!(
+            repository.reader_position(42).await.unwrap(),
+            Some(position)
         );
     }
 
@@ -1626,7 +1817,7 @@ mod tests {
             .unwrap();
         // A malformed prior schema causes the second statement to fail.
         // Its first statement must also roll back.
-        connection.execute_batch("ALTER TABLE feeds DROP COLUMN parsing_error_message; ALTER TABLE feeds DROP COLUMN disabled; DROP INDEX entries_feed_order;").unwrap();
+        connection.execute_batch("ALTER TABLE feeds DROP COLUMN parsing_error_message; ALTER TABLE feeds DROP COLUMN disabled; DROP INDEX entries_feed_order; DROP INDEX reader_resume_order; ALTER TABLE reader_positions DROP COLUMN resume_at_ms;").unwrap();
         connection
             .pragma_update(None, "user_version", feeds_version)
             .unwrap();
@@ -2260,9 +2451,22 @@ mod tests {
             disabled: false,
         };
         repository
+            .merge_metadata(
+                1,
+                std::slice::from_ref(&category),
+                std::slice::from_ref(&feed),
+            )
+            .await
+            .unwrap();
+        let writes = repository.store.connection.lock().unwrap().total_changes();
+        repository
             .merge_metadata(1, &[category], &[feed])
             .await
             .unwrap();
+        assert_eq!(
+            repository.store.connection.lock().unwrap().total_changes(),
+            writes
+        );
         assert_eq!(repository.categories_cached(1).await.unwrap().len(), 1);
         assert_eq!(repository.feeds_cached(1, None).await.unwrap().len(), 1);
 

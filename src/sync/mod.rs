@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -29,6 +30,7 @@ pub struct SyncResult {
     pub inbox: Vec<Entry>,
     pub inbox_next: Option<EntryCursor>,
     pub fetched: usize,
+    pub arrivals: HashSet<EntryId>,
 }
 
 pub trait MinifluxApiFactory: Send + Sync {
@@ -113,6 +115,17 @@ pub trait SyncService: Send + Sync {
         entry_id: EntryId,
     ) -> Result<Option<ReaderPosition>, BrookletError>;
     async fn save_reader_position(&self, position: &ReaderPosition) -> Result<(), BrookletError>;
+    async fn save_reading_progress(
+        &self,
+        position: &ReaderPosition,
+        unfinished: bool,
+    ) -> Result<(), BrookletError> {
+        let _ = unfinished;
+        self.save_reader_position(position).await
+    }
+    async fn resume_entry(&self) -> Result<Option<Entry>, BrookletError> {
+        Ok(None)
+    }
     async fn queue_karakeep(&self, entry: &Entry) -> Result<(), BrookletError>;
     async fn unfinished_karakeep(&self) -> Result<Vec<KarakeepDelivery>, BrookletError> {
         Ok(Vec::new())
@@ -282,9 +295,7 @@ impl AccountSyncService {
                     MutationField::Starred => api.set_starred(&ids, desired).await?,
                 }
                 // Commit each accepted batch before any subsequent request can fail.
-                for mutation in &batch {
-                    self.repository.acknowledge_mutation(mutation).await?;
-                }
+                self.repository.acknowledge_mutations(&batch).await?;
             }
         }
         Ok(())
@@ -383,7 +394,9 @@ impl AccountSyncService {
             let mut result = result;
             for seconds in [2, 5, 10] {
                 tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
-                result = self.pull_incoming(account, api.as_ref()).await?;
+                let mut next = self.pull_incoming(account, api.as_ref()).await?;
+                next.arrivals.extend(result.arrivals);
+                result = next;
             }
             Ok(result)
         })
@@ -448,6 +461,7 @@ impl AccountSyncService {
         let mut newest = cursor;
         let mut after_entry_id = None;
         let mut fetched = 0;
+        let mut arrivals = HashSet::new();
         loop {
             // Serialize each fetch+merge with uploads: a response fetched before
             // an upload must be merged before its local protection is acknowledged.
@@ -495,9 +509,11 @@ impl AccountSyncService {
                     _ => {}
                 }
             }
-            self.repository
-                .merge_changed_page(account.id, &entries, &removed)
-                .await?;
+            arrivals.extend(
+                self.repository
+                    .merge_changed_page(account.id, &entries, &removed)
+                    .await?,
+            );
             fetched += page_len;
             after_entry_id = Some(previous);
             if page_len < PAGE_SIZE || ceiling.is_none() {
@@ -508,7 +524,7 @@ impl AccountSyncService {
         newest = cursor.max(newest.min(ceiling.unwrap_or(cursor)));
         tokio::time::timeout(
             std::time::Duration::from_secs(60),
-            self.reconcile_missing(account, api),
+            self.reconcile_missing(account, api, &mut arrivals),
         )
         .await
         .map_err(|_| BrookletError::SyncResponse("remote reconciliation timed out"))??;
@@ -526,12 +542,14 @@ impl AccountSyncService {
             inbox: page.entries,
             inbox_next: page.next,
             fetched,
+            arrivals,
         })
     }
     async fn reconcile_missing(
         &self,
         account: &crate::model::Account,
         api: &dyn MinifluxApi,
+        arrivals: &mut HashSet<EntryId>,
     ) -> Result<(), BrookletError> {
         let cached = self.repository.cached_entry_ids(account.id).await?;
         if cached.is_empty() {
@@ -580,9 +598,11 @@ impl AccountSyncService {
                         .await?;
                 }
                 Ok(dto) if dto.id == id && matches!(dto.status.as_str(), "read" | "unread") => {
-                    self.repository
-                        .merge_changed_page(account.id, &[map_entry(account.id, dto)], &[])
-                        .await?;
+                    arrivals.extend(
+                        self.repository
+                            .merge_changed_page(account.id, &[map_entry(account.id, dto)], &[])
+                            .await?,
+                    );
                 }
                 Ok(_) => return Err(BrookletError::SyncResponse("invalid entry confirmation")),
                 Err(error) => return Err(error),
@@ -750,6 +770,22 @@ impl SyncService for AccountSyncService {
         self.repository
             .save_reader_position(account.id, position)
             .await
+    }
+    async fn save_reading_progress(
+        &self,
+        position: &ReaderPosition,
+        unfinished: bool,
+    ) -> Result<(), BrookletError> {
+        let account = self.configured_account().await?;
+        self.repository
+            .save_reading_progress(account.id, position, unfinished)
+            .await
+    }
+    async fn resume_entry(&self) -> Result<Option<Entry>, BrookletError> {
+        let Some(account) = self.repository.account().await? else {
+            return Ok(None);
+        };
+        self.repository.resume_entry(account.id).await
     }
     async fn queue_karakeep(&self, entry: &Entry) -> Result<(), BrookletError> {
         let account = self.configured_account().await?;
@@ -1147,7 +1183,7 @@ mod tests {
             _account_id: i64,
             entries: &[Entry],
             removed_ids: &[i64],
-        ) -> Result<(), BrookletError> {
+        ) -> Result<Vec<i64>, BrookletError> {
             let pending = self.pending.lock().unwrap().clone();
             let mut stored = self.entries.lock().unwrap();
             stored.retain(|entry| {
@@ -1173,7 +1209,7 @@ mod tests {
                     stored.push(incoming.clone());
                 }
             }
-            Ok(())
+            Ok(Vec::new())
         }
 
         async fn unread_entries(&self, _account_id: i64) -> Result<Vec<Entry>, BrookletError> {

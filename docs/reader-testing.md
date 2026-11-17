@@ -126,6 +126,11 @@ Undo mirrors this with an opacity-only reveal, preserving the current selection
 and viewport anchor. The fixture also checks bulk restoration, offscreen reveal
 expiry and restoring the final article into an empty Inbox.
 
+## Reading prototypes
+
+`brooklet --reading-prototypes-test` uses a synthetic cache to exercise Inbox
+arrivals and return, Continue reading, and reader retry.
+
 ## Reader toolbar regression
 
 `brooklet --reader-test` runs the isolated reader pipeline and interaction

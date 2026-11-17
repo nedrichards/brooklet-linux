@@ -336,8 +336,15 @@ pub fn smoke_test() -> Result<(), adw::glib::BoolError> {
     assert_eq!(model.store.n_items(), 256);
     assert_eq!(inbox::selected_from_list(&list).unwrap().id, 4880);
     assert!((0..model.store.n_items()).all(|i| !inbox::entry_at(&model, i).unwrap().read));
-    pager.reload();
-    let (_, limit, done) = requests.borrow_mut().pop_front().unwrap();
+    pager.snapshot(page(5002));
+    assert_eq!(
+        model.store.n_items(),
+        256,
+        "A sync snapshot truncated the visible prefix"
+    );
+    assert_eq!(inbox::selected_from_list(&list).unwrap().id, 4880);
+    let (after, limit, done) = requests.borrow_mut().pop_front().unwrap();
+    assert!(after.is_none());
     assert_eq!(limit, 256, "Refresh forgot visited prefix");
     pager.clear();
     done(Ok(page(6000)));

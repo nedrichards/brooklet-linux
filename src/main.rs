@@ -59,6 +59,15 @@ fn main() -> adw::glib::ExitCode {
             }
         };
     }
+    if std::env::args_os().any(|argument| argument == "--reading-prototypes-test") {
+        return match application::reading_prototypes_test() {
+            Ok(()) => adw::glib::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("Brooklet reading prototype regression failed: {error}");
+                adw::glib::ExitCode::FAILURE
+            }
+        };
+    }
     if std::env::args_os().any(|argument| argument == "--reader-test") {
         return match application::reader_test() {
             Ok(()) => adw::glib::ExitCode::SUCCESS,

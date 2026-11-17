@@ -80,6 +80,15 @@ pub trait Repository: Send + Sync {
         account_id: i64,
     ) -> Result<Vec<PendingMutation>, BrookletError>;
     async fn acknowledge_mutation(&self, mutation: &PendingMutation) -> Result<(), BrookletError>;
+    async fn acknowledge_mutations(
+        &self,
+        mutations: &[PendingMutation],
+    ) -> Result<(), BrookletError> {
+        for mutation in mutations {
+            self.acknowledge_mutation(mutation).await?;
+        }
+        Ok(())
+    }
     async fn entries_for_view(
         &self,
         account_id: i64,
@@ -149,14 +158,16 @@ pub trait Repository: Send + Sync {
         let _ = account_id;
         Ok(None)
     }
+    /// Merge server changes and return IDs that entered the local Inbox.
     async fn merge_changed_page(
         &self,
         account_id: i64,
         entries: &[Entry],
         removed_ids: &[EntryId],
-    ) -> Result<(), BrookletError> {
+    ) -> Result<Vec<EntryId>, BrookletError> {
         let _ = removed_ids;
-        self.replace_unread_snapshot(account_id, entries).await
+        self.replace_unread_snapshot(account_id, entries).await?;
+        Ok(Vec::new())
     }
     async fn complete_sync(
         &self,
@@ -216,6 +227,19 @@ pub trait Repository: Send + Sync {
     ) -> Result<(), BrookletError> {
         let _ = (account_id, position);
         Ok(())
+    }
+    async fn save_reading_progress(
+        &self,
+        account_id: i64,
+        position: &ReaderPosition,
+        unfinished: bool,
+    ) -> Result<(), BrookletError> {
+        let _ = unfinished;
+        self.save_reader_position(account_id, position).await
+    }
+    async fn resume_entry(&self, account_id: i64) -> Result<Option<Entry>, BrookletError> {
+        let _ = account_id;
+        Ok(None)
     }
     async fn queue_karakeep(&self, delivery: &KarakeepDelivery) -> Result<(), BrookletError> {
         let _ = delivery;

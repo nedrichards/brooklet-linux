@@ -668,10 +668,15 @@ async fn direct_delivery_missing_key_is_actionable_without_breaking_integration_
 async fn refresh_pulls_late_articles_without_repeating_deliveries() {
     let (repo, service, server) = fixture().await;
     service.set_read_local(42, true).await.unwrap();
+    // Reimport this article on the first round while 101 arrives later.
+    repo.merge_changed_page(1, &[], &[99]).await.unwrap();
     server.read_status.store(503, Ordering::Release);
     server.refresh_mode.store(1, Ordering::Release);
     let start = tokio::time::Instant::now();
     let result = service.refresh_feeds().await.unwrap();
+    assert!(result.arrivals.contains(&101));
+    assert!(result.arrivals.contains(&99));
+    assert!(!result.arrivals.contains(&42));
     assert!(result.inbox.iter().any(|entry| entry.id == 101));
     assert!(!result.inbox.iter().any(|entry| entry.id == 42));
     assert_eq!(

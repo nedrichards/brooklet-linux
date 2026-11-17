@@ -24,7 +24,11 @@ pub struct InboxChanges {
 }
 
 impl InboxChanges {
-    pub fn between(before: &[Entry], after: &[Entry]) -> Self {
+    pub fn between(
+        before: &[Entry],
+        after: &[Entry],
+        arrivals: &std::collections::HashSet<i64>,
+    ) -> Self {
         let previous = before
             .iter()
             .map(|entry| (entry.id, entry))
@@ -32,7 +36,7 @@ impl InboxChanges {
         Self {
             added: after
                 .iter()
-                .filter(|entry| !previous.contains_key(&entry.id))
+                .filter(|entry| arrivals.contains(&entry.id) && !previous.contains_key(&entry.id))
                 .count(),
             updated: after
                 .iter()
@@ -695,7 +699,7 @@ mod tests {
         let mut changed = example_entry(2);
         changed.title = "Updated story".into();
         let after = vec![example_entry(4), changed, example_entry(3)];
-        let summary = InboxChanges::between(&before, &after);
+        let summary = InboxChanges::between(&before, &after, &[4].into());
         assert_eq!(
             summary,
             InboxChanges {
@@ -707,20 +711,26 @@ mod tests {
             summary.toast_message(),
             Some("1 new article · 1 updated".into())
         );
-        assert_eq!(InboxChanges::between(&after, &after).toast_message(), None);
+        assert_eq!(
+            InboxChanges::between(&after, &after, &[3].into()).toast_message(),
+            None
+        );
     }
 
     #[test]
     fn sync_toast_ignores_articles_leaving_the_inbox() {
         let before = vec![example_entry(1)];
-        let changes = InboxChanges::between(&before, &[]);
+        // A previously off-page unread article replaces the removed row.
+        let after = vec![example_entry(2)];
+        let changes = InboxChanges::between(&before, &after, &Default::default());
 
         assert_eq!(changes.toast_message(), None);
     }
 
     #[test]
     fn sync_toast_pluralizes_arrivals() {
-        let summary = InboxChanges::between(&[], &[example_entry(1), example_entry(2)]);
+        let summary =
+            InboxChanges::between(&[], &[example_entry(1), example_entry(2)], &[1, 2].into());
         assert_eq!(summary.toast_message(), Some("2 new articles".into()));
     }
 

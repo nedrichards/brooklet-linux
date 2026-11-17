@@ -116,6 +116,14 @@ Adw.ApplicationWindow window {
                       label: _("Pull to refresh");
                       styles ["pull-refresh-hint"]
                     }
+                    [overlay]
+                    Gtk.Button inbox_arrivals {
+                      visible: false;
+                      halign: center;
+                      valign: start;
+                      margin-top: 8;
+                      styles ["pill", "osd"]
+                    }
                   }
                 };
               };
@@ -393,6 +401,24 @@ Adw.ApplicationWindow window {
                 icon-name: "x-office-document-symbolic";
                 title: _("Choose an article");
                 description: _("Open an article to start reading.");
+                child: Gtk.Button continue_reading {
+                  visible: false;
+                  halign: center;
+                  styles ["pill"]
+                  child: Gtk.Box {
+                    orientation: vertical;
+                    spacing: 3;
+                    Gtk.Label {
+                      label: _("Continue reading");
+                      styles ["heading"]
+                    }
+                    Gtk.Label continue_reading_title {
+                      ellipsize: end;
+                      max-width-chars: 36;
+                      styles ["dim-label"]
+                    }
+                  };
+                };
               }
 
               Gtk.ScrolledWindow reader_scroller {

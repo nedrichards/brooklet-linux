@@ -312,16 +312,25 @@ impl AppController {
         );
     }
 
-    pub fn save_reader_position(
+    pub fn save_reading_progress(
         &self,
         position: ReaderPosition,
+        unfinished: bool,
         callback: impl FnOnce(Result<(), BrookletError>) + 'static,
     ) {
         let service = self.sync_service.clone();
         self.dispatch_write(
-            async move { service.save_reader_position(&position).await },
+            async move { service.save_reading_progress(&position, unfinished).await },
             callback,
         );
+    }
+
+    pub fn resume_entry(
+        &self,
+        callback: impl FnOnce(Result<Option<Entry>, BrookletError>) + 'static,
+    ) {
+        let service = self.sync_service.clone();
+        self.dispatch(async move { service.resume_entry().await }, callback);
     }
 
     pub fn queue_karakeep(
