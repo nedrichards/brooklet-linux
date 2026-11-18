@@ -160,7 +160,6 @@ struct ReaderUi {
     active_id: Rc<Cell<Option<i64>>>,
     restoring: Rc<Cell<bool>>,
     document_ready: Rc<Cell<bool>>,
-    outline: Option<Rc<ui::reader_outline::Outline>>,
     positions: Rc<RefCell<HashMap<i64, ReaderPosition>>>,
     open_generation: Rc<Cell<u64>>,
     image_requests: Rc<RefCell<Vec<tokio::task::AbortHandle>>>,
@@ -185,7 +184,6 @@ struct WeakReaderUi {
     active_id: Rc<Cell<Option<i64>>>,
     restoring: Rc<Cell<bool>>,
     document_ready: Rc<Cell<bool>>,
-    outline: Option<Rc<ui::reader_outline::Outline>>,
     positions: Rc<RefCell<HashMap<i64, ReaderPosition>>>,
     open_generation: Rc<Cell<u64>>,
     image_requests: Rc<RefCell<Vec<tokio::task::AbortHandle>>>,
@@ -210,7 +208,6 @@ impl ReaderUi {
             active_id: self.active_id.clone(),
             restoring: self.restoring.clone(),
             document_ready: self.document_ready.clone(),
-            outline: self.outline.clone(),
             positions: self.positions.clone(),
             open_generation: self.open_generation.clone(),
             image_requests: self.image_requests.clone(),
@@ -237,7 +234,6 @@ impl WeakReaderUi {
             active_id: self.active_id.clone(),
             restoring: self.restoring.clone(),
             document_ready: self.document_ready.clone(),
-            outline: self.outline.clone(),
             positions: self.positions.clone(),
             open_generation: self.open_generation.clone(),
             image_requests: self.image_requests.clone(),
@@ -657,14 +653,6 @@ impl BrookletApplication {
                     &toast_overlay,
                 );
             }
-            let outline =
-                (std::env::var("BROOKLET_ARTICLE_OUTLINE").as_deref() == Ok("1")).then(|| {
-                    Rc::new(ui::reader_outline::Outline::install(
-                        &builder.object("reader_header").unwrap(),
-                        &reader_content,
-                        &reader_scroller,
-                    ))
-                });
             let reader_ui = ReaderUi {
                 split: inbox_split,
                 title: reader_title,
@@ -677,7 +665,6 @@ impl BrookletApplication {
                 active_id: open_id,
                 restoring: Rc::new(Cell::new(false)),
                 document_ready: Rc::new(Cell::new(false)),
-                outline,
                 positions: Rc::new(RefCell::new(HashMap::new())),
                 open_generation: Rc::new(Cell::new(0)),
                 image_requests: Rc::new(RefCell::new(Vec::new())),
@@ -3095,9 +3082,6 @@ fn open_article(reader_ui: &ReaderUi, inbox_ui: &InboxUi, entry: &Entry) {
         request.abort();
     }
     reader_ui.document_ready.set(false);
-    if let Some(outline) = &reader_ui.outline {
-        outline.reset();
-    }
     reader_ui.restoring.set(true);
     let generation = reader_ui.open_generation.get().wrapping_add(1);
     reader_ui.open_generation.set(generation);
@@ -3175,9 +3159,6 @@ fn open_article(reader_ui: &ReaderUi, inbox_ui: &InboxUi, entry: &Entry) {
                 }
                 reader.document_ready.set(true);
                 reader.restoring.set(false);
-                if let Some(outline) = &reader.outline {
-                    outline.ready(content);
-                }
                 if let Some(images) = reader.images.borrow().as_ref() {
                     images.queue();
                 }
@@ -6614,10 +6595,6 @@ fn check_reading_prototypes(
         Some(long.id)
     );
 
-    if let Some(outline) = &reader.outline {
-        outline.check_jump_and_return(&reader.scroller)?;
-    }
-
     let selected = 165;
     ui::inbox::select_id(&inbox.list, selected);
     let adjustment = inbox.scroller.vadjustment();
@@ -6783,16 +6760,11 @@ fn smoke_test_reader_pipeline(fixture: ReaderFixture) -> Result<(), adw::glib::B
         delivery_state: None,
         delivery_error: None,
     };
-    let paragraphs = if fixture == ReaderFixture::Prototypes {
-        let section = "<p>Long paragraph</p>".repeat(80);
-        format!("<h2>First section</h2>{section}<h2>Second section</h2>{section}")
-    } else {
-        "<p>Long paragraph</p>".repeat(160)
-    };
     let long = entry(
         1,
         format!(
-            "{paragraphs}<table>{}</table>",
+            "{}<table>{}</table>",
+            "<p>Long paragraph</p>".repeat(160),
             "<tr><th>Heading</th><td>Cell</td></tr>".repeat(40)
         ),
     );
@@ -6855,15 +6827,6 @@ fn smoke_test_reader_pipeline(fixture: ReaderFixture) -> Result<(), adw::glib::B
         active_id,
         restoring: Rc::new(Cell::new(false)),
         document_ready: Rc::new(Cell::new(false)),
-        outline: (fixture == ReaderFixture::Prototypes
-            && std::env::var("BROOKLET_ARTICLE_OUTLINE").as_deref() == Ok("1"))
-        .then(|| {
-            Rc::new(ui::reader_outline::Outline::install(
-                &builder.object("reader_header").unwrap(),
-                &builder.object("reader_content").unwrap(),
-                &builder.object("reader_scroller").unwrap(),
-            ))
-        }),
         positions: Rc::new(RefCell::new(HashMap::new())),
         open_generation: Rc::new(Cell::new(0)),
         image_requests: Rc::new(RefCell::new(Vec::new())),

@@ -3,7 +3,6 @@ pub mod inbox;
 pub mod inbox_feedback;
 pub mod reader;
 pub mod reader_images;
-pub mod reader_outline;
 pub mod reconnect;
 pub mod setup;
 pub mod signal_scope;

@@ -129,17 +129,7 @@ expiry and restoring the final article into an empty Inbox.
 ## Reading prototypes
 
 `brooklet --reading-prototypes-test` uses a synthetic cache to exercise Inbox
-arrivals and return, Continue reading, and reader retry. Set
-`BROOKLET_ARTICLE_OUTLINE=1` to include the outline's jump and return in the
-fixture. Outline controls only appear for articles with multiple headings and
-enough content to navigate.
-
-Quit any running instance before launching the development Flatpak with the
-outline enabled.
-
-```sh
-flatpak run --user --env=BROOKLET_ARTICLE_OUTLINE=1 com.nedrichards.brooklet.Devel
-```
+arrivals and return, Continue reading, and reader retry.
 
 ## Reader toolbar regression
 
