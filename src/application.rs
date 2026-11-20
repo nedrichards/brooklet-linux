@@ -1817,30 +1817,30 @@ fn install_article_cursor_keys(
             }
             if command == keyboard::Command::Read {
                 match &scope {
-                    ArticleKeyFocus::List(list) => {
-                        if let Some(entry) = ui::inbox::selected_from_list(list) {
-                            if !entry.read
-                                && (list == &read_context.inbox.list
-                                    || list.has_css_class("unread-only-list"))
-                                && !read_context
-                                    .inbox
-                                    .read_in_flight
-                                    .borrow()
-                                    .contains(&entry.id)
-                            {
-                                ui::inbox::select_next_unread(
-                                    list,
-                                    &read_context.inbox.read_in_flight.borrow(),
-                                );
-                            }
-                            toggle_read(read_context.clone(), entry, Some(list.clone()), None);
-                            return adw::glib::Propagation::Stop;
+                    ArticleKeyFocus::List(list)
+                        if let Some(entry) = ui::inbox::selected_from_list(list) =>
+                    {
+                        if !entry.read
+                            && (list == &read_context.inbox.list
+                                || list.has_css_class("unread-only-list"))
+                            && !read_context
+                                .inbox
+                                .read_in_flight
+                                .borrow()
+                                .contains(&entry.id)
+                        {
+                            ui::inbox::select_next_unread(
+                                list,
+                                &read_context.inbox.read_in_flight.borrow(),
+                            );
                         }
+                        toggle_read(read_context.clone(), entry, Some(list.clone()), None);
+                        return adw::glib::Propagation::Stop;
                     }
                     ArticleKeyFocus::Reader => {
                         return activate("win.keep-unread");
                     }
-                    ArticleKeyFocus::Other => {}
+                    ArticleKeyFocus::List(_) | ArticleKeyFocus::Other => {}
                 }
             }
             let action = match command {
@@ -5085,8 +5085,8 @@ fn smoke_test_inbox_undo(
         .any(|(alpha, _, _, _)| *alpha > 0.0 && *alpha < 0.99);
     if faded != animate
         || samples.last().is_none_or(|sample| sample.0 < 0.99)
-        || samples.windows(2).any(|pair| {
-            pair[1].0 + 0.01 < pair[0].0 || pair[1].1 != pair[0].1 || pair[1].2 != pair[0].2
+        || samples.array_windows().any(|[previous, next]| {
+            next.0 + 0.01 < previous.0 || next.1 != previous.1 || next.2 != previous.2
         })
         || samples.iter().any(|sample| {
             sample
@@ -5292,10 +5292,9 @@ fn smoke_test_inbox_read_button(
                 "Read dismissal ignored reduced motion"
             ));
         }
-        if fading
-            .windows(2)
-            .any(|pair| pair[1].0 > pair[0].0 || pair[1].1 != pair[0].1 || pair[1].2 != pair[0].2)
-        {
+        if fading.array_windows().any(|[previous, next]| {
+            next.0 > previous.0 || next.1 != previous.1 || next.2 != previous.2
+        }) {
             return Err(adw::glib::bool_error!(
                 "Read dismissal resized or restarted the outgoing row"
             ));
