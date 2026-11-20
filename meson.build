@@ -1,6 +1,6 @@
 project(
   'brooklet',
-  version: '0.1.2',
+  version: '0.1.3',
   meson_version: '>= 1.4.0',
   license: 'GPL-3.0-or-later',
 )

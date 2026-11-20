@@ -51,6 +51,13 @@
     <display_length compare="ge">360</display_length>
   </requires>
   <releases>
+    <release version="0.1.3" date="2026-11-20">
+      <description>
+        <p>Inbox refresh and paging are more reliable, with improved read transitions and scroll position preservation.</p>
+        <p>New arrival notices and reading continuity make it easier to return to your articles.</p>
+        <p>Dependencies and security updates improve reliability and maintenance.</p>
+      </description>
+    </release>
     <release version="0.1.2" date="2026-10-17">
       <description>
         <p>Inbox, Saved, Library and the reader share a more consistent appearance, with global controls available throughout collection navigation.</p>
