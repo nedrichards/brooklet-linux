@@ -126,8 +126,11 @@ struct ListPlace {
     value: f64,
 }
 
+const INBOX_ARRIVALS_TIMEOUT_SECS: u32 = 10;
+
 struct InboxArrivals {
-    button: adw::glib::WeakRef<gtk::Button>,
+    overlay: adw::glib::WeakRef<adw::ToastOverlay>,
+    toast: adw::glib::WeakRef<adw::Toast>,
     pending: RefCell<HashSet<i64>>,
     return_place: RefCell<Option<ListPlace>>,
     queued: Cell<bool>,
@@ -136,14 +139,33 @@ struct InboxArrivals {
 impl InboxArrivals {
     fn new(builder: &gtk::Builder) -> Rc<Self> {
         Rc::new(Self {
-            button: builder
-                .object::<gtk::Button>("inbox_arrivals")
+            overlay: builder
+                .object::<adw::ToastOverlay>("toast_overlay")
                 .unwrap()
                 .downgrade(),
+            toast: adw::glib::WeakRef::new(),
             pending: RefCell::default(),
             return_place: RefCell::default(),
             queued: Cell::default(),
         })
+    }
+
+    fn is_current(&self, toast: &adw::Toast) -> bool {
+        self.toast.upgrade().as_ref() == Some(toast)
+    }
+
+    fn hide(&self) {
+        let toast = self.toast.upgrade();
+        self.toast.set(None);
+        if let Some(toast) = toast {
+            toast.dismiss();
+        }
+    }
+
+    fn clear(&self) {
+        self.pending.borrow_mut().clear();
+        self.return_place.borrow_mut().take();
+        self.hide();
     }
 }
 
@@ -2273,11 +2295,7 @@ fn begin_sync(
 fn queue_inbox_arrivals(inbox: &InboxUi) {
     if inbox.arrivals.pending.borrow().is_empty()
         && inbox.arrivals.return_place.borrow().is_none()
-        && inbox
-            .arrivals
-            .button
-            .upgrade()
-            .is_none_or(|button| !button.is_visible())
+        && inbox.arrivals.toast.upgrade().is_none()
     {
         return;
     }
@@ -2299,12 +2317,11 @@ fn queue_inbox_arrivals(inbox: &InboxUi) {
 }
 
 fn update_inbox_arrivals(inbox: &InboxUi) {
-    let Some(button) = inbox.arrivals.button.upgrade() else {
+    if !inbox.scroller.is_mapped() {
         return;
-    };
+    }
     if inbox.arrivals.return_place.borrow().is_some() {
-        button.set_label("Back to where you were");
-        button.set_visible(true);
+        show_inbox_arrivals(inbox, "New articles shown", "Back to where you were");
         return;
     }
     let adjustment = inbox.scroller.vadjustment();
@@ -2343,57 +2360,100 @@ fn update_inbox_arrivals(inbox: &InboxUi) {
             }
         }
     }
+    drop(pending);
     if count > 0 {
-        button.set_label(&format!("{count} new above"));
+        show_inbox_arrivals(inbox, &format!("{count} new above"), "Show");
+    } else {
+        inbox.arrivals.hide();
     }
-    button.set_visible(count > 0);
+}
+
+fn show_inbox_arrivals(inbox: &InboxUi, title: &str, action: &str) {
+    if let Some(toast) = inbox.arrivals.toast.upgrade() {
+        if toast.button_label().as_deref() == Some(action) {
+            if toast.title().as_deref() != Some(title) {
+                toast.set_title(title);
+            }
+            return;
+        }
+        inbox.arrivals.hide();
+    }
+    let Some(overlay) = inbox.arrivals.overlay.upgrade() else {
+        return;
+    };
+    let toast = adw::Toast::new(title);
+    toast.set_use_markup(false);
+    toast.set_button_label(Some(action));
+    toast.set_timeout(INBOX_ARRIVALS_TIMEOUT_SECS);
+    toast.connect_dismissed({
+        let arrivals = Rc::downgrade(&inbox.arrivals);
+        move |toast| {
+            if let Some(arrivals) = arrivals.upgrade()
+                && arrivals.is_current(toast)
+            {
+                arrivals.toast.set(None);
+                arrivals.clear();
+            }
+        }
+    });
+    toast.connect_button_clicked({
+        let weak = inbox.downgrade();
+        move |toast| {
+            if let Some(inbox) = weak.upgrade()
+                && inbox.arrivals.is_current(toast)
+            {
+                activate_inbox_arrivals(&inbox);
+            }
+        }
+    });
+    inbox.arrivals.toast.set(Some(&toast));
+    overlay.add_toast(toast);
+}
+
+fn activate_inbox_arrivals(inbox: &InboxUi) {
+    inbox.arrivals.hide();
+    let place = inbox.arrivals.return_place.borrow_mut().take();
+    if let Some(place) = place {
+        restore_list_place(&inbox.list, &inbox.scroller, place);
+    } else {
+        let destination = inbox
+            .arrivals
+            .pending
+            .borrow_mut()
+            .drain()
+            .filter_map(|id| {
+                ui::inbox::position_of_id(&inbox.list, id).map(|position| (position, id))
+            })
+            .min();
+        if let Some((position, id)) = destination {
+            *inbox.arrivals.return_place.borrow_mut() =
+                Some(capture_list_place(&inbox.list, &inbox.scroller));
+            let adjustment = inbox.scroller.vadjustment();
+            if position == 0 {
+                adjustment.set_value(adjustment.lower());
+            } else {
+                restore_list_place(
+                    &inbox.list,
+                    &inbox.scroller,
+                    ListPlace {
+                        entry_id: Some(id),
+                        row_y: 0.0,
+                        value: adjustment.lower(),
+                    },
+                );
+            }
+        }
+    }
+    update_inbox_arrivals(inbox);
 }
 
 fn install_inbox_arrivals(inbox: &InboxUi) {
-    let button = inbox
-        .arrivals
-        .button
-        .upgrade()
-        .expect("Inbox arrivals button");
-    button.connect_clicked({
-        let weak = inbox.downgrade();
+    inbox.scroller.connect_unmap({
+        let arrivals = Rc::downgrade(&inbox.arrivals);
         move |_| {
-            let Some(inbox) = weak.upgrade() else {
-                return;
-            };
-            let place = inbox.arrivals.return_place.borrow_mut().take();
-            if let Some(place) = place {
-                restore_list_place(&inbox.list, &inbox.scroller, place);
-            } else {
-                let destination = inbox
-                    .arrivals
-                    .pending
-                    .borrow_mut()
-                    .drain()
-                    .filter_map(|id| {
-                        ui::inbox::position_of_id(&inbox.list, id).map(|position| (position, id))
-                    })
-                    .min();
-                if let Some((position, id)) = destination {
-                    *inbox.arrivals.return_place.borrow_mut() =
-                        Some(capture_list_place(&inbox.list, &inbox.scroller));
-                    let adjustment = inbox.scroller.vadjustment();
-                    if position == 0 {
-                        adjustment.set_value(adjustment.lower());
-                    } else {
-                        restore_list_place(
-                            &inbox.list,
-                            &inbox.scroller,
-                            ListPlace {
-                                entry_id: Some(id),
-                                row_y: 0.0,
-                                value: adjustment.lower(),
-                            },
-                        );
-                    }
-                }
+            if let Some(arrivals) = arrivals.upgrade() {
+                arrivals.clear();
             }
-            update_inbox_arrivals(&inbox);
         }
     });
     inbox.scroller.vadjustment().connect_value_changed({
@@ -6624,13 +6684,43 @@ fn check_reading_prototypes(
             arrivals: [arrived_id].into(),
         },
     );
-    let arrivals = builder.object::<gtk::Button>("inbox_arrivals").unwrap();
-    wait_for("New above", || arrivals.is_mapped())?;
-    assert_eq!(arrivals.label().as_deref(), Some("1 new above"));
-    arrivals.emit_clicked();
+    fn toast_button(widget: &gtk::Widget, label: &str) -> Option<gtk::Button> {
+        if let Some(button) = widget.downcast_ref::<gtk::Button>()
+            && button.is_mapped()
+            && button.label().as_deref() == Some(label)
+        {
+            return Some(button.clone());
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            if let Some(button) = toast_button(&widget, label) {
+                return Some(button);
+            }
+            child = widget.next_sibling();
+        }
+        None
+    }
+
+    let overlay = builder
+        .object::<adw::ToastOverlay>("toast_overlay")
+        .unwrap();
+    let button = |label| toast_button(overlay.upcast_ref(), label);
+    let current_toast = || inbox.arrivals.toast.upgrade();
+    wait_for("Inbox toast action", || button("Show").is_some())?;
+    let toast = current_toast().unwrap();
+    assert_eq!(toast.title().as_deref(), Some("1 new above"));
+    assert_eq!(toast.button_label().as_deref(), Some("Show"));
+    button("Show").unwrap().emit_clicked();
     wait_for("revealed arrivals", || adjustment.value() < 2.0)?;
-    assert_eq!(arrivals.label().as_deref(), Some("Back to where you were"));
-    arrivals.emit_clicked();
+    let toast = current_toast().unwrap();
+    assert_eq!(
+        toast.button_label().as_deref(),
+        Some("Back to where you were")
+    );
+    wait_for("Inbox return toast action", || {
+        button("Back to where you were").is_some()
+    })?;
+    button("Back to where you were").unwrap().emit_clicked();
     frames(&inbox.list, 4)?;
     let restored = capture_list_place(&inbox.list, &inbox.scroller);
     assert_eq!(restored.entry_id, place.entry_id);
@@ -6642,6 +6732,25 @@ fn check_reading_prototypes(
     );
     assert_eq!(ui::inbox::selected_id(&inbox.list), Some(selected));
     assert!((reader.scroller.vadjustment().value() - reader_offset).abs() < 2.0);
+
+    inbox.arrivals.pending.borrow_mut().insert(arrived_id);
+    update_inbox_arrivals(inbox);
+    current_toast().unwrap().dismiss();
+    update_inbox_arrivals(inbox);
+    assert!(current_toast().is_none());
+    assert!((adjustment.value() - restored.value).abs() < 2.0);
+
+    inbox.arrivals.pending.borrow_mut().insert(arrived_id);
+    update_inbox_arrivals(inbox);
+    assert_eq!(
+        current_toast().unwrap().timeout(),
+        INBOX_ARRIVALS_TIMEOUT_SECS
+    );
+    ui::test_support::pump(Duration::from_secs(u64::from(INBOX_ARRIVALS_TIMEOUT_SECS)));
+    wait_for("Inbox update timeout", || current_toast().is_none())?;
+    update_inbox_arrivals(inbox);
+    assert!(current_toast().is_none());
+    assert!((adjustment.value() - restored.value).abs() < 2.0);
 
     let empty = Entry {
         id: 3,
