@@ -2,7 +2,7 @@
 name = "brooklet"
 version = "0.1.2"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.95"
 license = "GPL-3.0-or-later"
 description = "An opinionated, offline-first Miniflux client for GNOME"
 repository = "https://github.com/nedrichards/brooklet-linux"
@@ -36,7 +36,7 @@ tokio = { version = "1.53.3", features = ["rt-multi-thread", "sync", "net", "tim
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
 url = { version = "2.5.8", features = ["serde"] }
-oo7 = "0.6.0"
+oo7 = "0.7.2"
 glycin = { version = "4.0.2", default-features = false, features = ["gdk4", "tokio"], optional = true }
 
 [dependencies.gtk]
