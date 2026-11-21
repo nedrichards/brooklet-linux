@@ -5,6 +5,9 @@ permissions:
 
 on:
   push:
+    # Release tags point to source already audited on a branch.
+    branches:
+      - '**'
     paths:
       - '**/Cargo.lock'
       - '**/Cargo.toml'
